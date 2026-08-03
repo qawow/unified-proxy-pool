@@ -1,0 +1,75 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: upp-redis
+    restart: unless-stopped
+    volumes:
+      - ./data/redis:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  unified-proxy-pool:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: unified-proxy-pool
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      DATA_DIR: /data
+      MIHOMO_BINARY: /usr/local/bin/mihomo
+      REDIS_ADDR: redis:6379
+      PANEL_HOST: "0.0.0.0"
+      PANEL_PORT: "7891"
+      DIRECT_PROXY_ENABLED: "true"
+      DIRECT_PROXY_ADDR: "0.0.0.0:7892"
+      PROXY_CHAIN_ENABLED: "true"
+      PROXY_CHAIN_ADDR: "0.0.0.0:7893"
+      PROXY_CHAIN_HOPS: "2"
+      FREE_PROXY_ENABLED: "true"
+      SCRAPE_INTERVAL_SEC: "300"
+      VALIDATE_INTERVAL_SEC: "120"
+      FREE_VALIDATE_URL: "https://www.gstatic.com/generate_204"
+    volumes:
+      - ./data:/data
+    ports:
+      - "7891:7891"
+      - "7892:7892"
+      - "7893:7893"
+      - "18080-18120:18080-18120"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:7891/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+
+  unified-proxy-pool-host:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: unified-proxy-pool-host
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      DATA_DIR: /data
+      MIHOMO_BINARY: /usr/local/bin/mihomo
+      REDIS_ADDR: 127.0.0.1:6379
+      PANEL_HOST: "0.0.0.0"
+      PANEL_PORT: "7891"
+      DIRECT_PROXY_ENABLED: "true"
+      DIRECT_PROXY_ADDR: "0.0.0.0:7892"
+      PROXY_CHAIN_ENABLED: "true"
+      PROXY_CHAIN_ADDR: "0.0.0.0:7893"
+      PROXY_CHAIN_HOPS: "2"
+      FREE_PROXY_ENABLED: "true"
+    volumes:
+      - ./data:/data
+    profiles:
+      - host

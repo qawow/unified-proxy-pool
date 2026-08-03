@@ -1,0 +1,19 @@
+data/
+tmp-smoke-data/
+tmp-sync-data/
+tmp-e2e-data*/
+*.exe
+*.db
+*.db-shm
+*.db-wal
+*.log
+.codex
+.DS_Store
+frontend/node_modules/
+frontend/dist/
+# frontend build is produced into web/dist by `npm run build` / Docker
+web/dist/
+!web/dist/.gitkeep
+unified-proxy-pool
+README-.md
+frontend/tsconfig.tsbuildinfo

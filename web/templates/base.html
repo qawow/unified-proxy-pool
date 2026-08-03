@@ -1,0 +1,16 @@
+{{define "base"}}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body data-page="{{.Page}}" data-subscription-id="{{.SubscriptionID}}">
+  {{template "body" .}}
+  <div id="toastContainer" class="toast-container"></div>
+  <script src="/static/js/app.js" defer></script>
+</body>
+</html>
+{{end}}

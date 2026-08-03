@@ -1,0 +1,26 @@
+{{define "body"}}
+<main class="login-shell">
+  <section class="login-card">
+    <div class="login-brand">
+      <div class="brand-title">Super-Proxy-Pool</div>
+      <div class="brand-subtitle">代理面板登录</div>
+    </div>
+    <p class="login-tip">
+      首次初始化默认密码为 <code>admin</code>；若已修改，请使用当前密码登录。
+    </p>
+    <form id="loginForm" class="stack-form">
+      <label>
+        <span>密码</span>
+        <input
+          type="password"
+          name="password"
+          placeholder="请输入管理密码"
+          required
+          autocomplete="current-password"
+        >
+      </label>
+      <button type="submit" data-loading-text="登录中...">登录</button>
+    </form>
+  </section>
+</main>
+{{end}}

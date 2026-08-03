@@ -1,0 +1,383 @@
+{{define "body"}}
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-title">Super-Proxy-Pool</div>
+      <div class="brand-subtitle">代理面板</div>
+    </div>
+    <nav class="nav-links" aria-label="主导航">
+      <a class="{{if eq .Page `subscriptions`}}active{{end}}" href="/subscriptions">订阅管理</a>
+      <a class="{{if eq .Page `manual-nodes`}}active{{end}}" href="/manual-nodes">节点管理</a>
+      <a class="{{if eq .Page `pools`}}active{{end}}" href="/pools">代理池设置</a>
+      <a class="{{if eq .Page `settings`}}active{{end}}" href="/settings">系统设置</a>
+    </nav>
+    <button id="logoutButton" class="ghost-button" type="button">退出登录</button>
+  </aside>
+
+  <main class="content">
+    <header class="page-header">
+      <div>
+        <h1>{{.Heading}}</h1>
+        <p>{{.Description}}</p>
+      </div>
+    </header>
+
+    {{if eq .Page "subscriptions"}}
+    <section class="panel-grid">
+      <article class="panel-card form-card">
+        <h2>新增 / 编辑订阅</h2>
+        <form id="subscriptionForm" class="stack-form">
+          <input type="hidden" name="id">
+          <label>
+            <span>订阅名称</span>
+            <input name="name" required autocomplete="off" placeholder="例如：香港订阅">
+          </label>
+          <label>
+            <span>订阅 URL</span>
+            <input name="url" required autocomplete="off" placeholder="https://...">
+          </label>
+          <label>
+            <span>自定义请求头 JSON</span>
+            <textarea name="headers_json" rows="4" placeholder='{"User-Agent":"mihomo"}'></textarea>
+          </label>
+          <label>
+            <span>自动同步间隔（秒）</span>
+            <input type="number" name="sync_interval_sec" min="0" value="3600">
+          </label>
+          <label class="inline">
+            <input type="checkbox" name="enabled" checked>
+            <span>启用订阅</span>
+          </label>
+          <div class="form-actions">
+            <button type="submit" data-loading-text="保存中...">保存订阅</button>
+            <button type="button" class="secondary" id="subscriptionFormReset">清空</button>
+          </div>
+        </form>
+      </article>
+
+      <article class="panel-card list-card">
+        <div class="toolbar">
+          <input id="subscriptionSearch" type="search" placeholder="搜索订阅名称或链接">
+        </div>
+        <div id="subscriptionSyncFeedback" class="feedback-panel" hidden></div>
+        <div id="subscriptionList" class="card-list"></div>
+      </article>
+    </section>
+    {{end}}
+
+    {{if eq .Page "subscription-detail"}}
+    <section class="panel-card detail-card">
+      <div class="toolbar toolbar-spread">
+        <a class="secondary-link" href="/subscriptions">返回订阅列表</a>
+        <button id="subscriptionSyncSingleButton" type="button" data-loading-text="同步中...">立即同步</button>
+      </div>
+      <div id="subscriptionSyncFeedback" class="feedback-panel" hidden></div>
+      <div id="subscriptionDetailMeta" class="meta-strip" aria-live="polite"></div>
+      <div class="toolbar">
+        <input id="subscriptionNodeSearch" type="search" placeholder="搜索节点名称、地址或协议">
+        <select id="subscriptionNodeStatusFilter" aria-label="节点状态筛选">
+          <option value="">全部状态</option>
+          <option value="available">可用</option>
+          <option value="unavailable">不可用</option>
+          <option value="testing">测试中</option>
+          <option value="disabled">已禁用</option>
+          <option value="unknown">未知</option>
+        </select>
+        <select id="subscriptionNodeProtocolFilter" aria-label="节点协议筛选">
+          <option value="">全部协议</option>
+          <option value="ss">ss</option>
+          <option value="trojan">trojan</option>
+          <option value="vmess">vmess</option>
+          <option value="vless">vless</option>
+          <option value="tuic">tuic</option>
+          <option value="hysteria2">hysteria2</option>
+        </select>
+      </div>
+      <div id="subscriptionNodeList" class="card-list"></div>
+    </section>
+    {{end}}
+
+    {{if eq .Page "manual-nodes"}}
+    <section class="panel-grid">
+      <article class="panel-card form-card">
+        <h2>新增 / 编辑手动节点</h2>
+        <form id="manualNodeForm" class="stack-form">
+          <input type="hidden" name="id">
+          <label>
+            <span>节点内容</span>
+            <textarea
+              name="content"
+              rows="10"
+              required
+              placeholder="支持单条 URI、多条 URI、Mihomo/Clash YAML 片段"
+            ></textarea>
+          </label>
+          <div id="manualNodeImportFeedback" class="feedback-panel" hidden></div>
+          <div class="form-actions">
+            <button type="submit" data-loading-text="保存中...">保存节点</button>
+            <button type="button" class="secondary" id="manualNodeFormReset">清空</button>
+          </div>
+        </form>
+      </article>
+
+      <article class="panel-card list-card">
+        <div class="toolbar">
+          <input id="manualNodeSearch" type="search" placeholder="搜索节点名称、地址或协议">
+          <select id="manualNodeStatusFilter" aria-label="节点状态筛选">
+            <option value="">全部状态</option>
+            <option value="available">可用</option>
+            <option value="unavailable">不可用</option>
+            <option value="testing">测试中</option>
+            <option value="disabled">已禁用</option>
+          </select>
+          <select id="manualNodeProtocolFilter" aria-label="节点协议筛选">
+            <option value="">全部协议</option>
+            <option value="ss">ss</option>
+            <option value="trojan">trojan</option>
+            <option value="vmess">vmess</option>
+            <option value="vless">vless</option>
+            <option value="tuic">tuic</option>
+            <option value="hysteria2">hysteria2</option>
+          </select>
+        </div>
+        <div id="manualNodeList" class="card-list"></div>
+      </article>
+    </section>
+    {{end}}
+
+    {{if eq .Page "pools"}}
+    <section class="panel-grid">
+      <article class="panel-card form-card">
+        <h2>新增 / 编辑代理池</h2>
+        <form id="poolForm" class="stack-form">
+          <input type="hidden" name="id">
+          <label>
+            <span>名称</span>
+            <input name="name" required autocomplete="off">
+          </label>
+          <label>
+            <span>用户名（唯一标识此代理池）</span>
+            <input name="auth_username" required autocomplete="off" placeholder="用于区分不同代理池">
+          </label>
+          <label>
+            <span>密码</span>
+            <input name="auth_password_secret" type="password" required autocomplete="new-password">
+          </label>
+          <label>
+            <span>调度策略</span>
+            <select name="strategy">
+              <option value="round_robin">round_robin</option>
+              <option value="lowest_latency">lowest_latency</option>
+              <option value="failover">failover</option>
+              <option value="sticky">sticky</option>
+            </select>
+          </label>
+          <label class="inline">
+            <input type="checkbox" name="failover_enabled" checked>
+            <span>失败自动切换</span>
+          </label>
+          <label class="inline">
+            <input type="checkbox" name="enabled" checked>
+            <span>启用代理池</span>
+          </label>
+
+          <div class="member-selector">
+            <div class="member-selector-head">
+              <strong>节点选择器</strong>
+              <span class="muted">可搜索、过滤、多选并设置权重</span>
+            </div>
+            <div class="toolbar">
+              <input id="poolMemberSearch" type="search" placeholder="搜索候选节点">
+              <select id="poolMemberSourceFilter" aria-label="来源筛选">
+                <option value="">全部来源</option>
+                <option value="manual">手动节点</option>
+                <option value="subscription">订阅节点</option>
+              </select>
+              <select id="poolMemberProtocolFilter" aria-label="协议筛选">
+                <option value="">全部协议</option>
+                <option value="ss">ss</option>
+                <option value="trojan">trojan</option>
+                <option value="vmess">vmess</option>
+                <option value="vless">vless</option>
+                <option value="tuic">tuic</option>
+                <option value="hysteria2">hysteria2</option>
+              </select>
+              <select id="poolMemberStatusFilter" aria-label="状态筛选">
+                <option value="">全部状态</option>
+                <option value="available">可用</option>
+                <option value="unavailable">不可用</option>
+                <option value="testing">测试中</option>
+                <option value="disabled">已禁用</option>
+                <option value="unknown">未知</option>
+              </select>
+            </div>
+            <button type="button" class="secondary" id="poolMemberSelectFiltered">全选当前筛选结果</button>
+            <div id="poolMemberList" class="member-list"></div>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" data-loading-text="保存中...">保存代理池</button>
+            <button type="button" class="secondary" id="poolFormReset">清空</button>
+          </div>
+        </form>
+      </article>
+
+      <article class="panel-card list-card">
+        <div id="poolList" class="card-list"></div>
+      </article>
+    </section>
+    {{end}}
+
+    {{if eq .Page "settings"}}
+    <section class="panel-grid settings-grid">
+      <article class="panel-card form-card">
+        <h2>系统设置</h2>
+        <form id="settingsForm" class="stack-form">
+          <section class="settings-section">
+            <header class="settings-section-head">
+              <h3>面板设置</h3>
+              <p>管理面板监听地址与端口。该分组保存后通常需要重新拉起服务进程才会完全生效。</p>
+            </header>
+            <label>
+              <span>面板监听地址</span>
+              <input name="panel_host" required>
+            </label>
+            <label>
+              <span>面板监听端口</span>
+              <input type="number" name="panel_port" min="1" max="65535" required>
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <header class="settings-section-head">
+              <h3>测试设置</h3>
+              <p>控制延迟测试与下载测速参数。测速并发当前固定支持 1 到 {{.MaxProbeSpeedSlots}} 个受控槽位。</p>
+            </header>
+            <label class="inline">
+              <input type="checkbox" name="speed_test_enabled">
+              <span>开启测速显示</span>
+            </label>
+            <label>
+              <span>延迟测试 URL</span>
+              <input name="latency_test_url" required>
+            </label>
+            <label>
+              <span>延迟测试超时（毫秒）</span>
+              <input type="number" name="latency_timeout_ms" min="1" required>
+            </label>
+            <label>
+              <span>延迟测试并发</span>
+              <input type="number" name="latency_concurrency" min="1" required>
+            </label>
+            <label>
+              <span>测速下载 URL</span>
+              <input name="speed_test_url" required>
+            </label>
+            <label>
+              <span>测速超时（毫秒）</span>
+              <input type="number" name="speed_timeout_ms" min="1" required>
+            </label>
+            <label>
+              <span>测速并发</span>
+              <input type="number" name="speed_concurrency" min="1" max="{{.MaxProbeSpeedSlots}}" required>
+            </label>
+            <label>
+              <span>测速字节上限</span>
+              <input type="number" name="speed_max_bytes" min="1" required>
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <header class="settings-section-head">
+              <h3>内核 / 运行设置</h3>
+              <p>影响 Mihomo controller、订阅调度、失败重试与日志输出的运行参数。</p>
+            </header>
+            <label>
+              <span>默认订阅同步间隔（秒）</span>
+              <input type="number" name="default_subscription_interval_sec" min="1" required>
+            </label>
+            <label>
+              <span>Mihomo Controller Secret</span>
+              <input name="mihomo_controller_secret" required>
+            </label>
+            <label>
+              <span>失败重试次数</span>
+              <input type="number" name="failure_retry_count" min="0" required>
+            </label>
+            <label>
+              <span>日志级别</span>
+              <select name="log_level">
+                <option value="trace">trace</option>
+                <option value="debug">debug</option>
+                <option value="info">info</option>
+                <option value="warning">warning</option>
+                <option value="warn">warn</option>
+                <option value="error">error</option>
+                <option value="silent">silent</option>
+              </select>
+            </label>
+          </section>
+
+          <div class="form-actions">
+            <button type="submit" data-loading-text="保存中...">保存设置</button>
+          </div>
+        </form>
+      </article>
+
+      <div class="settings-side">
+        <article class="panel-card form-card">
+          <div class="toolbar toolbar-spread">
+            <div>
+              <h2>Mihomo 内核</h2>
+              <p class="muted">检查当前服务器的 Mihomo 状态，并直接下载安装适合当前主机的版本。</p>
+            </div>
+            <button id="mihomoRefreshButton" type="button" class="secondary" data-loading-text="刷新中...">刷新版本列表</button>
+          </div>
+          <div id="mihomoFeedback" class="feedback-panel" hidden></div>
+          <div id="mihomoStatusMeta" class="meta-strip"></div>
+          <div id="mihomoStatusDetails" class="detail-grid"></div>
+          <div class="settings-section mihomo-install-panel">
+            <header class="settings-section-head">
+              <h3>下载与启用</h3>
+              <p>系统会根据当前服务器的 OS / ARCH 筛出可用内核。下载后会立即切换到新内核，重启后也会继续使用。</p>
+            </header>
+            <div id="mihomoRecommendedAsset" class="entity-notice"></div>
+            <label>
+              <span>选择兼容版本</span>
+              <select id="mihomoAssetSelect"></select>
+            </label>
+            <div class="form-actions">
+              <button id="mihomoInstallRecommendedButton" type="button" data-loading-text="下载中...">下载推荐版本</button>
+              <button id="mihomoInstallButton" type="button" class="secondary" data-loading-text="下载中...">下载所选版本</button>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel-card form-card">
+          <h2>修改密码</h2>
+          <form id="passwordForm" class="stack-form">
+            <label>
+              <span>旧密码</span>
+              <input type="password" name="old_password" required autocomplete="current-password">
+            </label>
+            <label>
+              <span>新密码</span>
+              <input type="password" name="new_password" required autocomplete="new-password">
+            </label>
+            <div class="form-actions">
+              <button type="submit" data-loading-text="提交中...">修改密码</button>
+            </div>
+          </form>
+
+          <div class="danger-zone">
+            <h3>危险操作</h3>
+            <p>该操作会请求当前服务进程退出。使用仓库内置的 Docker Compose 部署时，容器默认会按 <code>unless-stopped</code> 自动拉起；自定义部署请确认已配置重启策略或外部守护。</p>
+            <button id="restartButton" class="danger" type="button" data-loading-text="重启中...">重启系统</button>
+          </div>
+        </article>
+      </div>
+    </section>
+    {{end}}
+  </main>
+</div>
+{{end}}
