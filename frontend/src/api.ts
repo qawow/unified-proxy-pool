@@ -7,6 +7,9 @@ import type {
   Overview,
   PoolMember,
   PoolMemberView,
+  ProxyGroup,
+  ProxyGroupRule,
+  ProxyGroupView,
   ProxyPool,
   Scraper,
   Settings,
@@ -114,6 +117,23 @@ export const endpoints = {
         method: "POST",
         body: JSON.stringify(body),
       }),
+    groups: {
+      list: async () => asArray(await api<ProxyGroupView[]>("/api/proxies/groups")),
+      save: (body: { name: string; label?: string } & ProxyGroupRule) =>
+        api<ProxyGroup>("/api/proxies/groups", {
+          method: "POST",
+          body: JSON.stringify(body),
+        }),
+      update: (name: string, body: { label?: string } & ProxyGroupRule) =>
+        api<ProxyGroup>(`/api/proxies/groups/${encodeURIComponent(name)}`, {
+          method: "PUT",
+          body: JSON.stringify(body),
+        }),
+      remove: (name: string) =>
+        api<{ deleted: string }>(`/api/proxies/groups/${encodeURIComponent(name)}`, {
+          method: "DELETE",
+        }),
+    },
   },
   scrapers: {
     list: async () => asArray(await api<Scraper[]>("/api/scrapers")),

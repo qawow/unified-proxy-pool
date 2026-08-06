@@ -180,11 +180,17 @@ func (a *App) Router() (http.Handler, error) {
 			api.Get("/proxies", a.handleFreeProxyList)
 			api.Get("/proxies/random", a.handleFreeProxyRandom)
 			api.Get("/proxies/count", a.handleFreeProxyCount)
+			api.Get("/proxies/groups", a.handleProxyGroupList)
+			api.Post("/proxies/groups", a.handleProxyGroupSave)
+			api.Put("/proxies/groups/{name}", a.handleProxyGroupUpdate)
+			api.Delete("/proxies/groups/{name}", a.handleProxyGroupDelete)
 			// Prefer query/body for host:port to avoid chi path colon issues.
 			api.Delete("/proxies", a.handleFreeProxyDelete)
 			api.Post("/proxies/test", a.handleFreeProxyTest)
 			api.Delete("/proxies/by/*", a.handleFreeProxyDelete)
 			api.Post("/proxies/test/by/*", a.handleFreeProxyTest)
+			// Batch submit/test are registered outside this group so they can accept
+			// Bearer tokens — see the /api/proxies/submit registration below.
 			api.Get("/scrapers", a.handleScraperList)
 			api.Post("/scrapers", a.handleScraperCreate)
 			api.Put("/scrapers/{id}", a.handleScraperUpdate)
@@ -219,6 +225,16 @@ func (a *App) Router() (http.Handler, error) {
 
 	r.Get("/metrics", a.handleMetrics)
 
+	// Script-facing batch endpoints. Registered outside the protected group on
+	// purpose: that group's RequireAuth rejects cookie-less requests before any
+	// inner middleware runs, so a Bearer token registered inside it never got a
+	// chance to authenticate. RequireAuthOrToken accepts either credential.
+	r.Group(func(scriptAPI chi.Router) {
+		scriptAPI.Use(a.auth.RequireAuthOrToken(a.tokens))
+		scriptAPI.Post("/api/proxies/submit", a.handleProxySubmit)
+		scriptAPI.Post("/api/proxies/batch-test", a.handleProxyBatchTest)
+	})
+
 	// Public free-proxy API (no auth) — compatible with common proxy-pool clients on LAN.
 	r.Route("/api/public", func(pub chi.Router) {
 		pub.Get("/proxies/random", a.handleFreeProxyRandom)
@@ -227,6 +243,9 @@ func (a *App) Router() (http.Handler, error) {
 		pub.Get("/count", a.handleFreeProxyCount)
 		pub.Get("/health", a.handleHealth)
 		pub.Post("/report", a.handlePublicReport)
+		// Unauthenticated batch submit for LAN scripts.
+		// Body: plain text, one host:port per line; ?source= labels the origin.
+		pub.Post("/submit", a.handlePublicSubmit)
 	})
 
 	fileServer := http.FileServer(http.FS(a.frontend))
@@ -836,13 +855,13 @@ func (a *App) applyFeatureHot(raw string) {
 			opts.ListenAddr = ch.ListenAddr
 		}
 		opts.Enabled = ch.Enabled || opts.Enabled
-		// if chain block present with hops, trust enabled flag from parse defaults
+		// Trust the enabled flag from the feature JSON whenever any chain field is
+		// explicitly set. The previous inner guard (Hops==0 && ListenAddr=="") was
+		// dead code: its condition is always false when the outer condition
+		// (Hops>=2 || ListenAddr!="" || FailoverTries>0) is true, making it
+		// impossible to disable chain proxy via the Settings page.
 		if ch.Hops >= 2 || ch.ListenAddr != "" || ch.FailoverTries > 0 {
 			opts.Enabled = ch.Enabled
-			// DefaultChain has Enabled true; if user saved enabled:false keep it
-			if !ch.Enabled && ch.Hops == 0 && ch.ListenAddr == "" {
-				opts.Enabled = true
-			}
 		}
 		opts.PreferDistinctHost = ch.PreferDistinctHost
 		opts.PreferDistinctRegion = ch.PreferDistinctRegion
@@ -855,15 +874,12 @@ func (a *App) applyFeatureHot(raw string) {
 			opts.StickyTTLSec = ch.StickyTTLSec
 		}
 		opts.AuthRequired = ch.AuthRequired
-		if ch.Username != "" {
-			opts.Username = ch.Username
-		}
-		if ch.Password != "" {
-			opts.Password = ch.Password
-		}
-		if len(ch.AllowedCIDRs) > 0 {
-			opts.AllowedCIDRs = ch.AllowedCIDRs
-		}
+		// Always write username/password/CIDRs unconditionally so the user can
+		// clear them via the Settings page.  The previous non-empty guards meant
+		// that once set, credentials/CIDRs could never be removed through the UI.
+		opts.Username = ch.Username
+		opts.Password = ch.Password
+		opts.AllowedCIDRs = ch.AllowedCIDRs
 		if ch.RateLimitBPS > 0 {
 			opts.RateLimitBPS = ch.RateLimitBPS
 		}

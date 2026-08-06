@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -164,7 +165,12 @@ func (s *Service) Overview(ctx context.Context) (Overview, error) {
 }
 
 func (s *Service) ListProxies(ctx context.Context, filter ListFilter) (ListResult, error) {
-	return s.store.List(ctx, filter)
+	// Resolve a named group into an inline rule so stores stay group-unaware.
+	resolved, err := s.ResolveGroupFilter(ctx, filter)
+	if err != nil {
+		return ListResult{}, err
+	}
+	return s.store.List(ctx, resolved)
 }
 
 func (s *Service) Random(ctx context.Context, protocol string) (Proxy, error) {
@@ -172,28 +178,208 @@ func (s *Service) Random(ctx context.Context, protocol string) (Proxy, error) {
 }
 
 func (s *Service) RandomFilter(ctx context.Context, protocol, region string) (Proxy, error) {
-	// try a few times to skip blacklist
-	for i := 0; i < 8; i++ {
-		p, err := s.store.Random(ctx, protocol)
-		if err != nil {
-			return Proxy{}, err
+	return s.RandomFamilyFilter(ctx, protocol, region, "")
+}
+
+// RandomFamilyFilter picks a random proxy, optionally constrained to one IP family.
+func (s *Service) RandomFamilyFilter(ctx context.Context, protocol, region, family string) (Proxy, error) {
+	// store.Random cannot filter by family and samples the same small
+	// lowest-latency window on every call, so retrying it for a rare family
+	// mostly burns round-trips. Skip straight to the ladder, which pushes family
+	// down into the store instead of filtering after the fact.
+	if family == "" {
+		// try a few times to skip blacklist
+		for i := 0; i < 8; i++ {
+			p, err := s.store.Random(ctx, protocol)
+			if err != nil {
+				// The sampler reads a bounded window and knows nothing about
+				// region, so its error means "nothing here", not "pool empty".
+				// Fall through to the ladder, which can relax the query.
+				break
+			}
+			if s.blocked != nil && s.blocked(p.Addr) {
+				continue
+			}
+			if s.sourceDisabled != nil && s.sourceDisabled(p.Source) {
+				continue
+			}
+			if region != "" && p.Region != "" && !strings.Contains(strings.ToLower(p.Region), strings.ToLower(region)) {
+				continue
+			}
+			return p, nil
 		}
-		if s.blocked != nil && s.blocked(p.Addr) {
-			continue
-		}
-		if s.sourceDisabled != nil && s.sourceDisabled(p.Source) {
-			continue
-		}
-		if region != "" && p.Region != "" && !strings.Contains(strings.ToLower(p.Region), strings.ToLower(region)) {
-			continue
-		}
-		return p, nil
 	}
-	items, err := s.PickValidatedNFilter(ctx, protocol, region, 1)
+	items, err := s.PickValidatedNFilter(ctx, protocol, region, family, 1)
 	if err != nil {
 		return Proxy{}, err
 	}
 	return items[0], nil
+}
+
+// SubmitResult reports what a SubmitRaw call actually changed.
+//
+// Added alone is misleading once the raw pool is at MaxRawProxies: inserting N
+// addresses then makes Trim evict N others, so the pool can report "added 4"
+// while its total grows by 1. Callers that only surface Added will tell an
+// operator the submission worked when it mostly displaced other proxies.
+type SubmitResult struct {
+	// Parsed is how many items survived normalization.
+	Parsed int `json:"parsed"`
+	// Added is how many addresses AddRaw actually inserted (duplicates skipped).
+	Added int `json:"added"`
+	// Duplicates is Parsed minus Added: already present in the pool.
+	Duplicates int `json:"duplicates"`
+	// Evicted is how many existing proxies Trim removed to stay under the cap.
+	// Derived by conservation: (before + added) - after.
+	Evicted int64 `json:"evicted"`
+	// NetGrowth is the change in pool total. Zero with a positive Added means
+	// the submission only displaced other proxies.
+	NetGrowth int64 `json:"net_growth"`
+	// RawAtCap is true when the raw pool is saturated, which is *why* eviction
+	// happens; it tells the caller this is capacity pressure, not a bug.
+	RawAtCap bool `json:"raw_at_cap"`
+}
+
+// SubmitRaw adds a batch of raw addresses without validating them.
+//
+// Each item needs at least host:port; protocol defaults to "http" and source
+// defaults to "external" when omitted.
+//
+// This is the service-layer entry point for POST /api/proxies/submit and
+// POST /api/public/submit, which let scripts push scraped addresses without
+// Redis access or a local CLI binary.
+func (s *Service) SubmitRaw(ctx context.Context, items []Proxy, source string) (SubmitResult, error) {
+	var res SubmitResult
+	if len(items) == 0 {
+		return res, nil
+	}
+	if source == "" {
+		source = "external"
+	}
+	toAdd := make([]Proxy, 0, len(items))
+	for _, p := range items {
+		// Accept host+port or pre-formed addr; reject obviously malformed input.
+		if p.Addr == "" && (p.Host == "" || p.Port <= 0) {
+			continue
+		}
+		if p.Addr == "" {
+			p.Addr = normalizeAddr(p.Host, p.Port)
+		}
+		if p.Addr == "" {
+			continue
+		}
+		if p.Source == "" {
+			p.Source = source
+		}
+		if p.Protocol == "" {
+			p.Protocol = "http"
+		}
+		toAdd = append(toAdd, p)
+	}
+	res.Parsed = len(toAdd)
+	if len(toAdd) == 0 {
+		return res, nil
+	}
+
+	// Measure before/after so eviction can be derived rather than guessed.
+	beforeTotal, _, _, _ := s.store.Count(ctx)
+
+	added, err := s.store.AddRaw(ctx, toAdd)
+	if err != nil {
+		return res, err
+	}
+	res.Added = added
+	res.Duplicates = res.Parsed - added
+
+	if err2 := s.store.Trim(ctx); err2 != nil {
+		_ = err2 // trim failure is cosmetic; the counts below still reflect reality
+	}
+
+	afterTotal, _, afterRaw, _ := s.store.Count(ctx)
+	res.NetGrowth = afterTotal - beforeTotal
+	// Conservation: everything inserted that is not reflected in the total was
+	// evicted. Delta-based detection alone misses the case where insertions and
+	// evictions cancel exactly.
+	if ev := (beforeTotal + int64(added)) - afterTotal; ev > 0 {
+		res.Evicted = ev
+	}
+	res.RawAtCap = afterRaw >= MaxRawProxies
+
+	if added > 0 {
+		s.publish("freproxies.submitted", map[string]any{
+			"added": added, "source": source, "evicted": res.Evicted,
+		})
+	}
+	if res.Evicted > 0 {
+		_ = s.store.PushEvent(ctx, fmt.Sprintf(
+			"submit %s: added %d, evicted %d to stay under the raw cap (%d)",
+			source, added, res.Evicted, MaxRawProxies))
+	}
+	return res, nil
+}
+
+// BatchTestResult is the outcome for one address in a BatchTest call.
+type BatchTestResult struct {
+	Addr      string `json:"addr"`
+	OK        bool   `json:"ok"`
+	LatencyMS int64  `json:"latency_ms,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// BatchTest validates up to maxItems addresses concurrently.
+//
+// Each address that is not already in the store is added as raw first so that
+// a successful test can be promoted to validated status. Dead addresses are
+// removed, matching the behaviour of the periodic validator.
+func (s *Service) BatchTest(ctx context.Context, addrs []string, validateURL string, timeout time.Duration, concurrency int) []BatchTestResult {
+	const maxItems = 200
+	if len(addrs) > maxItems {
+		addrs = addrs[:maxItems]
+	}
+	if concurrency <= 0 || concurrency > 60 {
+		concurrency = 20
+	}
+	if timeout <= 0 {
+		timeout = 8 * time.Second
+	}
+	if validateURL == "" {
+		validateURL = "http://httpbin.org/ip"
+	}
+
+	results := make([]BatchTestResult, len(addrs))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for i, addr := range addrs {
+		results[i].Addr = addr
+		wg.Add(1)
+		go func(i int, addr string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			p, err := s.TestProxyOpts(ctx, addr, validateURL, timeout, false)
+			if err != nil {
+				results[i].OK = false
+				results[i].Error = err.Error()
+			} else {
+				results[i].OK = true
+				results[i].LatencyMS = p.LatencyMS
+			}
+		}(i, addr)
+	}
+	wg.Wait()
+
+	ok, fail := 0, 0
+	for _, r := range results {
+		if r.OK {
+			ok++
+		} else {
+			fail++
+		}
+	}
+	s.NotifyValidateBatch(ok, fail)
+	return results
 }
 
 func (s *Service) Delete(ctx context.Context, addr string) error {
@@ -406,13 +592,13 @@ func (s *Service) publish(typ string, data map[string]any) {
 }
 
 func splitAddr(addr string) (string, int, bool) {
-	parts := strings.Split(strings.TrimSpace(addr), ":")
-	if len(parts) != 2 {
-		return "", 0, false
-	}
-	port, err := strconv.Atoi(parts[1])
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(addr))
 	if err != nil {
 		return "", 0, false
 	}
-	return parts[0], port, true
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return "", 0, false
+	}
+	return host, port, true
 }

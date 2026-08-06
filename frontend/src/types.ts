@@ -159,12 +159,15 @@ export type MihomoStatus = {
   [key: string]: unknown;
 };
 
+export type IPFamily = "ipv4" | "ipv6" | "unknown";
+
 export type FreeProxy = {
   addr: string;
   host: string;
   port: number;
   protocol: string;
   source: string;
+  ip_family?: IPFamily;
   score: number;
   latency_ms: number;
   region: string;
@@ -178,6 +181,32 @@ export type FreeProxyListResult = {
   total: number;
   page: number;
   size: number;
+  /** Matches may exist beyond the scanned window, so `total` is a lower bound. */
+  truncated?: boolean;
+};
+
+/** Matching criteria of a proxy group. Empty dimension = no constraint. */
+export type ProxyGroupRule = {
+  sources?: string[];
+  protocols?: string[];
+  families?: IPFamily[];
+  regions?: string[];
+  min_score?: number;
+  only_ok?: boolean;
+};
+
+export type ProxyGroup = {
+  name: string;
+  label: string;
+  rule: ProxyGroupRule;
+  builtin: boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type ProxyGroupView = ProxyGroup & {
+  total: number;
+  validated: number;
 };
 
 export type Scraper = {

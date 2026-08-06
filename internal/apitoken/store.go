@@ -112,3 +112,10 @@ func (s *Store) Validate(ctx context.Context, plain string) (Token, bool) {
 	_, _ = s.db.ExecContext(ctx, `UPDATE api_tokens SET last_used_at = ? WHERE id = ?`, time.Now().UTC(), t.ID)
 	return t, true
 }
+
+// ValidateToken satisfies auth.TokenValidator so the store can be passed
+// directly to RequireAuthOrToken without an import cycle.
+func (s *Store) ValidateToken(ctx context.Context, plain string) bool {
+	_, ok := s.Validate(ctx, plain)
+	return ok
+}

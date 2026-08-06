@@ -70,7 +70,20 @@ func (c *dynamicCrawler) Parse(body []byte, rawURL string) ([]Proxy, error) {
 			items[i].Protocol = c.spec.Protocol
 		}
 		return items, err
-	case "html_regex", "plaintext", "socks_list", "json", "jsonl":
+	case "json", "jsonl":
+		// These formats routed to ExtractIPPort, which needs host and port
+		// adjacent in the text — so a user-defined source publishing them as
+		// separate fields silently yielded nothing.
+		if items := ParseJSONProxies(body, c.spec.Protocol); len(items) > 0 {
+			return items, nil
+		}
+		// Body was not JSON after all; a plain list is the usual alternative.
+		items := ExtractIPPort(string(body))
+		for i := range items {
+			items[i].Protocol = c.spec.Protocol
+		}
+		return items, nil
+	case "html_regex", "plaintext", "socks_list":
 		items := ExtractIPPort(string(body))
 		for i := range items {
 			items[i].Protocol = c.spec.Protocol
@@ -129,7 +142,7 @@ func (r *Registry) Remove(name string) {
 }
 
 // Mark builtins with Format builtin via wrapper - plainText etc don't implement MetaCrawler.Builtin true by default via IsBuiltin.
-func (c *plainTextCrawler) Builtin() bool { return true }
+func (c *plainTextCrawler) Builtin() bool  { return true }
 func (c *plainTextCrawler) Format() string { return "plaintext" }
 func (c *htmlTableCrawler) Builtin() bool  { return true }
 func (c *htmlTableCrawler) Format() string { return "html_table" }

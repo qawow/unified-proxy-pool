@@ -54,6 +54,8 @@ func (a *App) handleProxyExport(w http.ResponseWriter, r *http.Request) {
 		Protocol: r.URL.Query().Get("proto"),
 		Region:   r.URL.Query().Get("region"),
 		Source:   r.URL.Query().Get("source"),
+		Family:   normalizeFamilyParam(firstNonEmpty(r.URL.Query().Get("family"), r.URL.Query().Get("ip_family"))),
+		Group:    r.URL.Query().Get("group"),
 		Query:    r.URL.Query().Get("q"),
 		OnlyOK:   r.URL.Query().Get("only_ok") == "1" || r.URL.Query().Get("only_ok") == "true",
 	}

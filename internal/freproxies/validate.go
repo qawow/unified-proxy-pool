@@ -11,6 +11,20 @@ import (
 	"time"
 )
 
+// CheckProxy runs the pool's own liveness check against a single proxy and
+// returns its latency in milliseconds plus whether it worked.
+//
+// Exported so command-line tooling can validate a list without a running panel
+// and without a second copy of the dialing rules — a separate implementation
+// would drift, and then the tool would disagree with the pool about which
+// proxies are alive.
+func CheckProxy(ctx context.Context, p Proxy, validateURL string, timeout time.Duration) (int64, bool) {
+	if p.Addr == "" {
+		p.Addr = normalizeAddr(p.Host, p.Port)
+	}
+	return checkHTTPProxy(ctx, p, validateURL, timeout)
+}
+
 func checkHTTPProxy(ctx context.Context, p Proxy, validateURL string, timeout time.Duration) (int64, bool) {
 	if validateURL == "" {
 		validateURL = "http://httpbin.org/ip"

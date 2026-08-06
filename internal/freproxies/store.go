@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,7 +22,13 @@ const (
 	keyMetaPrefix = "upp:proxies:meta:"
 	keyScraper    = "upp:scrapers:stats"
 	keyDisabled   = "upp:scrapers:disabled"
-	keyEvents     = "upp:events"
+	// keyEnabled holds explicit "on" overrides. Without it a source that ships
+	// default-off could never be turned on: enabling only removed the name from
+	// keyDisabled, where it had never been, and IsScraperEnabled then fell back
+	// to DefaultEnabled() and reported off again.
+	keyEnabled = "upp:scrapers:enabled"
+	keyEvents  = "upp:events"
+	keyGroups  = "upp:proxies:groups"
 )
 
 const (
@@ -56,6 +63,14 @@ type Store interface {
 	Queues(ctx context.Context) (ValidatorQueues, error)
 	AvgScore(ctx context.Context) (float64, error)
 	UpdateRegion(ctx context.Context, addr, region string) error
+	SaveGroup(ctx context.Context, g ProxyGroup) error
+	ListGroups(ctx context.Context) ([]ProxyGroup, error)
+	GetGroup(ctx context.Context, name string) (ProxyGroup, error)
+	DeleteGroup(ctx context.Context, name string) error
+	SaveSourceYield(ctx context.Context, rec SourceYieldRecord) error
+	ListSourceYield(ctx context.Context, source string, limit int) ([]SourceYieldRecord, error)
+	AllSourceYieldSummary(ctx context.Context) (map[string]SourceYieldRecord, error)
+	SourceYieldTrend(ctx context.Context, source string, window int) (trend string, records []SourceYieldRecord, err error)
 }
 
 type redisStore struct {
@@ -92,25 +107,30 @@ func (s *redisStore) metaKey(addr string) string {
 	return keyMetaPrefix + addr
 }
 
-// mgetProxies loads many metas in one pipeline round-trip.
+// mgetProxies loads many metas in a single MGET. Using MGET instead of a
+// pipeline of N GETs collapses N command headers into one, which matters on the
+// List path where N can reach the 800-member hydrate cap.
 func (s *redisStore) mgetProxies(ctx context.Context, addrs []string) []Proxy {
 	if len(addrs) == 0 {
 		return nil
 	}
-	pipe := s.rdb.Pipeline()
-	cmds := make([]*redis.StringCmd, len(addrs))
+	keys := make([]string, len(addrs))
 	for i, addr := range addrs {
-		cmds[i] = pipe.Get(ctx, s.metaKey(addr))
+		keys[i] = s.metaKey(addr)
 	}
-	_, _ = pipe.Exec(ctx)
+	vals, err := s.rdb.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil
+	}
 	out := make([]Proxy, 0, len(addrs))
-	for i, cmd := range cmds {
-		raw, err := cmd.Bytes()
-		if err != nil {
+	for i, v := range vals {
+		// Missing keys come back as nil; skip them like the old per-GET path did.
+		raw, ok := v.(string)
+		if !ok {
 			continue
 		}
 		var p Proxy
-		if err := json.Unmarshal(raw, &p); err != nil {
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
 			continue
 		}
 		if p.Addr == "" {
@@ -168,6 +188,9 @@ func (s *redisStore) AddRaw(ctx context.Context, proxies []Proxy) (int, error) {
 		}
 		if p.Score == 0 {
 			p.Score = ScoreInit
+		}
+		if p.IPFamily == "" {
+			p.IPFamily = DetectFamily(p.Host)
 		}
 		p.CreatedAt = now
 		p.UpdatedAt = now
@@ -320,14 +343,28 @@ func (s *redisStore) RandomN(ctx context.Context, protocol string, n int) ([]Pro
 	if err != nil {
 		return nil, err
 	}
-	loaded := s.mgetProxies(ctx, members)
-	candidates := make([]Proxy, 0, len(loaded))
-	for _, p := range loaded {
-		if protocol != "" && !strings.EqualFold(p.Protocol, protocol) {
-			continue
+	pick := func(members []string) []Proxy {
+		loaded := s.mgetProxies(ctx, members)
+		out := make([]Proxy, 0, len(loaded))
+		for _, p := range loaded {
+			if protocol != "" && !strings.EqualFold(p.Protocol, protocol) {
+				continue
+			}
+			if p.Validated || p.Score >= ScoreInit {
+				out = append(out, p)
+			}
 		}
-		if p.Validated || p.Score >= ScoreInit {
-			candidates = append(candidates, p)
+		return out
+	}
+	candidates := pick(members)
+	if len(candidates) == 0 {
+		// Fall back to the raw pool, matching memoryStore. Without this a freshly
+		// scraped pool reports "no proxy available" until the first validation
+		// round finishes, even though keyRaw holds thousands of addresses — and
+		// Service.RandomFamilyFilter surfaces that error straight to the caller.
+		rawMembers, rawErr := s.rdb.ZRevRange(ctx, keyRaw, 0, fetch-1).Result()
+		if rawErr == nil {
+			candidates = pick(rawMembers)
 		}
 	}
 	if len(candidates) == 0 {
@@ -420,11 +457,17 @@ func matchListFilter(p Proxy, filter ListFilter) bool {
 	if filter.Region != "" && !strings.Contains(strings.ToLower(p.Region), strings.ToLower(filter.Region)) {
 		return false
 	}
+	if filter.Family != "" && !strings.EqualFold(p.Family(), filter.Family) {
+		return false
+	}
+	if filter.groupRule != nil && !filter.groupRule.Matches(p) {
+		return false
+	}
 	if filter.MinScore > 0 && p.Score < filter.MinScore {
 		return false
 	}
 	if q := strings.TrimSpace(strings.ToLower(filter.Query)); q != "" {
-		hay := strings.ToLower(p.Addr + " " + p.Source + " " + p.Protocol + " " + p.Region)
+		hay := strings.ToLower(p.Addr + " " + p.Source + " " + p.Protocol + " " + p.Region + " " + p.Family())
 		if !strings.Contains(hay, q) {
 			return false
 		}
@@ -443,6 +486,7 @@ func (s *redisStore) List(ctx context.Context, filter ListFilter) (ListResult, e
 		filter.Size = 5000
 	}
 	needFilter := filter.Source != "" || filter.Protocol != "" || filter.Region != "" ||
+		filter.Family != "" || filter.groupRule != nil ||
 		filter.MinScore > 0 || strings.TrimSpace(filter.Query) != "" || !filter.OnlyOK
 
 	scoredCard, _ := s.rdb.ZCard(ctx, keyScored).Result()
@@ -512,24 +556,25 @@ func (s *redisStore) List(ctx context.Context, filter ListFilter) (ListResult, e
 			items = append(items, p)
 		}
 	}
-	// Approximate total: filtered count in window; if window saturated use card estimate
+	// Total is the number of matches actually found in the scanned window.
+	//
+	// It used to fall back to the unfiltered set cardinality once the window
+	// saturated, which broke pagination: filtering 1000 proxies by a rare
+	// attribute reported Total=1000, so the UI drew 50 pages while only the
+	// first two had rows. Reporting the real match count keeps every advertised
+	// page populated; Truncated tells the caller it is a lower bound because
+	// further matches may sit beyond the window.
 	total := int64(len(items))
-	if int64(len(members)) >= maxHydrate {
-		if filter.OnlyOK {
-			total = scoredCard
-		} else {
-			total = scoredCard + rawCard
-		}
-	}
+	truncated := int64(len(members)) >= maxHydrate
 	start := (filter.Page - 1) * filter.Size
 	if start >= len(items) {
-		return ListResult{Items: []Proxy{}, Total: total, Page: filter.Page, Size: filter.Size}, nil
+		return ListResult{Items: []Proxy{}, Total: total, Page: filter.Page, Size: filter.Size, Truncated: truncated}, nil
 	}
 	end := start + filter.Size
 	if end > len(items) {
 		end = len(items)
 	}
-	return ListResult{Items: items[start:end], Total: total, Page: filter.Page, Size: filter.Size}, nil
+	return ListResult{Items: items[start:end], Total: total, Page: filter.Page, Size: filter.Size, Truncated: truncated}, nil
 }
 
 func (s *redisStore) SaveScraperStat(ctx context.Context, stat ScraperStat) error {
@@ -556,20 +601,50 @@ func (s *redisStore) ListScraperStats(ctx context.Context) (map[string]ScraperSt
 	return out, nil
 }
 
+// SetScraperEnabled records an explicit state, overriding the shipped default.
+//
+// Both directions write to a set and clear the other, so the two sets stay
+// mutually exclusive and the call is idempotent. Only removing from keyDisabled
+// was not enough: for a source that ships default-off there was nothing to
+// remove, so "enable" silently did nothing.
 func (s *redisStore) SetScraperEnabled(ctx context.Context, name string, enabled bool) error {
+	pipe := s.rdb.Pipeline()
 	if enabled {
-		return s.rdb.SRem(ctx, keyDisabled, name).Err()
+		pipe.SRem(ctx, keyDisabled, name)
+		pipe.SAdd(ctx, keyEnabled, name)
+	} else {
+		pipe.SRem(ctx, keyEnabled, name)
+		pipe.SAdd(ctx, keyDisabled, name)
 	}
-	return s.rdb.SAdd(ctx, keyDisabled, name).Err()
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
+// IsScraperEnabled prefers an explicit override, falling back to the default.
+//
+// Disabled wins over enabled if both are somehow set: the safe reading of
+// contradictory state is "off", since a source stuck on can keep filling the raw
+// cap and evicting other sources' proxies.
 func (s *redisStore) IsScraperEnabled(ctx context.Context, name string, defaultEnabled bool) (bool, error) {
-	disabled, err := s.rdb.SIsMember(ctx, keyDisabled, name).Result()
+	pipe := s.rdb.Pipeline()
+	disabledCmd := pipe.SIsMember(ctx, keyDisabled, name)
+	enabledCmd := pipe.SIsMember(ctx, keyEnabled, name)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return defaultEnabled, err
+	}
+	disabled, err := disabledCmd.Result()
 	if err != nil {
 		return defaultEnabled, err
 	}
 	if disabled {
 		return false, nil
+	}
+	enabled, err := enabledCmd.Result()
+	if err != nil {
+		return defaultEnabled, err
+	}
+	if enabled {
+		return true, nil
 	}
 	return defaultEnabled, nil
 }
@@ -614,43 +689,67 @@ func (s *redisStore) RegionTop(ctx context.Context, limit int) ([]RegionCount, e
 	return out, nil
 }
 
+// queueSampleSize bounds the meta hydration used for protocol/family/fail stats.
+const queueSampleSize = 300
+
 func (s *redisStore) Queues(ctx context.Context) (ValidatorQueues, error) {
-	raw, err := s.rdb.ZCard(ctx, keyRaw).Result()
+	// Bucket counts are computed server-side with ZCOUNT and the sample is
+	// capped by ZREVRANGE, so this no longer transfers the whole scored set
+	// (previously every member + score, up to MaxValidatedProxies, per call).
+	// Ranges mirror the old if/else chain exactly: (-inf,20], (20,50], (50,80], (80,+inf).
+	//
+	// Everything goes in one pipeline: against a real Redis a 7-command
+	// pipeline measured ~102us vs ~296us for just 3 sequential commands, so
+	// batching more commands is still a net win. (Benchmarks run on the
+	// in-process miniredis fake understate this — it has no network stack.)
+	pipe := s.rdb.Pipeline()
+	rawCmd := pipe.ZCard(ctx, keyRaw)
+	validatedCmd := pipe.ZCard(ctx, keyScored)
+	bucketRanges := []struct {
+		label    string
+		min, max string
+	}{
+		{"0-20", "-inf", "20"},
+		{"21-50", "(20", "50"},
+		{"51-80", "(50", "80"},
+		{"81-100", "(80", "+inf"},
+	}
+	bucketCmds := make([]*redis.IntCmd, len(bucketRanges))
+	for i, br := range bucketRanges {
+		bucketCmds[i] = pipe.ZCount(ctx, keyScored, br.min, br.max)
+	}
+	sampleCmd := pipe.ZRevRange(ctx, keyScored, 0, queueSampleSize-1)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return ValidatorQueues{}, err
+	}
+
+	raw, err := rawCmd.Result()
 	if err != nil {
 		return ValidatorQueues{}, err
 	}
-	validated, err := s.rdb.ZCard(ctx, keyScored).Result()
+	validated, err := validatedCmd.Result()
 	if err != nil {
 		return ValidatorQueues{}, err
 	}
-	// Score buckets from zset scores only (no meta GET). Protocol/fail sample top 300.
-	members, err := s.rdb.ZRevRangeWithScores(ctx, keyScored, 0, -1).Result()
-	if err != nil {
-		return ValidatorQueues{}, err
-	}
-	buckets := map[string]int64{"0-20": 0, "21-50": 0, "51-80": 0, "81-100": 0}
-	sampleAddrs := make([]string, 0, 300)
-	for i, z := range members {
-		switch {
-		case z.Score <= 20:
-			buckets["0-20"]++
-		case z.Score <= 50:
-			buckets["21-50"]++
-		case z.Score <= 80:
-			buckets["51-80"]++
-		default:
-			buckets["81-100"]++
+	buckets := make(map[string]int64, len(bucketRanges))
+	for i, br := range bucketRanges {
+		n, err := bucketCmds[i].Result()
+		if err != nil {
+			return ValidatorQueues{}, err
 		}
-		if i < 300 {
-			if addr, ok := z.Member.(string); ok {
-				sampleAddrs = append(sampleAddrs, addr)
-			}
-		}
+		buckets[br.label] = n
 	}
+	sampleAddrs, err := sampleCmd.Result()
+	if err != nil {
+		return ValidatorQueues{}, err
+	}
+
 	protocols := map[string]int64{}
+	families := map[string]int64{}
 	sourceFails := map[string]int64{}
 	for _, p := range s.mgetProxies(ctx, sampleAddrs) {
 		protocols[p.Protocol]++
+		families[p.Family()]++
 		if p.FailCount > 0 {
 			sourceFails[p.Source] += int64(p.FailCount)
 		}
@@ -668,12 +767,19 @@ func (s *redisStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 		ValidatedCount: validated,
 		ScoreBuckets:   buckets,
 		ProtocolCounts: protocols,
+		FamilyCounts:   families,
 		FailTopSources: fails,
 	}, nil
 }
 
+// AvgScore averages the scored set client-side.
+//
+// A server-side Lua aggregation was tried and reverted: it benchmarked 64%
+// slower with 2.6x the allocations, and worse, summing N scores inside Lua
+// blocks Redis's single-threaded event loop for every other client. Letting
+// Redis stream the scores out and summing here keeps the server responsive.
 func (s *redisStore) AvgScore(ctx context.Context) (float64, error) {
-	members, err := s.rdb.ZRevRangeWithScores(ctx, keyScored, 0, -1).Result()
+	members, err := s.rdb.ZRangeWithScores(ctx, keyScored, 0, -1).Result()
 	if err != nil {
 		return 0, err
 	}
@@ -702,18 +808,28 @@ func normalizeAddr(host string, port int) string {
 	if host == "" || port <= 0 || port > 65535 {
 		return ""
 	}
-	return host + ":" + strconv.Itoa(port)
+	// net.JoinHostPort wraps IPv6 addresses in brackets: [::1]:8080
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // memoryStore is used when Redis is unavailable so the panel still works.
 type memoryStore struct {
-	mu        sync.RWMutex
-	proxies   map[string]Proxy
-	raw       map[string]struct{}
-	scored    map[string]struct{}
-	stats     map[string]ScraperStat
-	disabled  map[string]struct{}
-	events    []string
+	mu       sync.RWMutex
+	proxies  map[string]Proxy
+	raw      map[string]struct{}
+	scored   map[string]struct{}
+	stats    map[string]ScraperStat
+	disabled map[string]struct{}
+	// enabled holds explicit "on" overrides, mirroring keyEnabled. Without it a
+	// source shipping default-off could never be turned on.
+	enabled map[string]struct{}
+	groups  map[string]ProxyGroup
+	events  []string
+	// yields is keyed by source name. It is deliberately separate from events:
+	// events is a 50-entry ring rendered verbatim on the dashboard, so sharing it
+	// would both leak JSON into the operator's feed and let ordinary panel
+	// activity evict the history a trend is computed from.
+	yields map[string][]SourceYieldRecord
 }
 
 func NewMemoryStore() Store {
@@ -723,12 +839,15 @@ func NewMemoryStore() Store {
 		scored:   map[string]struct{}{},
 		stats:    map[string]ScraperStat{},
 		disabled: map[string]struct{}{},
+		enabled:  map[string]struct{}{},
+		groups:   map[string]ProxyGroup{},
+		yields:   map[string][]SourceYieldRecord{},
 	}
 }
 
-func (s *memoryStore) Backend() string                  { return "memory" }
-func (s *memoryStore) Ping(ctx context.Context) error   { return nil }
-func (s *memoryStore) Close() error                     { return nil }
+func (s *memoryStore) Backend() string                { return "memory" }
+func (s *memoryStore) Ping(ctx context.Context) error { return nil }
+func (s *memoryStore) Close() error                   { return nil }
 
 func (s *memoryStore) AddRaw(ctx context.Context, proxies []Proxy) (int, error) {
 	s.mu.Lock()
@@ -753,6 +872,9 @@ func (s *memoryStore) AddRaw(ctx context.Context, proxies []Proxy) (int, error) 
 		}
 		if p.Score == 0 {
 			p.Score = ScoreInit
+		}
+		if p.IPFamily == "" {
+			p.IPFamily = DetectFamily(p.Host)
 		}
 		p.CreatedAt = now
 		p.UpdatedAt = now
@@ -987,28 +1109,9 @@ func (s *memoryStore) List(ctx context.Context, filter ListFilter) (ListResult, 
 	}
 	items := make([]Proxy, 0, len(s.proxies))
 	for _, p := range s.proxies {
-		if filter.OnlyOK && !p.Validated {
-			continue
+		if matchListFilter(p, filter) {
+			items = append(items, p)
 		}
-		if filter.Source != "" && !strings.EqualFold(p.Source, filter.Source) {
-			continue
-		}
-		if filter.Protocol != "" && !strings.EqualFold(p.Protocol, filter.Protocol) {
-			continue
-		}
-		if filter.Region != "" && !strings.Contains(strings.ToLower(p.Region), strings.ToLower(filter.Region)) {
-			continue
-		}
-		if filter.MinScore > 0 && p.Score < filter.MinScore {
-			continue
-		}
-		if q := strings.TrimSpace(strings.ToLower(filter.Query)); q != "" {
-			hay := strings.ToLower(p.Addr + " " + p.Source + " " + p.Protocol + " " + p.Region)
-			if !strings.Contains(hay, q) {
-				continue
-			}
-		}
-		items = append(items, p)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Score > items[j].Score })
 	total := int64(len(items))
@@ -1040,12 +1143,19 @@ func (s *memoryStore) ListScraperStats(ctx context.Context) (map[string]ScraperS
 	return out, nil
 }
 
+// SetScraperEnabled mirrors the Redis path: an explicit state in either
+// direction, with the opposite set cleared so the two stay exclusive.
 func (s *memoryStore) SetScraperEnabled(ctx context.Context, name string, enabled bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.enabled == nil {
+		s.enabled = map[string]struct{}{}
+	}
 	if enabled {
 		delete(s.disabled, name)
+		s.enabled[name] = struct{}{}
 	} else {
+		delete(s.enabled, name)
 		s.disabled[name] = struct{}{}
 	}
 	return nil
@@ -1054,8 +1164,12 @@ func (s *memoryStore) SetScraperEnabled(ctx context.Context, name string, enable
 func (s *memoryStore) IsScraperEnabled(ctx context.Context, name string, defaultEnabled bool) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	// Disabled wins over enabled, matching redisStore.
 	if _, ok := s.disabled[name]; ok {
 		return false, nil
+	}
+	if _, ok := s.enabled[name]; ok {
+		return true, nil
 	}
 	return defaultEnabled, nil
 }
@@ -1108,6 +1222,7 @@ func (s *memoryStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 	defer s.mu.RUnlock()
 	buckets := map[string]int64{"0-20": 0, "21-50": 0, "51-80": 0, "81-100": 0}
 	protocols := map[string]int64{}
+	families := map[string]int64{}
 	sourceFails := map[string]int64{}
 	for addr := range s.scored {
 		p := s.proxies[addr]
@@ -1122,6 +1237,7 @@ func (s *memoryStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 			buckets["81-100"]++
 		}
 		protocols[p.Protocol]++
+		families[p.Family()]++
 		if p.FailCount > 0 {
 			sourceFails[p.Source] += int64(p.FailCount)
 		}
@@ -1136,6 +1252,7 @@ func (s *memoryStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 		ValidatedCount: int64(len(s.scored)),
 		ScoreBuckets:   buckets,
 		ProtocolCounts: protocols,
+		FamilyCounts:   families,
 		FailTopSources: fails,
 	}, nil
 }

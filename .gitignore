@@ -1,4 +1,8 @@
 data/
+# scripts/fetch-proxies.sh 的默认输出目录（抓来的代理清单，不入库）
+out/
+# scripts/auto-enrich.sh 挂 cron 时的日志落点
+logs/
 tmp-smoke-data/
 tmp-sync-data/
 tmp-e2e-data*/

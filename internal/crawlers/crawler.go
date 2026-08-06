@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -69,11 +70,17 @@ func (r *Registry) Names() []string {
 
 var (
 	ipPortRe = regexp.MustCompile(`(?i)\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b`)
-	hostRe   = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
+	// Bracketed IPv6 is the only unambiguous inline form, and the one every
+	// published list uses: a bare literal's own colons cannot be told apart from
+	// the port separator. Without this pattern IPv6 proxies never reach the
+	// store, which makes the ip_family field and family filters dead weight.
+	ipv6PortRe = regexp.MustCompile(`\[[0-9A-Fa-f:.]{2,45}\]:\d{2,5}`)
+	hostRe     = regexp.MustCompile(`^(?:\d{1,3}\.){3}\d{1,3}$`)
 )
 
 func ExtractIPPort(text string) []Proxy {
 	matches := ipPortRe.FindAllString(text, -1)
+	matches = append(matches, ipv6PortRe.FindAllString(text, -1)...)
 	seen := map[string]struct{}{}
 	out := make([]Proxy, 0, len(matches))
 	for _, m := range matches {
@@ -81,7 +88,7 @@ func ExtractIPPort(text string) []Proxy {
 		if !ok {
 			continue
 		}
-		key := host + ":" + strconv.Itoa(port)
+		key := net.JoinHostPort(host, strconv.Itoa(port))
 		if _, exists := seen[key]; exists {
 			continue
 		}
@@ -91,8 +98,26 @@ func ExtractIPPort(text string) []Proxy {
 	return out
 }
 
+// splitHostPort accepts "1.2.3.4:8080" and "[2001:db8::1]:1080", returning the
+// host without brackets. Only IP literals are accepted; hostnames are rejected
+// because the sources this parses publish addresses, not names.
 func splitHostPort(s string) (string, int, bool) {
-	parts := strings.Split(strings.TrimSpace(s), ":")
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "[") {
+		host, portText, err := net.SplitHostPort(s)
+		if err != nil {
+			return "", 0, false
+		}
+		if net.ParseIP(host) == nil {
+			return "", 0, false
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port <= 0 || port > 65535 {
+			return "", 0, false
+		}
+		return host, port, true
+	}
+	parts := strings.Split(s, ":")
 	if len(parts) != 2 {
 		return "", 0, false
 	}
@@ -104,12 +129,17 @@ func splitHostPort(s string) (string, int, bool) {
 	if err != nil || port <= 0 || port > 65535 {
 		return "", 0, false
 	}
-	// basic octet check
-	for _, oct := range strings.Split(host, ".") {
-		n, _ := strconv.Atoi(oct)
-		if n < 0 || n > 255 {
-			return "", 0, false
-		}
+	// net.ParseIP is the authority on what counts as an address, and it is what
+	// freproxies.DetectFamily uses — so validating with it here makes the two
+	// agree by construction.
+	//
+	// The hand-rolled octet loop this replaces compared strconv.Atoi output
+	// against 0-255, which reads "04" as 4 and let leading-zero octets through.
+	// net.ParseIP rejects those, so such a host was stored with
+	// ip_family=unknown and could never be dialed: the dialer falls through to
+	// DNS and "103.250.166.04" does not resolve.
+	if net.ParseIP(host) == nil {
+		return "", 0, false
 	}
 	return host, port, true
 }
@@ -224,11 +254,11 @@ func ParseHTMLTable(body []byte, hostIdx, portIdx int) ([]Proxy, error) {
 // Generic crawler helpers
 
 type plainTextCrawler struct {
-	name            string
-	urls            []string
-	protocol        string
-	fragile         bool
-	defaultEnabled  bool
+	name           string
+	urls           []string
+	protocol       string
+	fragile        bool
+	defaultEnabled bool
 }
 
 func PlainText(name string, urls []string, protocol string, fragile bool, enabled bool) Crawler {
@@ -238,11 +268,11 @@ func PlainText(name string, urls []string, protocol string, fragile bool, enable
 	return &plainTextCrawler{name: name, urls: urls, protocol: protocol, fragile: fragile, defaultEnabled: enabled}
 }
 
-func (c *plainTextCrawler) Name() string           { return c.name }
-func (c *plainTextCrawler) URLs() []string         { return c.urls }
-func (c *plainTextCrawler) Protocol() string       { return c.protocol }
-func (c *plainTextCrawler) Fragile() bool          { return c.fragile }
-func (c *plainTextCrawler) DefaultEnabled() bool   { return c.defaultEnabled }
+func (c *plainTextCrawler) Name() string         { return c.name }
+func (c *plainTextCrawler) URLs() []string       { return c.urls }
+func (c *plainTextCrawler) Protocol() string     { return c.protocol }
+func (c *plainTextCrawler) Fragile() bool        { return c.fragile }
+func (c *plainTextCrawler) DefaultEnabled() bool { return c.defaultEnabled }
 func (c *plainTextCrawler) Parse(body []byte, _ string) ([]Proxy, error) {
 	items := ExtractIPPort(string(body))
 	for i := range items {

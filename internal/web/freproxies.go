@@ -3,7 +3,9 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -52,6 +54,8 @@ func (a *App) handleFreeProxyList(w http.ResponseWriter, r *http.Request) {
 		Source:   r.URL.Query().Get("source"),
 		Protocol: firstNonEmpty(r.URL.Query().Get("proto"), r.URL.Query().Get("protocol")),
 		Region:   r.URL.Query().Get("region"),
+		Family:   normalizeFamilyParam(firstNonEmpty(r.URL.Query().Get("family"), r.URL.Query().Get("ip_family"))),
+		Group:    r.URL.Query().Get("group"),
 		Query:    firstNonEmpty(r.URL.Query().Get("q"), r.URL.Query().Get("query")),
 		OnlyOK:   r.URL.Query().Get("only_ok") == "1" || r.URL.Query().Get("only_ok") == "true",
 	}
@@ -78,12 +82,29 @@ func (a *App) handleFreeProxyRandom(w http.ResponseWriter, r *http.Request) {
 	}
 	proto := firstNonEmpty(r.URL.Query().Get("proto"), r.URL.Query().Get("type"), r.URL.Query().Get("protocol"))
 	region := r.URL.Query().Get("region")
-	item, err := a.free.RandomFilter(r.Context(), proto, region)
+	family := normalizeFamilyParam(firstNonEmpty(r.URL.Query().Get("family"), r.URL.Query().Get("ip_family")))
+	item, err := a.free.RandomFamilyFilter(r.Context(), proto, region, family)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: item})
+}
+
+// normalizeFamilyParam maps user-facing aliases (4/v4/inet6/…) onto the
+// canonical ipv4 / ipv6 / unknown values. Unrecognized input yields "" so the
+// filter is simply ignored rather than silently matching nothing.
+func normalizeFamilyParam(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "4", "v4", "ipv4", "inet", "inet4":
+		return freproxies.FamilyIPv4
+	case "6", "v6", "ipv6", "inet6":
+		return freproxies.FamilyIPv6
+	case "unknown", "host", "hostname":
+		return freproxies.FamilyUnknown
+	default:
+		return ""
+	}
 }
 
 // handlePublicGet mirrors classic proxy_pool /get — returns host:port plain or JSON.
@@ -97,7 +118,8 @@ func (a *App) handlePublicGet(w http.ResponseWriter, r *http.Request) {
 		proto = r.URL.Query().Get("proto")
 	}
 	region := r.URL.Query().Get("region")
-	item, err := a.free.RandomFilter(r.Context(), proto, region)
+	family := normalizeFamilyParam(firstNonEmpty(r.URL.Query().Get("family"), r.URL.Query().Get("ip_family")))
+	item, err := a.free.RandomFamilyFilter(r.Context(), proto, region, family)
 	if err != nil {
 		http.Error(w, "no proxy", http.StatusNotFound)
 		return
@@ -105,12 +127,13 @@ func (a *App) handlePublicGet(w http.ResponseWriter, r *http.Request) {
 	format := strings.ToLower(r.URL.Query().Get("format"))
 	if format == "json" || r.Header.Get("Accept") == "application/json" {
 		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
-			"proxy":    item.Addr,
-			"protocol": item.Protocol,
-			"source":   item.Source,
-			"score":    item.Score,
-			"latency":  item.LatencyMS,
-			"region":   item.Region,
+			"proxy":     item.Addr,
+			"protocol":  item.Protocol,
+			"source":    item.Source,
+			"score":     item.Score,
+			"latency":   item.LatencyMS,
+			"region":    item.Region,
+			"ip_family": item.Family(),
 		}})
 		return
 	}
@@ -195,6 +218,224 @@ func (a *App) handleFreeProxyTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"ok": true, "proxy": item}})
+}
+
+// handleProxySubmit adds a batch of raw addresses to the pool without
+// validating them. Duplicates are silently skipped. Scripts that have
+// scraped proxies locally can push them here instead of dialling Redis
+// directly or running the CLI binary.
+//
+//	POST /api/proxies/submit
+//	Authorization: Bearer <token>  OR  session cookie
+//
+//	Body (JSON):
+//	  { "proxies": [{"host":"1.2.3.4","port":8080,"protocol":"http"},…] }
+//	  or plain-text, one host:port per line (Content-Type: text/plain)
+//
+//	Response:
+//	  { "success":true, "data":{"added":N,"submitted":M} }
+func (a *App) handleProxySubmit(w http.ResponseWriter, r *http.Request) {
+	if a.free == nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "free proxy disabled"})
+		return
+	}
+
+	var proxies []freproxies.Proxy
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.Contains(ct, "text/plain") {
+		// One address per line: host:port or proto://host:port
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		for _, line := range strings.Split(string(body), "\n") {
+			p := parseAddrLine(strings.TrimSpace(line))
+			if p.Host != "" {
+				proxies = append(proxies, p)
+			}
+		}
+	} else {
+		var body struct {
+			Proxies []freproxies.Proxy `json:"proxies"`
+			Source  string             `json:"source"`
+		}
+		if !decodeJSON(w, r, &body) {
+			return
+		}
+		proxies = body.Proxies
+	}
+
+	if len(proxies) == 0 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "proxies list is empty"})
+		return
+	}
+
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	res, err := a.free.SubmitRaw(r.Context(), proxies, source)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: submitPayload(res, len(proxies))})
+}
+
+// submitPayload shapes a SubmitResult for the wire.
+//
+// It reports evicted/net_growth alongside added because "added" alone is
+// misleading once the raw pool is at its cap: inserting N addresses then evicts
+// N others, so a caller seeing only added=N concludes the pool grew by N when it
+// may not have grown at all.
+func submitPayload(res freproxies.SubmitResult, submitted int) map[string]any {
+	out := map[string]any{
+		"submitted":  submitted,
+		"parsed":     res.Parsed,
+		"added":      res.Added,
+		"duplicates": res.Duplicates,
+		"net_growth": res.NetGrowth,
+		"evicted":    res.Evicted,
+		"raw_at_cap": res.RawAtCap,
+	}
+	if res.Evicted > 0 {
+		out["note"] = fmt.Sprintf(
+			"raw pool is at its cap (%d), so %d existing proxy/proxies were evicted to "+
+				"admit these; pool total changed by %d",
+			freproxies.MaxRawProxies, res.Evicted, res.NetGrowth)
+	}
+	return out
+}
+
+// handleProxyBatchTest validates up to 200 addresses concurrently and returns
+// per-address results. New addresses are added to the raw pool first; live ones
+// are promoted to validated; dead ones are removed, matching the periodic
+// validator's behaviour.
+//
+//	POST /api/proxies/batch-test
+//
+//	Body: { "addrs": ["1.2.3.4:8080",…], "concurrency": 20, "timeout_ms": 8000 }
+//
+//	Response: { "success":true, "data":{"results":[{"addr":…,"ok":…,"latency_ms":…}], "ok":N,"fail":M} }
+func (a *App) handleProxyBatchTest(w http.ResponseWriter, r *http.Request) {
+	if a.free == nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "free proxy disabled"})
+		return
+	}
+	var body struct {
+		Addrs       []string `json:"addrs"`
+		Concurrency int      `json:"concurrency"`
+		TimeoutMS   int      `json:"timeout_ms"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if len(body.Addrs) == 0 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "addrs is empty"})
+		return
+	}
+
+	timeout := time.Duration(a.freeCfg.FreeValidateTimeoutMS) * time.Millisecond
+	if body.TimeoutMS > 0 {
+		timeout = time.Duration(body.TimeoutMS) * time.Millisecond
+	}
+
+	results := a.free.BatchTest(r.Context(), body.Addrs, a.freeCfg.FreeValidateURL, timeout, body.Concurrency)
+
+	ok, fail := 0, 0
+	for _, res := range results {
+		if res.OK {
+			ok++
+		} else {
+			fail++
+		}
+	}
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+		"results": results,
+		"ok":      ok,
+		"fail":    fail,
+	}})
+}
+
+// handlePublicSubmit is the unauthenticated version of handleProxySubmit for
+// LAN scripts. It accepts the same body format but is rate-limited to
+// plain text-only to make mass spamming harder. Auth is deliberately absent
+// because scripts running alongside the panel on a private LAN often cannot
+// hold a session cookie and may not have a token configured yet.
+//
+//	POST /api/public/submit
+//
+//	Body (text/plain):
+//	  host:port\n…  or  proto://host:port\n…
+//
+//	Response: { "success":true, "data":{"added":N,"submitted":M} }
+func (a *App) handlePublicSubmit(w http.ResponseWriter, r *http.Request) {
+	if a.free == nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "free proxy disabled"})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 512<<10)) // 512 KB max
+	if err != nil || len(body) == 0 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "empty body"})
+		return
+	}
+
+	var proxies []freproxies.Proxy
+	for _, line := range strings.Split(string(body), "\n") {
+		p := parseAddrLine(strings.TrimSpace(line))
+		if p.Host != "" {
+			proxies = append(proxies, p)
+		}
+	}
+	if len(proxies) == 0 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "no valid addresses found"})
+		return
+	}
+
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	if source == "" {
+		source = "public-submit"
+	}
+	res, err := a.free.SubmitRaw(r.Context(), proxies, source)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: submitPayload(res, len(proxies))})
+}
+
+// parseAddrLine converts a single text line into a Proxy.
+// Accepts: host:port, proto://host:port, socks5://user:pass@host:port.
+func parseAddrLine(line string) freproxies.Proxy {
+	if line == "" || strings.HasPrefix(line, "#") {
+		return freproxies.Proxy{}
+	}
+	proto := "http"
+	// Strip scheme if present.
+	if idx := strings.Index(line, "://"); idx > 0 {
+		proto = strings.ToLower(line[:idx])
+		line = line[idx+3:]
+	}
+	// Strip userinfo (user:pass@)
+	if at := strings.LastIndex(line, "@"); at >= 0 {
+		line = line[at+1:]
+	}
+	host, portStr, err := splitHostPort(line)
+	if err != nil || host == "" || portStr == "" {
+		return freproxies.Proxy{}
+	}
+	port := 0
+	for _, ch := range portStr {
+		if ch < '0' || ch > '9' {
+			return freproxies.Proxy{}
+		}
+		port = port*10 + int(ch-'0')
+	}
+	if port <= 0 || port > 65535 {
+		return freproxies.Proxy{}
+	}
+	return freproxies.Proxy{Host: host, Port: port, Protocol: proto}
+}
+
+// splitHostPort is a thin wrapper around net.SplitHostPort so parseAddrLine
+// can treat parse errors as non-fatal without sprinkling the import everywhere.
+func splitHostPort(addr string) (host, port string, err error) {
+	return net.SplitHostPort(addr)
 }
 
 func (a *App) handleScraperList(w http.ResponseWriter, r *http.Request) {

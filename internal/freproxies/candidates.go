@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strings"
 
 	"unified-proxy-pool/internal/models"
@@ -146,7 +147,7 @@ func (s *Service) PickValidated(ctx context.Context, protocol string) (Proxy, er
 }
 
 func (s *Service) PickValidatedFilter(ctx context.Context, protocol, region string) (Proxy, error) {
-	items, err := s.PickValidatedNFilter(ctx, protocol, region, 1)
+	items, err := s.PickValidatedNFilter(ctx, protocol, region, "", 1)
 	if err != nil {
 		return Proxy{}, err
 	}
@@ -155,15 +156,20 @@ func (s *Service) PickValidatedFilter(ctx context.Context, protocol, region stri
 
 // PickValidatedN returns up to n shuffled free proxies for failover dialing.
 func (s *Service) PickValidatedN(ctx context.Context, protocol string, n int) ([]Proxy, error) {
-	return s.PickValidatedNFilter(ctx, protocol, "", n)
+	return s.PickValidatedNFilter(ctx, protocol, "", "", n)
 }
 
-func (s *Service) PickValidatedNFilter(ctx context.Context, protocol, region string, n int) ([]Proxy, error) {
+// PickValidatedNFamily restricts the pick to one IP family (ipv4/ipv6).
+func (s *Service) PickValidatedNFamily(ctx context.Context, protocol, family string, n int) ([]Proxy, error) {
+	return s.PickValidatedNFilter(ctx, protocol, "", family, n)
+}
+
+func (s *Service) PickValidatedNFilter(ctx context.Context, protocol, region, family string, n int) ([]Proxy, error) {
 	if n <= 0 {
 		n = 1
 	}
 	try := func(items []Proxy) []Proxy {
-		return s.filterPick(items, region, n)
+		return s.filterPick(items, region, family, n)
 	}
 	// Hot cache first — zero Redis on hit
 	if s.hot != nil {
@@ -183,24 +189,52 @@ func (s *Service) PickValidatedNFilter(ctx context.Context, protocol, region str
 			}
 		}
 	}
-	list, err := s.store.List(ctx, ListFilter{Page: 1, Size: max(n*10, 40), OnlyOK: true, Protocol: protocol, Region: region})
-	if err != nil || len(list.Items) == 0 {
-		list, err = s.store.List(ctx, ListFilter{Page: 1, Size: max(n*10, 40), OnlyOK: true})
+	// Progressively relax the query: drop protocol/region, then accept
+	// unvalidated proxies. Family is never relaxed — handing an IPv4 proxy to a
+	// caller that asked for IPv6 would break it silently. It is pushed down into
+	// the store so the hydrate window is spent on candidates that can actually
+	// match (IPv6 is rare in most pools).
+	size := max(n*10, 40)
+	ladder := []ListFilter{
+		{Page: 1, Size: size, OnlyOK: true, Protocol: protocol, Region: region, Family: family},
+		{Page: 1, Size: size, OnlyOK: true, Family: family},
+		{Page: 1, Size: size, Family: family},
 	}
-	if err != nil || len(list.Items) == 0 {
-		list, err = s.store.List(ctx, ListFilter{Page: 1, Size: max(n*10, 40)})
+	var lastErr error
+	served := false
+	issued := make([]ListFilter, 0, len(ladder))
+	for _, f := range ladder {
+		// Levels collapse onto one another when the caller passed no protocol
+		// and no region, which is the common case for family-only picks.
+		// Re-issuing an identical query buys nothing and costs another hydrate
+		// window (up to 800 metas on the filtered Redis path).
+		if slices.Contains(issued, f) {
+			continue
+		}
+		issued = append(issued, f)
+		list, err := s.store.List(ctx, f)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		served = true
+		// try() also drops blacklisted and disabled-source proxies, which the
+		// store filter knows nothing about, so a non-empty page can still yield
+		// nothing pickable — keep descending in that case.
+		if out := try(list.Items); len(out) > 0 {
+			return out, nil
+		}
 	}
-	if err != nil {
-		return nil, err
+	if !served && lastErr != nil {
+		return nil, lastErr
 	}
-	out := try(list.Items)
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no free proxy available")
+	if family != "" {
+		return nil, fmt.Errorf("no free proxy available for family %s", family)
 	}
-	return out, nil
+	return nil, fmt.Errorf("no free proxy available")
 }
 
-func (s *Service) filterPick(items []Proxy, region string, n int) []Proxy {
+func (s *Service) filterPick(items []Proxy, region, family string, n int) []Proxy {
 	out := make([]Proxy, 0, n)
 	for _, p := range items {
 		if s.blocked != nil && s.blocked(p.Addr) {
@@ -210,6 +244,9 @@ func (s *Service) filterPick(items []Proxy, region string, n int) []Proxy {
 			continue
 		}
 		if region != "" && p.Region != "" && !strings.EqualFold(p.Region, region) && !strings.Contains(strings.ToLower(p.Region), strings.ToLower(region)) {
+			continue
+		}
+		if family != "" && !strings.EqualFold(p.Family(), family) {
 			continue
 		}
 		out = append(out, p)

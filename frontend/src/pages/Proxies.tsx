@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Select } from "@/components/ui/input";
 import { useToast } from "@/hooks/useToast";
 import { formatLatency } from "@/lib/utils";
+import type { ProxyGroupView } from "@/types";
 
 type ProxyItem = {
   addr: string;
@@ -16,6 +17,7 @@ type ProxyItem = {
   port?: number;
   protocol: string;
   source: string;
+  ip_family?: string;
   score: number;
   latency_ms: number;
   region: string;
@@ -25,11 +27,90 @@ type ProxyItem = {
   created_at?: string;
 };
 
+/** Derive the IP family when the backend record predates the ip_family field. */
+function familyOf(item: ProxyItem): string {
+  if (item.ip_family) return item.ip_family;
+  const host = item.host || item.addr.replace(/:\d+$/, "");
+  const bare = host.replace(/^\[|\]$/g, "");
+  if (bare.includes(":")) return "ipv6";
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(bare)) return "ipv4";
+  return "unknown";
+}
+
+const FAMILY_LABELS: Record<string, string> = {
+  ipv4: "IPv4",
+  ipv6: "IPv6",
+  unknown: "未知",
+};
+
+/** Group editor form state. Multi-value fields are kept as raw comma text so
+ *  the user can type freely; they are split only on submit. */
+type GroupForm = {
+  name: string;
+  label: string;
+  sources: string;
+  protocols: string;
+  families: string[];
+  regions: string;
+  min_score: string;
+  only_ok: boolean;
+  editing: boolean;
+};
+
+const emptyGroupForm: GroupForm = {
+  name: "",
+  label: "",
+  sources: "",
+  protocols: "",
+  families: [],
+  regions: "",
+  min_score: "",
+  only_ok: false,
+  editing: false,
+};
+
+function splitList(v: string): string[] {
+  return v
+    .split(/[,\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function formFromGroup(g: ProxyGroupView): GroupForm {
+  return {
+    name: g.name,
+    label: g.label || "",
+    sources: (g.rule.sources || []).join(","),
+    protocols: (g.rule.protocols || []).join(","),
+    families: g.rule.families || [],
+    regions: (g.rule.regions || []).join(","),
+    min_score: g.rule.min_score ? String(g.rule.min_score) : "",
+    only_ok: Boolean(g.rule.only_ok),
+    editing: true,
+  };
+}
+
+/** Human-readable one-line summary of a group's matching rule. */
+function describeRule(g: ProxyGroupView): string {
+  const parts: string[] = [];
+  if (g.rule.families?.length) {
+    parts.push(g.rule.families.map((f) => FAMILY_LABELS[f] || f).join("/"));
+  }
+  if (g.rule.protocols?.length) parts.push(g.rule.protocols.join("/"));
+  if (g.rule.sources?.length) parts.push(`源:${g.rule.sources.join("/")}`);
+  if (g.rule.regions?.length) parts.push(`地区:${g.rule.regions.join("/")}`);
+  if (g.rule.min_score) parts.push(`评分≥${g.rule.min_score}`);
+  if (g.rule.only_ok) parts.push("仅已验证");
+  return parts.length ? parts.join(" · ") : "无限制";
+}
+
 type ListResult = {
   items: ProxyItem[];
   total: number;
   page: number;
   size: number;
+  /** Matches may exist beyond the scanned window, so `total` is a lower bound. */
+  truncated?: boolean;
 };
 
 type RowFeedback = {
@@ -68,7 +149,11 @@ export function ProxiesPage() {
   const [source, setSource] = useState("");
   const [onlyOK, setOnlyOK] = useState(false);
   const [region, setRegion] = useState("");
+  const [family, setFamily] = useState("");
+  const [group, setGroup] = useState("");
+  const [groups, setGroups] = useState<ProxyGroupView[]>([]);
   const [groupByCountry, setGroupByCountry] = useState(false);
+  const [groupByFamily, setGroupByFamily] = useState(false);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState<string | null>(null);
@@ -76,6 +161,9 @@ export function ProxiesPage() {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [rowFeedback, setRowFeedback] = useState<Record<string, RowFeedback>>({});
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [groupForm, setGroupForm] = useState<GroupForm>(emptyGroupForm);
+  const [groupSaving, setGroupSaving] = useState(false);
+  const [pendingGroupDelete, setPendingGroupDelete] = useState<string | null>(null);
 
   const setFeedback = (addr: string, fb: RowFeedback) => {
     setRowFeedback((prev) => ({ ...prev, [addr]: fb }));
@@ -103,11 +191,13 @@ export function ProxiesPage() {
     try {
       const result = await endpoints.proxies.list({
         page,
-        size: groupByCountry ? 100 : 20,
+        size: groupByCountry || groupByFamily ? 100 : 20,
         q: q || undefined,
         proto: proto || undefined,
         source: source || undefined,
         region: region || undefined,
+        family: family || undefined,
+        group: group || undefined,
         only_ok: onlyOK || undefined,
       });
       setData({
@@ -115,17 +205,30 @@ export function ProxiesPage() {
         total: result?.total || 0,
         page: result?.page || page,
         size: result?.size || 20,
+        truncated: result?.truncated,
       });
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", "error");
     } finally {
       setLoading(false);
     }
-  }, [groupByCountry, onlyOK, page, proto, q, region, source, toast]);
+  }, [family, group, groupByCountry, groupByFamily, onlyOK, page, proto, q, region, source, toast]);
+
+  const loadGroups = useCallback(async () => {
+    try {
+      setGroups(await endpoints.proxies.groups.list());
+    } catch {
+      // groups are optional context — a failure here must not block the list
+    }
+  }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void loadGroups();
+  }, [loadGroups]);
 
   useSse(() => {
     void load();
@@ -177,18 +280,75 @@ export function ProxiesPage() {
     }
   };
 
+  const saveGroup = async () => {
+    const payload = {
+      name: groupForm.name.trim(),
+      label: groupForm.label.trim() || undefined,
+      sources: splitList(groupForm.sources),
+      protocols: splitList(groupForm.protocols),
+      families: groupForm.families as ProxyGroupView["rule"]["families"],
+      regions: splitList(groupForm.regions),
+      min_score: groupForm.min_score ? Number(groupForm.min_score) : 0,
+      only_ok: groupForm.only_ok,
+    };
+    if (!payload.name) {
+      toast("请填写分组名", "error");
+      return;
+    }
+    setGroupSaving(true);
+    try {
+      if (groupForm.editing) {
+        await endpoints.proxies.groups.update(payload.name, payload);
+      } else {
+        await endpoints.proxies.groups.save(payload);
+      }
+      toast(`分组 ${payload.name} 已保存`, "success");
+      setGroupForm(emptyGroupForm);
+      await loadGroups();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "保存分组失败", "error");
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
+  const confirmGroupDelete = async () => {
+    const name = pendingGroupDelete;
+    if (!name) return;
+    try {
+      await endpoints.proxies.groups.remove(name);
+      toast(`已删除分组 ${name}`, "success");
+      setPendingGroupDelete(null);
+      // Drop the filter if the active group was the one removed.
+      if (group === name) setGroup("");
+      if (groupForm.name === name) setGroupForm(emptyGroupForm);
+      await loadGroups();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "删除分组失败", "error");
+    }
+  };
+
   const totalPages = Math.max(1, Math.ceil((data.total || 0) / (data.size || 20)));
 
   const countries = Array.from(
     new Set((data.items || []).map((i) => i.region || "unknown").filter(Boolean)),
   ).sort();
 
-  const grouped = groupByCountry
-    ? countries.map((c) => ({
-        country: c,
-        items: (data.items || []).filter((i) => (i.region || "unknown") === c),
+  const families = Array.from(new Set((data.items || []).map(familyOf))).sort();
+
+  // Family grouping takes precedence when both toggles are on, so the header
+  // row always describes exactly one dimension.
+  const grouped = groupByFamily
+    ? families.map((f) => ({
+        country: FAMILY_LABELS[f] || f,
+        items: (data.items || []).filter((i) => familyOf(i) === f),
       }))
-    : [{ country: "", items: data.items || [] }];
+    : groupByCountry
+      ? countries.map((c) => ({
+          country: c,
+          items: (data.items || []).filter((i) => (i.region || "unknown") === c),
+        }))
+      : [{ country: "", items: data.items || [] }];
 
   return (
     <div className="anim-fade-up">
@@ -207,6 +367,20 @@ export function ProxiesPage() {
               <option value="socks4">socks4</option>
               <option value="socks5">socks5</option>
             </Select>
+            <Select value={family} onChange={(e) => { setPage(1); setFamily(e.target.value); }}>
+              <option value="">IPv4 + IPv6</option>
+              <option value="ipv4">仅 IPv4</option>
+              <option value="ipv6">仅 IPv6</option>
+              <option value="unknown">仅域名/未知</option>
+            </Select>
+            <Select value={group} onChange={(e) => { setPage(1); setGroup(e.target.value); }}>
+              <option value="">全部分组</option>
+              {groups.map((g) => (
+                <option key={g.name} value={g.name}>
+                  {g.builtin ? "内置" : "自定义"} · {g.label || g.name} ({g.total})
+                </option>
+              ))}
+            </Select>
             <Input placeholder="来源 source" value={source} onChange={(e) => { setPage(1); setSource(e.target.value); }} />
             <Input placeholder="国家/地区 region" value={region} onChange={(e) => { setPage(1); setRegion(e.target.value); }} />
             <label className="flex items-center gap-2 text-sm">
@@ -216,6 +390,10 @@ export function ProxiesPage() {
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" checked={groupByCountry} onChange={(e) => { setPage(1); setGroupByCountry(e.target.checked); }} />
               按国家分组
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={groupByFamily} onChange={(e) => { setPage(1); setGroupByFamily(e.target.checked); }} />
+              按 IP 家族分组
             </label>
           </div>
           <div className="mb-3 flex flex-wrap gap-2">
@@ -231,6 +409,8 @@ export function ProxiesPage() {
                   proto: proto || undefined,
                   region: region || undefined,
                   source: source || undefined,
+                  family: family || undefined,
+                  group: group || undefined,
                   q: q || undefined,
                 });
                 window.open(url, "_blank");
@@ -245,6 +425,8 @@ export function ProxiesPage() {
                   format: "url",
                   only_ok: onlyOK || undefined,
                   proto: proto || undefined,
+                  family: family || undefined,
+                  group: group || undefined,
                 });
                 window.open(url, "_blank");
               }}
@@ -274,6 +456,7 @@ export function ProxiesPage() {
                 <tr>
                   <th className="px-3 py-2.5">地址</th>
                   <th className="px-3 py-2.5">协议</th>
+                  <th className="px-3 py-2.5">家族</th>
                   <th className="px-3 py-2.5">来源</th>
                   <th className="px-3 py-2.5">国家</th>
                   <th className="px-3 py-2.5">评分</th>
@@ -285,13 +468,13 @@ export function ProxiesPage() {
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
+                    <td colSpan={9} className="px-3 py-10 text-center text-muted-foreground">
                       加载中...
                     </td>
                   </tr>
                 ) : (data.items || []).length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">
+                    <td colSpan={9} className="px-3 py-10 text-center text-muted-foreground">
                       暂无代理，可到「采集源」手动运行或等待调度
                     </td>
                   </tr>
@@ -340,6 +523,9 @@ export function ProxiesPage() {
                             ) : null}
                           </td>
                           <td className="px-3 py-2.5">{item.protocol}</td>
+                          <td className="px-3 py-2.5">
+                            <span className="soft-pill">{FAMILY_LABELS[familyOf(item)] || familyOf(item)}</span>
+                          </td>
                           <td className="px-3 py-2.5">{item.source}</td>
                           <td className="px-3 py-2.5">
                             <span className="soft-pill">{item.region || "unknown"}</span>
@@ -386,11 +572,12 @@ export function ProxiesPage() {
                       if (!open) return [main];
                       const detail = (
                         <tr key={`${item.addr}-detail`} className="border-t border-white/20 bg-white/30 dark:border-white/5 dark:bg-white/[0.03]">
-                          <td colSpan={8} className="px-4 py-3">
+                          <td colSpan={9} className="px-4 py-3">
                             <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 lg:grid-cols-4">
-                              <div><span className="text-foreground/70">Host</span> · <span className="font-mono text-foreground">{item.host || item.addr.split(":")[0]}</span></div>
-                              <div><span className="text-foreground/70">Port</span> · <span className="font-mono text-foreground">{item.port ?? item.addr.split(":")[1] ?? "-"}</span></div>
+                              <div><span className="text-foreground/70">Host</span> · <span className="font-mono text-foreground">{item.host || item.addr.replace(/:\d+$/, "")}</span></div>
+                              <div><span className="text-foreground/70">Port</span> · <span className="font-mono text-foreground">{item.port ?? item.addr.match(/:(\d+)$/)?.[1] ?? "-"}</span></div>
                               <div><span className="text-foreground/70">Protocol</span> · {item.protocol}</div>
+                              <div><span className="text-foreground/70">IP family</span> · {FAMILY_LABELS[familyOf(item)] || familyOf(item)}</div>
                               <div><span className="text-foreground/70">Source</span> · {item.source}</div>
                               <div><span className="text-foreground/70">Region</span> · {item.region || "unknown"}</div>
                               <div><span className="text-foreground/70">Score</span> · {item.score}</div>
@@ -405,10 +592,10 @@ export function ProxiesPage() {
                       );
                       return [main, detail];
                     });
-                    if (groupByCountry && g.country) {
+                    if ((groupByCountry || groupByFamily) && g.country) {
                       return [
                         <tr key={`g-${g.country}`} className="border-t border-white/40 bg-white/30 dark:border-white/5 dark:bg-white/5">
-                          <td colSpan={8} className="px-3 py-2 text-xs font-semibold">
+                          <td colSpan={9} className="px-3 py-2 text-xs font-semibold">
                             {g.country} · {g.items.length} 个
                           </td>
                         </tr>,
@@ -422,7 +609,14 @@ export function ProxiesPage() {
             </table>
           </div>
           <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
-            <div>共 {data.total} 条</div>
+            <div>
+              共 {data.total} 条{data.truncated ? "+" : ""}
+              {data.truncated ? (
+                <span className="ml-2 text-xs">
+                  （筛选结果超出单次扫描范围，可能还有更多；缩小筛选条件可看到完整数量）
+                </span>
+              ) : null}
+            </div>
             <div className="flex gap-2">
               <Button size="sm" variant="secondary" disabled={page <= 1 || loading} onClick={() => setPage((p) => Math.max(1, p - 1))}>
                 上一页
@@ -437,6 +631,156 @@ export function ProxiesPage() {
           </div>
         </CardContent>
       </Card>
+
+      <Card className="mt-4">
+        <CardHeader>
+          <CardTitle>代理分组</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="mb-4 overflow-x-auto rounded-2xl border border-white/50 dark:border-white/10">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-white/40 text-xs text-muted-foreground dark:bg-white/5">
+                <tr>
+                  <th className="px-3 py-2.5">分组</th>
+                  <th className="px-3 py-2.5">类型</th>
+                  <th className="px-3 py-2.5">规则</th>
+                  <th className="px-3 py-2.5">数量</th>
+                  <th className="px-3 py-2.5">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groups.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-3 py-8 text-center text-muted-foreground">
+                      暂无分组
+                    </td>
+                  </tr>
+                ) : (
+                  groups.map((g) => (
+                    <tr key={g.name} className="row-hover border-t border-white/40 dark:border-white/5">
+                      <td className="px-3 py-2.5">
+                        <span className="font-medium">{g.label || g.name}</span>
+                        <div className="font-mono text-[11px] text-muted-foreground">{g.name}</div>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <span className="soft-pill">{g.builtin ? "内置" : "自定义"}</span>
+                      </td>
+                      <td className="px-3 py-2.5 text-xs text-muted-foreground">{describeRule(g)}</td>
+                      <td className="px-3 py-2.5 tabular-nums">
+                        {g.total} <span className="text-xs text-muted-foreground">/ 已验证 {g.validated}</span>
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <div className="flex flex-wrap gap-1.5">
+                          <Button size="sm" variant="secondary" onClick={() => { setPage(1); setGroup(g.name); }}>
+                            筛选
+                          </Button>
+                          {g.builtin ? null : (
+                            <>
+                              <Button size="sm" variant="secondary" onClick={() => setGroupForm(formFromGroup(g))}>
+                                编辑
+                              </Button>
+                              <Button size="sm" variant="danger" onClick={() => setPendingGroupDelete(g.name)}>
+                                删除
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="text-sm font-medium">{groupForm.editing ? `编辑分组：${groupForm.name}` : "新建分组"}</div>
+          <div className="mt-2 grid gap-2 md:grid-cols-3 lg:grid-cols-4">
+            <Input
+              placeholder="分组名（字母数字，唯一）"
+              value={groupForm.name}
+              disabled={groupForm.editing}
+              onChange={(e) => setGroupForm({ ...groupForm, name: e.target.value })}
+            />
+            <Input
+              placeholder="显示名称（可选）"
+              value={groupForm.label}
+              onChange={(e) => setGroupForm({ ...groupForm, label: e.target.value })}
+            />
+            <Input
+              placeholder="来源，逗号分隔"
+              value={groupForm.sources}
+              onChange={(e) => setGroupForm({ ...groupForm, sources: e.target.value })}
+            />
+            <Input
+              placeholder="协议，如 http,socks5"
+              value={groupForm.protocols}
+              onChange={(e) => setGroupForm({ ...groupForm, protocols: e.target.value })}
+            />
+            <Input
+              placeholder="地区，逗号分隔"
+              value={groupForm.regions}
+              onChange={(e) => setGroupForm({ ...groupForm, regions: e.target.value })}
+            />
+            <Input
+              type="number"
+              placeholder="最低评分（0=不限）"
+              value={groupForm.min_score}
+              onChange={(e) => setGroupForm({ ...groupForm, min_score: e.target.value })}
+            />
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              {(["ipv4", "ipv6", "unknown"] as const).map((f) => (
+                <label key={f} className="flex items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={groupForm.families.includes(f)}
+                    onChange={(e) =>
+                      setGroupForm({
+                        ...groupForm,
+                        families: e.target.checked
+                          ? [...groupForm.families, f]
+                          : groupForm.families.filter((x) => x !== f),
+                      })
+                    }
+                  />
+                  {FAMILY_LABELS[f]}
+                </label>
+              ))}
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={groupForm.only_ok}
+                onChange={(e) => setGroupForm({ ...groupForm, only_ok: e.target.checked })}
+              />
+              仅已验证
+            </label>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button onClick={() => void saveGroup()} disabled={groupSaving}>
+              {groupSaving ? "保存中..." : groupForm.editing ? "更新分组" : "创建分组"}
+            </Button>
+            {groupForm.editing ? (
+              <Button variant="secondary" onClick={() => setGroupForm(emptyGroupForm)}>
+                取消编辑
+              </Button>
+            ) : null}
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            同一维度内多个值为「或」关系，不同维度之间为「与」关系。留空表示该维度不限制；规则不能全为空。
+          </p>
+        </CardContent>
+      </Card>
+
+      <ConfirmDialog
+        open={Boolean(pendingGroupDelete)}
+        title="删除分组"
+        description={pendingGroupDelete ? `确定删除分组 ${pendingGroupDelete} 吗？代理本身不会被删除。` : undefined}
+        confirmText="删除"
+        cancelText="取消"
+        danger
+        onCancel={() => setPendingGroupDelete(null)}
+        onConfirm={() => void confirmGroupDelete()}
+      />
 
       <ConfirmDialog
         open={Boolean(pendingDelete)}

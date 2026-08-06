@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -221,6 +222,40 @@ func (s *Service) RequireAuth(next http.Handler) http.Handler {
 		}
 		http.Redirect(w, r, "/login", http.StatusFound)
 	})
+}
+
+// RequireAuthOrToken accepts a valid session cookie OR a Bearer API token.
+// It is used on endpoints that scripts call — scripts cannot maintain a session
+// cookie, so token auth is the only viable alternative to open access.
+//
+// Scopes are not checked here; callers can inspect the context value if they
+// need scope-level control. The token is validated and its last_used timestamp
+// is updated by the tokenValidator, keeping audit trails current.
+func (s *Service) RequireAuthOrToken(tokenValidator TokenValidator) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if s.IsAuthenticated(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// Try Bearer token: Authorization: Bearer upp_…
+			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+				plain := strings.TrimPrefix(auth, "Bearer ")
+				if tokenValidator != nil && tokenValidator.ValidateToken(r.Context(), plain) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			writeUnauthorizedJSON(w)
+		})
+	}
+}
+
+// TokenValidator is the minimum interface the auth middleware needs from
+// apitoken.Store. Keeping it here avoids an import cycle.
+// The concrete implementation is *apitoken.Store.
+type TokenValidator interface {
+	ValidateToken(ctx context.Context, plain string) bool
 }
 
 func (s *Service) SetSessionCookie(w http.ResponseWriter, token string) {

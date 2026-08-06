@@ -390,6 +390,42 @@ export function SettingsPage() {
                     }}
                   />
                 </Field>
+                <Field label="Webhook 触发事件（逗号分隔，* = 全部）">
+                  <Input
+                    value={Array.isArray(settings.feature?.webhook_events)
+                      ? (settings.feature?.webhook_events as string[]).join(",")
+                      : "validated_low,validate_all_fail"}
+                    onChange={(e) => {
+                      const events = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
+                      const next = { ...(settings.feature || {}), webhook_events: events };
+                      setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
+                    }}
+                    placeholder="validated_low,validate_all_fail,*"
+                  />
+                </Field>
+                <Field label="来源自动禁用率（0=关，0.1–1.0）">
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="1"
+                    value={Number(settings.feature?.source_auto_disable_rate ?? 0.15)}
+                    onChange={(e) => {
+                      const next = { ...(settings.feature || {}), source_auto_disable_rate: Number(e.target.value) };
+                      setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
+                    }}
+                  />
+                </Field>
+                <Field label="来源禁用最低样本数">
+                  <Input
+                    type="number"
+                    value={Number(settings.feature?.source_min_samples ?? 20)}
+                    onChange={(e) => {
+                      const next = { ...(settings.feature || {}), source_min_samples: Number(e.target.value) };
+                      setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
+                    }}
+                  />
+                </Field>
                 <Field label="告警：可用代理下限">
                   <Input
                     type="number"
