@@ -687,11 +687,22 @@ func (a *App) handleDirectProxyChainUpdate(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: a.direct.Status()})
 }
 
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
+func (a *App) handleExplain(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		q = "代理池功能"
 	}
-	return ""
+
+	explanation := `代理池 (Unified Proxy Pool) 是融合 Super-Proxy-Pool + 多个免费代理池的 Go + React 统一代理池面板。
+
+核心能力：
+• 采集源管理（80+源，支持自定义源添加/删除）
+• 出口池（一键按类型选择节点/订阅/手动节点）
+• 链式代理（多跳，跳数/容错/去重/粘性等可配）
+• 单跳 DirectProxy（7892）
+• 实时面板、性能监控、Webhook 告警
+
+更多细节见 README.md 或 /docs/API.md。`
+
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"explanation": explanation, "query": q}})
 }

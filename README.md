@@ -9,12 +9,13 @@
 | 模块 | 能力 |
 |------|------|
 | 管理面板 | React 玻璃拟态 UI · 亮/暗主题 · 仪表盘卡片可开关 |
-| 免费代理 | 80+ 采集源 · 评分校验 · Redis 优先（降级 memory）· GeoIP |
-| 单跳出口 | `7892` HTTP/SOCKS5 · 客户端 → 1 个免费代理 → 目标 |
-| **链式代理** | `7893` 多跳 · 跳数/容错/去重/协议地区/粘性/认证可配 |
-| 运维 | 导出 · 批量清理 · 黑名单 · 校验实时日志 · API Token · 审计 |
+ | 免费代理 | 80+ 采集源 · 评分校验 · Redis 优先（降级 memory）· GeoIP · 支持采集源删除（自定义源）
+ | **链式代理** | `7893` 多跳 · 跳数/容错/去重/协议地区/粘性/认证可配；成员来自出口池选择
+ | 出口池 | 支持按类型一键选择节点/订阅/免费代理；链式、单跳均使用出口池成员
+
 | 可观测 | 入站/出站连接 · `/metrics` · 流量采样 · Webhook 告警 |
-| 性能 | Redis MGET · List 真分页 · 选路 HotCache · Overview 缓存 |
+ | 说明接口 | `/api/explain?q=xxx` 返回代理池功能说明，支持 AI 其他调用
+ |
 
 ## 默认端口（局域网）
 
@@ -33,14 +34,20 @@ hostname -I | awk '{print $1}'   # 例如 172.18.49.135
 
 ### 本地
 
+推荐先构建前端：
+
 ```bash
 cd frontend && npm install && npm run build && cd ..
 export GOPROXY=https://goproxy.cn,direct
 export DATA_DIR=./data
 go build -buildvcs=false -o unified-proxy-pool ./cmd/app
 ./unified-proxy-pool
-# 或: go run -buildvcs=false ./cmd/app
 ```
+
+# 注意：Mihomo 二进制可选，开启代理功能需提供（Docker 中已自动下载）
+
+# 或直接：
+# go run -buildvcs=false ./cmd/app
 
 - 面板：`http://<LAN_IP>:7891`
 - 单跳：`http://<LAN_IP>:7892`
@@ -48,11 +55,19 @@ go build -buildvcs=false -o unified-proxy-pool ./cmd/app
 
 ### Docker
 
+使用 `docker compose`（包含 Redis）：
+
 ```bash
 docker compose up -d --build
 ```
 
-- 数据：`./data`；Redis 仅容器内网
+Dockerfile 自动构建前端 + Go + 下载 Mihomo（v1.19.22）。
+
+推荐：
+- 端口映射模式：`docker compose up -d`
+- Host 网络模式：`docker compose --profile host up -d unified-proxy-pool-host`
+
+面板访问：`http://localhost:7891`
 
 ## 局域网客户端
 
@@ -114,7 +129,8 @@ export http_proxy=http://172.18.49.135:7893 https_proxy=http://172.18.49.135:789
 | `/validator` | 校验统计 + **实时日志** |
 | `/subscriptions` | 订阅 |
 | `/nodes` | 手动节点 |
-| `/pools` | 出口池（含 free_proxy 成员） |
+ | `/explain` | 获取代理池功能说明（支持 AI 调用）
+ |
 | `/settings` | 系统设置 · 链式详细配置 · Token · 客户端脚本 |
 
 ## 公开 API（无登录）
