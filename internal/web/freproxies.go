@@ -687,6 +687,179 @@ func (a *App) handleDirectProxyChainUpdate(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: a.direct.Status()})
 }
 
+// handleAIPxoxy accepts AI-generated proxy lists (JSON object/array or plain text)
+// and submits them into the free proxy pool with an ai-* source label.
+func (a *App) handleAIPxoxy(w http.ResponseWriter, r *http.Request) {
+	if a.free == nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "free proxy disabled"})
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB max
+	if err != nil || len(body) == 0 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "empty body"})
+		return
+	}
+
+	lines := parseAIProxyBody(body)
+	var proxies []freproxies.Proxy
+	for _, s := range lines {
+		p := parseAddrLine(s)
+		if p.Host != "" {
+			proxies = append(proxies, p)
+		}
+	}
+	if len(proxies) == 0 {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "no valid addresses found"})
+		return
+	}
+
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	if source == "" {
+		source = "ai-unknown"
+	} else if !strings.HasPrefix(strings.ToLower(source), "ai-") && !strings.HasPrefix(strings.ToLower(source), "ai_") {
+		source = "ai-" + source
+	}
+
+	res, err := a.free.SubmitRaw(r.Context(), proxies, source)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	payload := submitPayload(res, len(proxies))
+	payload["source"] = source
+	if a.audit != nil {
+		a.audit.Log(r.Context(), "admin", "ai-proxy.submit", clientIP(r), map[string]any{
+			"source": source, "submitted": len(proxies), "added": res.Added,
+		})
+	}
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: payload})
+}
+
+// parseAIProxyBody extracts address strings from JSON object/array or plain text.
+func parseAIProxyBody(body []byte) []string {
+	input := strings.TrimSpace(string(body))
+	if input == "" {
+		return nil
+	}
+
+	// {"proxies":[...]} or {"hosts":[...]} or {"items":[...]}
+	if strings.HasPrefix(input, "{") {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(body, &obj); err == nil {
+			for _, key := range []string{"proxies", "hosts", "items", "list", "data"} {
+				raw, ok := obj[key]
+				if !ok {
+					continue
+				}
+				var arr []string
+				if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+					return cleanProxyLines(arr)
+				}
+				// nested data: {"data":{"proxies":[...]}}
+				var nested map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &nested); err == nil {
+					for _, nk := range []string{"proxies", "hosts", "items"} {
+						if nr, ok := nested[nk]; ok {
+							var narr []string
+							if err := json.Unmarshal(nr, &narr); err == nil && len(narr) > 0 {
+								return cleanProxyLines(narr)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// ["host:port", ...]
+	if strings.HasPrefix(input, "[") {
+		var arr []string
+		if err := json.Unmarshal(body, &arr); err == nil {
+			return cleanProxyLines(arr)
+		}
+		// mixed types: [{"host":"x","port":80}, "1.1.1.1:80"]
+		var anyArr []json.RawMessage
+		if err := json.Unmarshal(body, &anyArr); err == nil {
+			var out []string
+			for _, raw := range anyArr {
+				var s string
+				if err := json.Unmarshal(raw, &s); err == nil {
+					out = append(out, s)
+					continue
+				}
+				var m map[string]any
+				if err := json.Unmarshal(raw, &m); err == nil {
+					if line := proxyMapToLine(m); line != "" {
+						out = append(out, line)
+					}
+				}
+			}
+			return cleanProxyLines(out)
+		}
+	}
+
+	// plain text lines
+	return cleanProxyLines(strings.Split(input, "\n"))
+}
+
+func cleanProxyLines(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]struct{}{}
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || strings.HasPrefix(s, "#") {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func proxyMapToLine(m map[string]any) string {
+	host, _ := m["host"].(string)
+	if host == "" {
+		host, _ = m["ip"].(string)
+	}
+	if host == "" {
+		host, _ = m["addr"].(string)
+	}
+	if host == "" {
+		return ""
+	}
+	// already host:port
+	if strings.Contains(host, ":") && m["port"] == nil {
+		return host
+	}
+	port := 0
+	switch v := m["port"].(type) {
+	case float64:
+		port = int(v)
+	case string:
+		port, _ = strconv.Atoi(v)
+	case json.Number:
+		n, _ := v.Int64()
+		port = int(n)
+	}
+	if port <= 0 || port > 65535 {
+		return ""
+	}
+	proto, _ := m["protocol"].(string)
+	if proto == "" {
+		proto, _ = m["proto"].(string)
+	}
+	proto = strings.ToLower(strings.TrimSpace(proto))
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	if proto != "" && proto != "http" {
+		return proto + "://" + addr
+	}
+	return addr
+}
+
 func (a *App) handleExplain(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
@@ -700,6 +873,7 @@ func (a *App) handleExplain(w http.ResponseWriter, r *http.Request) {
 • 出口池（一键按类型选择节点/订阅/手动节点）
 • 链式代理（多跳，跳数/容错/去重/粘性等可配）
 • 单跳 DirectProxy（7892）
+• AI 代理入池（POST /api/ai-proxy）
 • 实时面板、性能监控、Webhook 告警
 
 更多细节见 README.md 或 /docs/API.md。`

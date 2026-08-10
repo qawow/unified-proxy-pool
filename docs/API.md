@@ -350,6 +350,40 @@ consume raw-cap space and evict working proxies from other sources
 
 ---
 
+### AI 爬取代理入池
+
+给 AI / 脚本用的专用入池接口：接收模型产出的代理列表，解析后写入免费代理池，并打上 `ai-*` 来源标签。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/api/ai-proxy?source=ai-claude` | session 或 Bearer token | AI 代理批量入池 |
+
+**Body 支持：**
+
+1. JSON 对象：`{"proxies":["1.1.1.1:80","socks5://2.2.2.2:1080"]}`（也认 `hosts` / `items` / `list`）
+2. JSON 数组：`["1.1.1.1:80",{"host":"2.2.2.2","port":443,"protocol":"socks5"}]`
+3. 纯文本：每行一条 `host:port` 或 `proto://host:port`（`#` 开头为注释）
+
+上限 1MB；自动去重。`source` 未带 `ai-` 前缀时会自动补上。
+
+```bash
+# 面板登录后 cookie 即可；脚本用 token
+curl -sS -X POST 'http://127.0.0.1:7891/api/ai-proxy?source=ai-claude' \
+  -H 'Authorization: Bearer upp_xxx' \
+  -H 'Content-Type: application/json' \
+  -d '{"proxies":["1.1.1.1:80","2.2.2.2:443"]}'
+
+curl -sS -X POST 'http://127.0.0.1:7891/api/ai-proxy?source=gpt' \
+  -H 'Authorization: Bearer upp_xxx' \
+  -H 'Content-Type: text/plain' \
+  --data-binary @proxies.txt
+```
+
+响应与 `/api/proxies/submit` 相同（`submitted` / `added` / `duplicates` / 净增说明），并多返回 `source`。
+
+面板路径：**节点 → AI 爬取**（`/ai-proxy`），可粘贴列表一键提交。
+
+
 ## 自动打野
 
 一条闭环：抓 → 验 → 测 → **记** → **调**。前三步补池子，后两步让池子的输入自己变好。

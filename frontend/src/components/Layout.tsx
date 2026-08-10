@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   Activity,
   Boxes,
+  Bot,
   Globe2,
   LayoutDashboard,
   ListTree,
@@ -37,6 +38,7 @@ const navGroups = [
       { to: "/subscriptions", label: "订阅管理", icon: ListTree },
       { to: "/nodes", label: "手动节点", icon: Network },
       { to: "/pools", label: "出口池", icon: Boxes },
+      { to: "/ai-proxy", label: "AI 爬取", icon: Bot },
     ],
   },
   {

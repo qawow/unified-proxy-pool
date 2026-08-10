@@ -245,4 +245,18 @@ export const endpoints = {
   system: {
     restart: () => api("/api/system/restart", { method: "POST" }),
   },
+  aiProxy: {
+    submit: (proxies: string[], source: string) =>
+      api<{
+        submitted?: number;
+        added?: number;
+        duplicates?: number;
+        source?: string;
+        note?: string;
+        [k: string]: unknown;
+      }>(`/api/ai-proxy?source=${encodeURIComponent(source || "ai-unknown")}`, {
+        method: "POST",
+        body: JSON.stringify({ proxies }),
+      }),
+  },
 };

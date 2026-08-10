@@ -221,6 +221,7 @@ func (a *App) Router() (http.Handler, error) {
 			api.Get("/direct-proxy/status", a.handleDirectProxyStatus)
 			api.Put("/direct-proxy/chain", a.handleDirectProxyChainUpdate)
 			api.Get("/explain", a.handleExplain)
+			api.Post("/ai-proxy", a.handleAIPxoxy)
 		})
 	})
 

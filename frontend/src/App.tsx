@@ -13,6 +13,7 @@ import { SourcesPage } from "@/pages/Sources";
 import { SubscriptionDetailPage } from "@/pages/SubscriptionDetail";
 import { SubscriptionsPage } from "@/pages/Subscriptions";
 import { ValidatorPage } from "@/pages/Validator";
+import { AIPxoxy } from "@/pages/AIPxoxy";
 import { Button } from "@/components/ui/button";
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -74,6 +75,7 @@ export default function App() {
         <Route path="nodes" element={<NodesPage />} />
         <Route path="manual-nodes" element={<Navigate to="/nodes" replace />} />
         <Route path="pools" element={<PoolsPage />} />
+        <Route path="ai-proxy" element={<AIPxoxy />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

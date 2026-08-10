@@ -573,3 +573,45 @@ func mustRouter(t *testing.T, app *App) http.Handler {
 	}
 	return r
 }
+
+func TestParseAIProxyBody(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{
+			name: "object proxies",
+			in:   `{"proxies":["1.1.1.1:80","2.2.2.2:443","1.1.1.1:80"]}`,
+			want: []string{"1.1.1.1:80", "2.2.2.2:443"},
+		},
+		{
+			name: "array strings",
+			in:   `["3.3.3.3:8080","socks5://4.4.4.4:1080"]`,
+			want: []string{"3.3.3.3:8080", "socks5://4.4.4.4:1080"},
+		},
+		{
+			name: "array objects",
+			in:   `[{"host":"5.5.5.5","port":3128,"protocol":"http"},{"ip":"6.6.6.6","port":"1080","proto":"socks5"}]`,
+			want: []string{"5.5.5.5:3128", "socks5://6.6.6.6:1080"},
+		},
+		{
+			name: "plain text",
+			in:   "7.7.7.7:80\n# skip\n8.8.8.8:443\n",
+			want: []string{"7.7.7.7:80", "8.8.8.8:443"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseAIProxyBody([]byte(tc.in))
+			if len(got) != len(tc.want) {
+				t.Fatalf("len=%d want %d: %v", len(got), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("[%d]=%q want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
