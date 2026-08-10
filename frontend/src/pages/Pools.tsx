@@ -154,6 +154,15 @@ export function PoolsPage() {
     });
   }, [candidates, protocolFilter, search, sourceFilter]);
 
+  const selectedCount = selected.size;
+  const selectedWeightSum = useMemo(() => {
+    let sum = 0;
+    selected.forEach((w) => {
+      sum += w;
+    });
+    return sum;
+  }, [selected]);
+
   const selectAllByType = (type: string) => {
     const filtered = candidates.filter((c) => c.source_type === type);
     const next = new Map(selected);
@@ -163,15 +172,6 @@ export function PoolsPage() {
     });
     setSelected(next);
   };
-
-  const quickSelectButtons = (
-    <div className="flex gap-2 mt-2">
-      <Button size="sm" variant="outline" onClick={() => selectAllByType("free_proxy")}>选择全部免费代理</Button>
-      <Button size="sm" variant="outline" onClick={() => selectAllByType("subscription")}>选择全部订阅</Button>
-      <Button size="sm" variant="outline" onClick={() => selectAllByType("manual")}>选择全部手动节点</Button>
-      <Button size="sm" variant="ghost" onClick={() => setSelected(new Map())}>清空选择</Button>
-    </div>
-  );
 
   const patchAdvanced = (patch: Partial<StrategyAdvanced>, also?: Partial<typeof emptyForm>) => {
     setForm((f) => {
@@ -677,32 +677,35 @@ export function PoolsPage() {
                 <div className="grid gap-2">
                   <Input placeholder="搜索候选节点" value={search} onChange={(e) => setSearch(e.target.value)} />
                   <div className="grid grid-cols-2 gap-2">
-                  <div className="grid gap-2">
-                    <Input placeholder="搜索候选节点" value={search} onChange={(e) => setSearch(e.target.value)} />
-                    <div className="grid grid-cols-2 gap-2">
-                      <Select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
-                        <option value="">全部来源</option>
-                        <option value="manual">手动节点</option>
-                        <option value="subscription">订阅节点</option>
-                        <option value="free_proxy">免费代理</option>
-                      </Select>
-                      <Select value={protocolFilter} onChange={(e) => setProtocolFilter(e.target.value)}>
-                        <option value="">全部协议</option>
-                        {["ss", "trojan", "vmess", "vless", "tuic", "hysteria2", "http", "socks5", "socks4"].map((p) => (
-                          <option key={p} value={p}>
-                            {p}
-                          </option>
-                        ))}
-                      </Select>
-                    </div>
-                    <div className="flex gap-2">
-                      <Button size="sm" variant="outline" onClick={() => selectAllByType("free_proxy")}>一键免费代理</Button>
-                      <Button size="sm" variant="outline" onClick={() => selectAllByType("subscription")}>一键订阅</Button>
-                      <Button size="sm" variant="outline" onClick={() => selectAllByType("manual")}>一键手动节点</Button>
-                      <Button size="sm" variant="ghost" onClick={() => setSelected(new Map())}>清空</Button>
-                    </div>
+                    <Select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
+                      <option value="">全部来源</option>
+                      <option value="manual">手动节点</option>
+                      <option value="subscription">订阅节点</option>
+                      <option value="free_proxy">免费代理</option>
+                    </Select>
+                    <Select value={protocolFilter} onChange={(e) => setProtocolFilter(e.target.value)}>
+                      <option value="">全部协议</option>
+                      {["ss", "trojan", "vmess", "vless", "tuic", "hysteria2", "http", "socks5", "socks4"].map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </Select>
                   </div>
-
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" size="sm" variant="secondary" onClick={() => selectAllByType("free_proxy")}>
+                      一键免费代理
+                    </Button>
+                    <Button type="button" size="sm" variant="secondary" onClick={() => selectAllByType("subscription")}>
+                      一键订阅
+                    </Button>
+                    <Button type="button" size="sm" variant="secondary" onClick={() => selectAllByType("manual")}>
+                      一键手动节点
+                    </Button>
+                    <Button type="button" size="sm" variant="ghost" onClick={() => setSelected(new Map())}>
+                      清空
+                    </Button>
+                  </div>
                 </div>
                 <div className="max-h-64 space-y-2 overflow-y-auto">
                   {filteredCandidates.length === 0 ? (

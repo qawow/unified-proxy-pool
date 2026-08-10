@@ -706,3 +706,12 @@ func (a *App) handleExplain(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"explanation": explanation, "query": q}})
 }
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
