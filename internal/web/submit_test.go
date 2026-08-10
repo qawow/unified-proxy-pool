@@ -330,6 +330,70 @@ func TestHandleProxySubmitAcceptsBearerToken(t *testing.T) {
 	}
 }
 
+// The AI-specific endpoint advertises the same session-or-token contract as
+// the other script-facing submit endpoints. Keep the request in-process so the
+// test covers routing and middleware without requiring a listening socket.
+func TestHandleAIProxyAcceptsBearerToken(t *testing.T) {
+	app, _ := newAuthApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tok, err := app.tokens.Create(ctx, "ai-script", "proxies:write")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `[
+		"1.1.1.1:80",
+		"1.1.1.1:80",
+		"http://1.1.1.1:80",
+		"not-an-address",
+		{"host":"2.2.2.2","port":1080,"protocol":"socks"},
+		{"host":"3.3.3.3","protocol":"http"}
+	]`
+	req := httptest.NewRequest(http.MethodPost, "/api/ai-proxy?source=claude", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tok.Plain)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mustRouter(t, app).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var out apiResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	data := out.Data.(map[string]any)
+	if data["source"] != "ai-claude" {
+		t.Errorf("source = %v, want ai-claude", data["source"])
+	}
+	if got := int(data["submitted"].(float64)); got != 2 {
+		t.Errorf("submitted = %d, want 2 normalized unique proxies", got)
+	}
+	if got := int(data["rejected"].(float64)); got != 2 {
+		t.Errorf("rejected = %d, want 2", got)
+	}
+	if got := int(data["duplicates"].(float64)); got != 2 {
+		t.Errorf("duplicates = %d, want 2 exact/normalized input duplicates", got)
+	}
+}
+
+func TestHandleAIProxyAcceptsSessionAndRejectsOversizedBody(t *testing.T) {
+	app, cookie := newAuthApp(t)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/ai-proxy",
+		strings.NewReader(strings.Repeat("x", int(maxAIProxyBodyBytes)+1)),
+	)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	mustRouter(t, app).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // A bogus Bearer token must be rejected, not treated as anonymous-allowed.
 func TestHandleProxySubmitRejectsBadBearerToken(t *testing.T) {
 	app, _ := newAuthApp(t)
@@ -482,7 +546,9 @@ const testPwd = "testpass1234"
 // without needing real asset files.
 type emptyFS struct{}
 
-func (emptyFS) Open(name string) (fs.File, error) { return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist} }
+func (emptyFS) Open(name string) (fs.File, error) {
+	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+}
 
 // newTestApp builds an App backed by memoryStore. Auth service is nil, so
 // only public (unauthenticated) routes are reachable.
@@ -504,11 +570,11 @@ func newAuthApp(t *testing.T) (*App, *http.Cookie) {
 
 	tempDir := t.TempDir()
 	cfg := config.App{
-		PanelHost:   "127.0.0.1",
-		PanelPort:   7890,
-		DataDir:     tempDir,
-		DBPath:      filepath.Join(tempDir, "app.db"),
-		RuntimeDir:  filepath.Join(tempDir, "runtime"),
+		PanelHost:             "127.0.0.1",
+		PanelPort:             7890,
+		DataDir:               tempDir,
+		DBPath:                filepath.Join(tempDir, "app.db"),
+		RuntimeDir:            filepath.Join(tempDir, "runtime"),
 		FreeValidateURL:       "https://www.gstatic.com/generate_204",
 		FreeValidateTimeoutMS: 8000,
 	}
@@ -543,19 +609,18 @@ func newAuthApp(t *testing.T) (*App, *http.Cookie) {
 		frontend:  emptyFS{},
 	}
 
-	// Login to acquire a session cookie.
-	router := mustRouter(t, app)
-	s := httptest.NewServer(router)
-	t.Cleanup(s.Close)
-
+	// Login in-process to acquire a session cookie. This avoids making every
+	// caller depend on the host allowing tests to bind an ephemeral TCP port.
 	loginBody, _ := json.Marshal(map[string]string{"password": testPwd})
-	req, _ := http.NewRequest(http.MethodPost, s.URL+"/api/auth/login", bytes.NewReader(loginBody))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(loginBody))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rec := httptest.NewRecorder()
+	mustRouter(t, app).ServeHTTP(rec, req)
+	resp := rec.Result()
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200; body=%s", resp.StatusCode, rec.Body.String())
+	}
 	for _, ck := range resp.Cookies() {
 		if ck.Name == "spp_session" {
 			return app, ck
@@ -594,6 +659,16 @@ func TestParseAIProxyBody(t *testing.T) {
 			name: "array objects",
 			in:   `[{"host":"5.5.5.5","port":3128,"protocol":"http"},{"ip":"6.6.6.6","port":"1080","proto":"socks5"}]`,
 			want: []string{"5.5.5.5:3128", "socks5://6.6.6.6:1080"},
+		},
+		{
+			name: "object mixed items",
+			in:   `{"items":["7.7.7.7:80",{"addr":"8.8.8.8:1080","protocol":"socks5"}]}`,
+			want: []string{"7.7.7.7:80", "socks5://8.8.8.8:1080"},
+		},
+		{
+			name: "nested mixed items",
+			in:   `{"data":{"proxies":[{"host":"2001:db8::1","port":8080},"9.9.9.9:80"]}}`,
+			want: []string{"[2001:db8::1]:8080", "9.9.9.9:80"},
 		},
 		{
 			name: "plain text",

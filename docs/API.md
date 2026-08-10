@@ -360,11 +360,11 @@ consume raw-cap space and evict working proxies from other sources
 
 **Body 支持：**
 
-1. JSON 对象：`{"proxies":["1.1.1.1:80","socks5://2.2.2.2:1080"]}`（也认 `hosts` / `items` / `list`）
+1. JSON 对象：`{"proxies":["1.1.1.1:80",{"host":"2.2.2.2","port":1080,"protocol":"socks5"}]}`（也认 `hosts` / `items` / `list`，以及 `data` 下的嵌套列表）
 2. JSON 数组：`["1.1.1.1:80",{"host":"2.2.2.2","port":443,"protocol":"socks5"}]`
 3. 纯文本：每行一条 `host:port` 或 `proto://host:port`（`#` 开头为注释）
 
-上限 1MB；自动去重。`source` 未带 `ai-` 前缀时会自动补上。
+请求体上限 1 MB，超出返回 `413`；按标准化后的 `host:port` 自动去重。支持 `http` / `https` / `socks4` / `socks5`，并将 `socks` / `socks5h` 归一为 `socks5`。`source` 未带 `ai-` 前缀时会自动补上。
 
 ```bash
 # 面板登录后 cookie 即可；脚本用 token
@@ -379,9 +379,54 @@ curl -sS -X POST 'http://127.0.0.1:7891/api/ai-proxy?source=gpt' \
   --data-binary @proxies.txt
 ```
 
-响应与 `/api/proxies/submit` 相同（`submitted` / `added` / `duplicates` / 净增说明），并多返回 `source`。
+响应与 `/api/proxies/submit` 相同（`submitted` / `added` / `duplicates` / `net_growth` / `evicted` / `raw_at_cap`），并多返回 `source`、`rejected`；存在输入内重复时还会返回 `input_duplicates`。其中 `duplicates` 已包含输入内重复和池中已有记录。
 
 面板路径：**节点 → AI 爬取**（`/ai-proxy`），可粘贴列表一键提交。
+
+### AI 搜索与提示词管理
+
+面板上的「AI 搜索」调用任意 OpenAI 兼容的 `/chat/completions` 接口（如 OpenAI、DeepSeek、本地 vLLM/Ollama 网关），按内置提示词把网页内容 / 关键词转成代理候选列表，可预览后一键并入入池区。提示词内置且可修改。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|------|------|------|------|
+| POST | `/api/ai-search` | session 或 Bearer token | 调 AI 搜索，返回解析后的代理候选（不入池） |
+| GET | `/api/ai-prompts` | session 或 Bearer token | 列出全部提示词模板（内置 + 已修改） |
+| PUT | `/api/ai-prompts` | session 或 Bearer token | 新增 / 修改提示词模板 |
+| DELETE | `/api/ai-prompts?name=proxy_extract` | session 或 Bearer token | 恢复内置默认（内置词）或删除（自定义词） |
+
+`POST /api/ai-search` 请求体：
+
+```json
+{
+  "url": "https://api.deepseek.com/chat/completions",
+  "apikey": "sk-...",
+  "model": "deepseek-chat",
+  "level": 6,
+  "prompt_key": "proxy_extract",
+  "content": "粘贴的网页内容或搜索关键词"
+}
+```
+
+- `level`：0–10 思考深度，影响采样温度与输出 token 上限（越大越深入）。
+- `prompt_key`：使用的提示词模板；`prompt` 传非空时直接覆盖 system 提示词。
+- `content` 为空时，模型按提示词自主生成候选（用于 `proxy_ai_generate` 等模板）。
+
+响应：`{"success":true,"data":{"raw":"AI 原始返回","proxies":[{"host":"1.2.3.4","port":8080,"protocol":"http"}],"count":N}}`。`proxies` 可直接回传 `/api/ai-proxy` 入池。
+
+`GET /api/ai-prompts` 返回模板数组，每项含 `name` / `title` / `description` / `system` / `user` / `builtin`；`builtin:true` 表示内置模板，`PUT` 修改后 `default` 变为 `false`。`user` 中的 `{{.Content}}` 会被替换为搜索内容，`{{.Count}}` 替换为候选数量（默认 50）。
+
+```bash
+# 保存自定义提示词
+curl -sS -X PUT 'http://127.0.0.1:7891/api/ai-prompts' \
+  -H 'Authorization: Bearer upp_xxx' -H 'Content-Type: application/json' \
+  -d '{"name":"proxy_extract","title":"提取免费代理列表","system":"你是代理提取器…","user":"内容：{{.Content}}"}'
+
+# 恢复内置默认
+curl -sS -X DELETE 'http://127.0.0.1:7891/api/ai-prompts?name=proxy_extract' \
+  -H 'Authorization: Bearer upp_xxx'
+```
+
+面板路径：**节点 → AI 爬取**（`/ai-proxy`），「AI 搜索」区块可填接口 URL / API Key / 模型 / 思考等级，点铅笔图标编辑当前提示词。
 
 
 ## 自动打野

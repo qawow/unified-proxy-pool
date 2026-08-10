@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"unified-proxy-pool/internal/apitoken"
+	"unified-proxy-pool/internal/aisvc"
 	"unified-proxy-pool/internal/audit"
 	"unified-proxy-pool/internal/auth"
 	"unified-proxy-pool/internal/blacklist"
@@ -56,6 +57,7 @@ type App struct {
 	audit         *audit.Store
 	tokens        *apitoken.Store
 	trafficHist   *traffichist.Store
+	prompts       *aisvc.PromptStore
 	shutdown      func()
 	frontend      fs.FS
 	indexHTML     []byte
@@ -108,6 +110,7 @@ func New(authSvc *auth.Service, settingsSvc *settings.Service, nodeSvc *nodes.Se
 		audit:         deps.Audit,
 		tokens:        deps.Tokens,
 		trafficHist:   deps.TrafficHist,
+		prompts:       aisvc.NewPromptStore(),
 		shutdown:      shutdown,
 		frontend:      frontendFS,
 		indexHTML:     indexHTML,
@@ -221,7 +224,6 @@ func (a *App) Router() (http.Handler, error) {
 			api.Get("/direct-proxy/status", a.handleDirectProxyStatus)
 			api.Put("/direct-proxy/chain", a.handleDirectProxyChainUpdate)
 			api.Get("/explain", a.handleExplain)
-			api.Post("/ai-proxy", a.handleAIPxoxy)
 		})
 	})
 
@@ -235,6 +237,11 @@ func (a *App) Router() (http.Handler, error) {
 		scriptAPI.Use(a.auth.RequireAuthOrToken(a.tokens))
 		scriptAPI.Post("/api/proxies/submit", a.handleProxySubmit)
 		scriptAPI.Post("/api/proxies/batch-test", a.handleProxyBatchTest)
+		scriptAPI.Post("/api/ai-proxy", a.handleAIProxy)
+		scriptAPI.Post("/api/ai-search", a.handleAISearch)
+		scriptAPI.Get("/api/ai-prompts", a.handleAIPromptsList)
+		scriptAPI.Put("/api/ai-prompts", a.handleAIPromptUpsert)
+		scriptAPI.Delete("/api/ai-prompts", a.handleAIPromptDelete)
 	})
 
 	// Public free-proxy API (no auth) — compatible with common proxy-pool clients on LAN.

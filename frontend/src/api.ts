@@ -246,17 +246,45 @@ export const endpoints = {
     restart: () => api("/api/system/restart", { method: "POST" }),
   },
   aiProxy: {
-    submit: (proxies: string[], source: string) =>
+    submit: (input: string, source: string) =>
       api<{
         submitted?: number;
+        parsed?: number;
         added?: number;
         duplicates?: number;
+        input_duplicates?: number;
+        rejected?: number;
+        net_growth?: number;
+        evicted?: number;
+        raw_at_cap?: boolean;
         source?: string;
         note?: string;
         [k: string]: unknown;
       }>(`/api/ai-proxy?source=${encodeURIComponent(source || "ai-unknown")}`, {
         method: "POST",
-        body: JSON.stringify({ proxies }),
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+        body: input,
       }),
+  },
+  aiSearch: {
+    run: (payload: {
+      url: string;
+      apikey: string;
+      model?: string;
+      level?: number;
+      prompt_key?: string;
+      prompt?: string;
+      content?: string;
+    }) =>
+      api<{
+        raw?: string;
+        proxies?: { host: string; port: number; protocol?: string }[];
+        count?: number;
+        [k: string]: unknown;
+      }>("/api/ai-search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }),
+    prompts: () => api<unknown[]>("/api/ai-prompts"),
+    updatePrompt: (p: { name: string; title: string; description?: string; system: string; user?: string }) =>
+      api("/api/ai-prompts", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) }),
+    deletePrompt: (name: string) => api(`/api/ai-prompts?name=${encodeURIComponent(name)}`, { method: "DELETE" }),
   },
 };

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -687,39 +688,68 @@ func (a *App) handleDirectProxyChainUpdate(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: a.direct.Status()})
 }
 
-// handleAIPxoxy accepts AI-generated proxy lists (JSON object/array or plain text)
+const maxAIProxyBodyBytes int64 = 1 << 20
+
+// handleAIProxy accepts AI-generated proxy lists (JSON object/array or plain text)
 // and submits them into the free proxy pool with an ai-* source label.
-func (a *App) handleAIPxoxy(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleAIProxy(w http.ResponseWriter, r *http.Request) {
 	if a.free == nil {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "free proxy disabled"})
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // 1MB max
-	if err != nil || len(body) == 0 {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxAIProxyBodyBytes))
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, apiResponse{Success: false, Message: "request body exceeds 1 MB limit"})
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "could not read request body"})
+		return
+	}
+	if len(strings.TrimSpace(string(body))) == 0 {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "empty body"})
 		return
 	}
 
-	lines := parseAIProxyBody(body)
-	var proxies []freproxies.Proxy
+	parsedInput := parseAIProxyInput(body)
+	lines := parsedInput.Lines
+	proxies := make([]freproxies.Proxy, 0, len(lines))
+	seenAddrs := make(map[string]struct{}, len(lines))
+	rejected := parsedInput.Rejected
+	inputDuplicates := parsedInput.Duplicates
 	for _, s := range lines {
 		p := parseAddrLine(s)
-		if p.Host != "" {
-			proxies = append(proxies, p)
+		if p.Host == "" {
+			rejected++
+			continue
 		}
+		switch strings.ToLower(p.Protocol) {
+		case "http", "https", "socks4", "socks5":
+			p.Protocol = strings.ToLower(p.Protocol)
+		case "socks", "socks5h":
+			p.Protocol = "socks5"
+		default:
+			rejected++
+			continue
+		}
+		// The store keys records by host:port, so protocol variants of the same
+		// endpoint must be collapsed before AddRaw or Redis can over-report adds.
+		addrKey := strings.ToLower(net.JoinHostPort(p.Host, strconv.Itoa(p.Port)))
+		if _, exists := seenAddrs[addrKey]; exists {
+			inputDuplicates++
+			continue
+		}
+		seenAddrs[addrKey] = struct{}{}
+		proxies = append(proxies, p)
 	}
 	if len(proxies) == 0 {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "no valid addresses found"})
 		return
 	}
 
-	source := strings.TrimSpace(r.URL.Query().Get("source"))
-	if source == "" {
-		source = "ai-unknown"
-	} else if !strings.HasPrefix(strings.ToLower(source), "ai-") && !strings.HasPrefix(strings.ToLower(source), "ai_") {
-		source = "ai-" + source
-	}
+	source := normalizeAIProxySource(r.URL.Query().Get("source"))
 
 	res, err := a.free.SubmitRaw(r.Context(), proxies, source)
 	if err != nil {
@@ -728,96 +758,154 @@ func (a *App) handleAIPxoxy(w http.ResponseWriter, r *http.Request) {
 	}
 	payload := submitPayload(res, len(proxies))
 	payload["source"] = source
+	payload["rejected"] = rejected
+	if inputDuplicates > 0 {
+		payload["input_duplicates"] = inputDuplicates
+		payload["duplicates"] = res.Duplicates + inputDuplicates
+	}
 	if a.audit != nil {
 		a.audit.Log(r.Context(), "admin", "ai-proxy.submit", clientIP(r), map[string]any{
 			"source": source, "submitted": len(proxies), "added": res.Added,
+			"rejected": rejected, "input_duplicates": inputDuplicates,
 		})
 	}
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: payload})
 }
 
+func normalizeAIProxySource(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "ai-unknown"
+	}
+	lower := strings.ToLower(source)
+	if !strings.HasPrefix(lower, "ai-") && !strings.HasPrefix(lower, "ai_") {
+		return "ai-" + source
+	}
+	return source
+}
+
 // parseAIProxyBody extracts address strings from JSON object/array or plain text.
 func parseAIProxyBody(body []byte) []string {
+	return parseAIProxyInput(body).Lines
+}
+
+type aiProxyInput struct {
+	Lines      []string
+	Rejected   int
+	Duplicates int
+}
+
+func parseAIProxyInput(body []byte) aiProxyInput {
 	input := strings.TrimSpace(string(body))
 	if input == "" {
-		return nil
+		return aiProxyInput{}
 	}
 
 	// {"proxies":[...]} or {"hosts":[...]} or {"items":[...]}
 	if strings.HasPrefix(input, "{") {
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal(body, &obj); err == nil {
+			foundArray := false
+			rejected := 0
 			for _, key := range []string{"proxies", "hosts", "items", "list", "data"} {
 				raw, ok := obj[key]
 				if !ok {
 					continue
 				}
-				var arr []string
-				if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
-					return cleanProxyLines(arr)
+				if lines, skipped, ok := proxyLinesFromJSONArray(raw); ok {
+					foundArray = true
+					rejected += skipped
+					if len(lines) > 0 {
+						return finalizeAIProxyInput(lines, rejected)
+					}
 				}
 				// nested data: {"data":{"proxies":[...]}}
 				var nested map[string]json.RawMessage
 				if err := json.Unmarshal(raw, &nested); err == nil {
-					for _, nk := range []string{"proxies", "hosts", "items"} {
+					for _, nk := range []string{"proxies", "hosts", "items", "list"} {
 						if nr, ok := nested[nk]; ok {
-							var narr []string
-							if err := json.Unmarshal(nr, &narr); err == nil && len(narr) > 0 {
-								return cleanProxyLines(narr)
+							if lines, skipped, ok := proxyLinesFromJSONArray(nr); ok {
+								foundArray = true
+								rejected += skipped
+								if len(lines) > 0 {
+									return finalizeAIProxyInput(lines, rejected)
+								}
 							}
 						}
 					}
 				}
+			}
+			if foundArray {
+				return aiProxyInput{Rejected: rejected}
 			}
 		}
 	}
 
 	// ["host:port", ...]
 	if strings.HasPrefix(input, "[") {
-		var arr []string
-		if err := json.Unmarshal(body, &arr); err == nil {
-			return cleanProxyLines(arr)
-		}
-		// mixed types: [{"host":"x","port":80}, "1.1.1.1:80"]
-		var anyArr []json.RawMessage
-		if err := json.Unmarshal(body, &anyArr); err == nil {
-			var out []string
-			for _, raw := range anyArr {
-				var s string
-				if err := json.Unmarshal(raw, &s); err == nil {
-					out = append(out, s)
-					continue
-				}
-				var m map[string]any
-				if err := json.Unmarshal(raw, &m); err == nil {
-					if line := proxyMapToLine(m); line != "" {
-						out = append(out, line)
-					}
-				}
-			}
-			return cleanProxyLines(out)
+		if lines, rejected, ok := proxyLinesFromJSONArray(body); ok {
+			return finalizeAIProxyInput(lines, rejected)
 		}
 	}
 
 	// plain text lines
-	return cleanProxyLines(strings.Split(input, "\n"))
+	return finalizeAIProxyInput(strings.Split(input, "\n"), 0)
+}
+
+// proxyLinesFromJSONArray accepts both strings and object records. Keeping this
+// conversion in one place makes top-level and wrapped JSON behave identically.
+func proxyLinesFromJSONArray(raw []byte) ([]string, int, bool) {
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, 0, false
+	}
+	out := make([]string, 0, len(items))
+	rejected := 0
+	for _, item := range items {
+		var s string
+		if err := json.Unmarshal(item, &s); err == nil {
+			out = append(out, s)
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(item, &m); err == nil {
+			if line := proxyMapToLine(m); line != "" {
+				out = append(out, line)
+				continue
+			}
+		}
+		rejected++
+	}
+	return out, rejected, true
 }
 
 func cleanProxyLines(in []string) []string {
+	out, _ := cleanProxyLinesWithDuplicates(in)
+	return out
+}
+
+func finalizeAIProxyInput(lines []string, rejected int) aiProxyInput {
+	cleaned, duplicates := cleanProxyLinesWithDuplicates(lines)
+	return aiProxyInput{Lines: cleaned, Rejected: rejected, Duplicates: duplicates}
+}
+
+func cleanProxyLinesWithDuplicates(in []string) ([]string, int) {
 	out := make([]string, 0, len(in))
 	seen := map[string]struct{}{}
+	duplicates := 0
 	for _, s := range in {
 		s = strings.TrimSpace(s)
 		if s == "" || strings.HasPrefix(s, "#") {
 			continue
 		}
 		if _, ok := seen[s]; ok {
+			duplicates++
 			continue
 		}
 		seen[s] = struct{}{}
 		out = append(out, s)
 	}
-	return out
+	return out, duplicates
 }
 
 func proxyMapToLine(m map[string]any) string {
@@ -831,13 +919,24 @@ func proxyMapToLine(m map[string]any) string {
 	if host == "" {
 		return ""
 	}
-	// already host:port
+	proto, _ := m["protocol"].(string)
+	if proto == "" {
+		proto, _ = m["proto"].(string)
+	}
+	proto = strings.ToLower(strings.TrimSpace(proto))
+	// already host:port or proto://host:port
 	if strings.Contains(host, ":") && m["port"] == nil {
+		if proto != "" && proto != "http" && !strings.Contains(host, "://") {
+			return proto + "://" + host
+		}
 		return host
 	}
 	port := 0
 	switch v := m["port"].(type) {
 	case float64:
+		if v != float64(int(v)) {
+			return ""
+		}
 		port = int(v)
 	case string:
 		port, _ = strconv.Atoi(v)
@@ -848,11 +947,6 @@ func proxyMapToLine(m map[string]any) string {
 	if port <= 0 || port > 65535 {
 		return ""
 	}
-	proto, _ := m["protocol"].(string)
-	if proto == "" {
-		proto, _ = m["proto"].(string)
-	}
-	proto = strings.ToLower(strings.TrimSpace(proto))
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	if proto != "" && proto != "http" {
 		return proto + "://" + addr
