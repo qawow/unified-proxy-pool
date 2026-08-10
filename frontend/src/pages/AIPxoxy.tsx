@@ -1,73 +1,52 @@
+// src/pages/AIPxoxy.tsx
 import { useState } from "react";
-import { endpoints } from "@/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { useToast } from "@/hooks/useToast";
+import { Textarea } from "@/components/ui/textarea";
+import { toast } from "@/hooks/useToast";
+import { endpoints } from "@/api";
 import { PageHeader } from "@/components/PageHeader";
 
 export function AIPxoxy() {
+  const [tool, setTool] = useState("web");
+  const [url, setUrl] = useState("");
+  const [apikey, setApikey] = useState("");
+  const [level, setLevel] = useState(7);
   const [text, setText] = useState("");
-  const [source, setSource] = useState("ai-claude");
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<{
-    submitted?: number;
-    added?: number;
-    duplicates?: number;
-    source?: string;
-    note?: string;
-  } | null>(null);
+  const [result, setResult] = useState<{ submitted?: number; added?: number; duplicates?: number; source?: string; note?: string } | null>(null);
   const { toast } = useToast();
 
-  const parseLines = (raw: string): string[] => {
-    const trimmed = raw.trim();
-    if (!trimmed) return [];
-    // JSON array
-    if (trimmed.startsWith("[")) {
-      try {
-        const arr = JSON.parse(trimmed) as unknown;
-        if (Array.isArray(arr)) {
-          return arr.map((x) => String(x).trim()).filter(Boolean);
-        }
-      } catch {
-        /* fall through to line mode */
-      }
-    }
-    // JSON object with proxies field
-    if (trimmed.startsWith("{")) {
-      try {
-        const obj = JSON.parse(trimmed) as { proxies?: unknown };
-        if (Array.isArray(obj.proxies)) {
-          return obj.proxies.map((x) => String(x).trim()).filter(Boolean);
-        }
-      } catch {
-        /* fall through */
-      }
-    }
-    return trimmed
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l && !l.startsWith("#"));
-  };
-
-  const handleSubmit = async () => {
-    const lines = parseLines(text);
-    if (lines.length === 0) {
-      toast("请先粘贴代理列表", "error");
+  const handleSearch = async () => {
+    if (!url.trim() || !apikey.trim()) {
+      toast("请填写 URL 和 API Key", "error");
       return;
     }
     setLoading(true);
-    setResult(null);
     try {
-      const data = (await endpoints.aiProxy.submit(lines, source || "ai-unknown")) as {
-        submitted?: number;
-        added?: number;
-        duplicates?: number;
-        source?: string;
-        note?: string;
-      };
-      setResult({ ...data, source: data.source || source });
-      toast(`已提交 ${data.submitted ?? lines.length} 条，新增 ${data.added ?? 0} 条`, "success");
+      const res = await fetch(`/api/ai-proxy?source=ai-${tool}&level=${level}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, apikey }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "搜索失败");
+      setResult(data.data);
+      toast("搜索完成，已解析代理", "success");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "搜索失败", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!result) return;
+    setLoading(true);
+    try {
+      const res = await endpoints.aiProxy.submit(result.proxies || [], "ai-search");
+      toast(`提交成功：新增 ${res.added ?? 0} 条`, "success");
+      setResult(null);
     } catch (err) {
       toast(err instanceof Error ? err.message : "提交失败", "error");
     } finally {
@@ -77,61 +56,53 @@ export function AIPxoxy() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="AI 爬取入池"
-        description="粘贴 AI 生成的代理列表（JSON 或每行 host:port），一键加入免费代理池。"
-      />
+      <PageHeader title="AI 爬取代理" description="Web 搜索 + AI 代理生成 + 思考等级调节" />
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_280px]">
+      <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
         <Card>
           <CardHeader>
-            <CardTitle>代理列表</CardTitle>
+            <CardTitle>搜索配置</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-3">
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              placeholder={`支持格式：\n1.1.1.1:80\n2.2.2.2:443\nsocks5://1.2.3.4:1080\n\n或 JSON：\n["1.1.1.1:80","2.2.2.2:443"]\n{"proxies":["1.1.1.1:80"]}`}
-              rows={16}
-              className="w-full rounded-2xl border border-white/60 bg-white/50 px-3 py-2 font-mono text-xs outline-none ring-sky-400/40 focus:ring-2 dark:border-white/10 dark:bg-white/5"
-            />
-            <div className="text-xs text-muted-foreground">
-              已识别约 {parseLines(text).length} 条 · 支持 # 注释行
+          <CardContent className="space-y-4">
+            <div>
+              <label className="text-xs font-medium mb-1 block">工具</label>
+              <select value={tool} onChange={(e) => setTool(e.target.value)} className="w-full rounded-2xl border p-3">
+                <option value="web">Web 搜索</option>
+                <option value="google">Google</option>
+                <option value="bing">Bing</option>
+                <option value="custom">自定义爬虫</option>
+              </select>
             </div>
+
+            <div>
+              <label className="text-xs font-medium mb-1 block">URL</label>
+              <input type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://..." className="w-full rounded-2xl border p-3" />
+            </div>
+
+            <div>
+              <label className="text-xs font-medium mb-1 block">API Key</label>
+              <input type="text" value={apikey} onChange={(e) => setApikey(e.target.value)} placeholder="sk-..." className="w-full rounded-2xl border p-3" />
+            </div>
+
+            <div>
+              <label className="text-xs font-medium mb-2 block">思考等级 <span className="text-sky-500">{level}/10</span></label>
+              <input type="range" min="0" max="10" value={level} onChange={(e) => setLevel(+e.target.value)} className="w-full" />
+              <div className="text-xs text-muted-foreground mt-1">0=轻度 10=极深</div>
+            </div>
+
+            <Button className="w-full" onClick={handleSearch} loading={loading}>
+              开始搜索代理
+            </Button>
           </CardContent>
         </Card>
 
         <div className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>提交设置</CardTitle>
+              <CardTitle>代理列表</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
-              <div>
-                <label className="mb-1 block text-xs font-medium text-muted-foreground">来源标识</label>
-                <Input
-                  value={source}
-                  onChange={(e) => setSource(e.target.value)}
-                  placeholder="ai-claude"
-                />
-                <p className="mt-1 text-[11px] text-muted-foreground">
-                  入库后显示为 ai-xxx，便于按源统计质量
-                </p>
-              </div>
-              <Button className="w-full" disabled={loading} onClick={() => void handleSubmit()}>
-                {loading ? "提交中..." : "提交到池内"}
-              </Button>
-              <Button
-                className="w-full"
-                variant="secondary"
-                disabled={loading || !text}
-                onClick={() => {
-                  setText("");
-                  setResult(null);
-                }}
-              >
-                清空
-              </Button>
+            <CardContent>
+              <textarea value={text} onChange={(e) => setText(e.target.value)} rows={12} className="w-full font-mono text-xs" placeholder="搜索结果将在这里显示..." />
             </CardContent>
           </Card>
 
@@ -140,12 +111,13 @@ export function AIPxoxy() {
               <CardHeader>
                 <CardTitle>提交结果</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-1 text-sm">
+              <CardContent>
                 <div>解析：{result.submitted ?? "-"}</div>
                 <div>新增：{result.added ?? "-"}</div>
                 <div>重复：{result.duplicates ?? "-"}</div>
-                <div>来源：{result.source ?? source}</div>
-                {result.note ? <div className="text-xs text-muted-foreground">{result.note}</div> : null}
+                <Button className="w-full mt-4" onClick={handleSubmit} loading={loading}>
+                  提交到池内
+                </Button>
               </CardContent>
             </Card>
           ) : null}
