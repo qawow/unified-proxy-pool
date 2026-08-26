@@ -157,6 +157,26 @@ func TestPickWeightedFavoursHigherQuality(t *testing.T) {
 	}
 }
 
+func TestPickP2CFavoursHigherQuality(t *testing.T) {
+	ctx := context.Background()
+	svc := newPickService(t,
+		proxyAt("10.0.0.1", 8080, 100, 50),
+		proxyAt("10.0.0.2", 8080, 10, 3000),
+	)
+	counts := map[string]int{}
+	const draws = 200
+	for i := 0; i < draws; i++ {
+		res, err := svc.Pick(ctx, PickOptions{N: 1, Strategy: StrategyP2C, NoCooldown: true})
+		if err != nil {
+			t.Fatalf("Pick: %v", err)
+		}
+		counts[res.Items[0].Addr]++
+	}
+	if counts["10.0.0.1:8080"] <= counts["10.0.0.2:8080"] {
+		t.Errorf("p2c good=%d bad=%d, expected bias to the better proxy", counts["10.0.0.1:8080"], counts["10.0.0.2:8080"])
+	}
+}
+
 // Batch picks are the point of ?count=; duplicates in one response would be
 // useless to a caller building a rotation.
 func TestPickBatchReturnsDistinctProxies(t *testing.T) {

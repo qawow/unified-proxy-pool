@@ -66,7 +66,7 @@ type ChannelPolicyConfig struct {
 	MaxChannels       int `json:"max_channels"`
 	MaxEntriesPerChan int `json:"max_entries_per_chan"`
 
-	// Selection: weighted | random | rr
+	// Selection: weighted | random | rr | p2c
 	PickStrategy string `json:"pick_strategy,omitempty"`
 	CooldownSec  int    `json:"cooldown_sec"`
 

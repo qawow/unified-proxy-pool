@@ -14,6 +14,10 @@ const (
 	StrategyWeighted = "weighted"
 	StrategyRandom   = "random"
 	StrategyRR       = "rr"
+	// StrategyP2C is Power of Two Choices (Resin-style): draw two candidates,
+	// keep the better weight. Cheaper than a full weighted scan and still
+	// strongly prefers quality.
+	StrategyP2C = "p2c"
 )
 
 // ChannelPolicy is the slice of the channel-ban registry that selection needs.
@@ -56,7 +60,7 @@ type PickResult struct {
 
 func (o PickOptions) strategy() string {
 	switch o.Strategy {
-	case StrategyRandom, StrategyRR, StrategyWeighted:
+	case StrategyRandom, StrategyRR, StrategyWeighted, StrategyP2C:
 		return o.Strategy
 	default:
 		return StrategyWeighted
@@ -269,6 +273,37 @@ func rrSelect(items []Proxy, n int, channel string, state *pickState) []Proxy {
 	return out
 }
 
+// p2cSample picks n distinct proxies by repeatedly drawing two at random and
+// keeping the higher-weight one. On a two-item pool this is equivalent to
+// always preferring the better one, which is what we want for quality.
+func p2cSample(items []Proxy, n int, recent map[string]bool, rng *rand.Rand) []Proxy {
+	if n >= len(items) {
+		return weightedSample(items, n, recent, rng)
+	}
+	out := make([]Proxy, 0, n)
+	taken := map[string]struct{}{}
+	guard := 0
+	for len(out) < n && guard < n*16 {
+		guard++
+		i := rng.Intn(len(items))
+		j := rng.Intn(len(items))
+		if j == i && len(items) > 1 {
+			j = (i + 1) % len(items)
+		}
+		a, b := items[i], items[j]
+		pick := a
+		if proxyWeight(b, recent[b.Addr]) > proxyWeight(a, recent[a.Addr]) {
+			pick = b
+		}
+		if _, ok := taken[pick.Addr]; ok {
+			continue
+		}
+		taken[pick.Addr] = struct{}{}
+		out = append(out, pick)
+	}
+	return out
+}
+
 // applyStrategy reduces a candidate window to at most n proxies.
 func (s *Service) applyStrategy(items []Proxy, opt PickOptions) []Proxy {
 	n := opt.N
@@ -285,10 +320,11 @@ func (s *Service) applyStrategy(items []Proxy, opt PickOptions) []Proxy {
 	}
 
 	var out []Proxy
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	switch opt.strategy() {
 	case StrategyRandom:
 		out = append([]Proxy(nil), items...)
-		rand.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+		rng.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
 		if n < len(out) {
 			out = out[:n]
 		}
@@ -298,8 +334,10 @@ func (s *Service) applyStrategy(items []Proxy, opt PickOptions) []Proxy {
 			key = "_global"
 		}
 		out = rrSelect(items, n, key, s.picks)
+	case StrategyP2C:
+		out = p2cSample(items, n, recent, rng)
 	default:
-		out = weightedSample(items, n, recent, rand.New(rand.NewSource(time.Now().UnixNano())))
+		out = weightedSample(items, n, recent, rng)
 	}
 	s.picks.markServed(out, now)
 	return out
@@ -314,6 +352,8 @@ func normalizeStrategy(v string) string {
 		return StrategyRR
 	case StrategyWeighted, "weight", "score":
 		return StrategyWeighted
+	case StrategyP2C, "power-of-two", "power_of_two":
+		return StrategyP2C
 	default:
 		return ""
 	}

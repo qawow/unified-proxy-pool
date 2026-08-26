@@ -38,6 +38,49 @@ func LANIPs() []string {
 	return out
 }
 
+// GlobalIPv6 returns non-loopback, non-link-local IPv6 addresses currently
+// assigned. Empty means this host cannot originate global IPv6 (no HE tunnel,
+// no native prefix).
+func GlobalIPv6() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]struct{}{}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.To4() != nil {
+				continue
+			}
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsInterfaceLocalMulticast() {
+				continue
+			}
+			s := ip.String()
+			if _, ok := seen[s]; ok {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func extractIPv4(addr net.Addr) net.IP {
 	switch v := addr.(type) {
 	case *net.IPNet:

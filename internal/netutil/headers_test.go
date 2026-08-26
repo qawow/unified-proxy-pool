@@ -46,9 +46,10 @@ func TestHeadersForSubscriptionURL(t *testing.T) {
 		url string
 		ua  string
 	}{
-		{"https://nodebuf.com/dynamic?type=clash", "clash.meta/v1.19.0"},
-		{"http://192.168.2.198:5001/clash", "clash.meta/v1.19.0"},
-		{"https://raw.githubusercontent.com/foo/bar/main/sub", "clash.meta/v1.19.0"},
+		{"https://nodebuf.com/dynamic?type=clash", "clash.meta/v1.19.30"},
+		{"http://192.168.2.198:5001/clash", "clash.meta/v1.19.30"},
+		{"https://xxx.pages.dev/sub", "clash.meta/v1.19.30"},
+		{"https://raw.githubusercontent.com/foo/bar/main/sub", "clash.meta/v1.19.30"},
 		{"https://airport.example/api/v1/client/subscribe?token=abc", "v2rayN/6.45"},
 		{"https://example.com/other", ""},
 	}

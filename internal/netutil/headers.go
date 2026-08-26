@@ -51,13 +51,19 @@ func HeadersForSubscriptionURL(rawURL string) map[string]string {
 	case strings.Contains(u, "type=clash"), strings.Contains(u, "/clash"),
 		strings.HasSuffix(u, ".yaml"), strings.HasSuffix(u, ".yml"):
 		return map[string]string{
-			"User-Agent": "clash.meta/v1.19.0",
+			"User-Agent": "clash.meta/v1.19.30",
 			"Accept":     "text/yaml,text/plain,*/*",
+		}
+	case strings.Contains(u, "workers.dev"), strings.Contains(u, "pages.dev"),
+		strings.Contains(u, "edtunnel"), strings.Contains(u, "edgetunnel"):
+		return map[string]string{
+			"User-Agent": "clash.meta/v1.19.30",
+			"Accept":     "*/*",
 		}
 	case strings.Contains(u, "githubusercontent.com"), strings.Contains(u, "jsdelivr.net"),
 		strings.Contains(u, "github.com"):
 		return map[string]string{
-			"User-Agent": "clash.meta/v1.19.0",
+			"User-Agent": "clash.meta/v1.19.30",
 			"Accept":     "*/*",
 		}
 	case strings.Contains(u, "subscribe"), strings.Contains(u, "v2ray"), strings.Contains(u, "token="):

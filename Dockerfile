@@ -37,7 +37,7 @@ FROM debian:bookworm-slim
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG TARGETVARIANT=""
-ARG MIHOMO_VERSION=v1.19.22
+ARG MIHOMO_VERSION=v1.19.30
 # Empty default is required: `ARG FOO` with no `=` is unset, and `set -u` then
 # aborts with "FOO: parameter not set" (GitHub Actions docker job, 2026-08-26).
 ARG MIHOMO_ASSET=""
@@ -50,7 +50,7 @@ RUN set -eux; \
     os="${TARGETOS:-linux}"; \
     arch="${TARGETARCH:-amd64}"; \
     variant="${TARGETVARIANT:-}"; \
-    version="${MIHOMO_VERSION:-v1.19.22}"; \
+    version="${MIHOMO_VERSION:-v1.19.30}"; \
     asset="${MIHOMO_ASSET:-}"; \
     if [ "${os}" != "linux" ]; then \
         echo "unsupported TARGETOS: ${os}" >&2; \

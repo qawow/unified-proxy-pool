@@ -521,6 +521,7 @@ export function SettingsPage() {
                     onChange={(e) => patchChannels({ pick_strategy: e.target.value })}
                   >
                     <option value="weighted">按质量加权随机</option>
+                    <option value="p2c">P2C 二选一（更稳、更省）</option>
                     <option value="random">等概率随机</option>
                     <option value="rr">按渠道轮转</option>
                   </Select>

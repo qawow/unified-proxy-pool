@@ -2,15 +2,20 @@ package web
 
 import (
 	"net/http"
+
+	"unified-proxy-pool/internal/netutil"
 )
 
 // handlePublicDebug is the LAN debug snapshot: pool size, 7892/7893, mihomo
 // probe/prod liveness and last unexpected exit. No secrets.
 func (a *App) handlePublicDebug(w http.ResponseWriter, r *http.Request) {
+	v6 := netutil.GlobalIPv6()
 	data := map[string]any{
 		"ok":      true,
 		"service": "unified-proxy-pool",
 		"lan":     true,
+		"ipv6":    len(v6) > 0,
+		"ipv6_addrs": v6,
 	}
 	if a.free != nil {
 		if total, validated, raw, err := a.free.Store().Count(r.Context()); err == nil {

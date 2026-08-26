@@ -44,6 +44,7 @@ const (
 	StrategyWeighted = "weighted"
 	StrategyRandom   = "random"
 	StrategyRR       = "rr"
+	StrategyP2C      = "p2c"
 )
 
 // Defaults returns the shipped policy.
@@ -105,7 +106,7 @@ func (p Policy) Normalize() Policy {
 	if p.MaxEntriesPerChan <= 0 {
 		p.MaxEntriesPerChan = d.MaxEntriesPerChan
 	}
-	if p.PickStrategy != StrategyWeighted && p.PickStrategy != StrategyRandom && p.PickStrategy != StrategyRR {
+	if p.PickStrategy != StrategyWeighted && p.PickStrategy != StrategyRandom && p.PickStrategy != StrategyRR && p.PickStrategy != StrategyP2C {
 		p.PickStrategy = d.PickStrategy
 	}
 	if p.CooldownSec < 0 {
