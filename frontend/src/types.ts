@@ -363,6 +363,8 @@ export type ChainOptions = {
   allowed_cidrs?: string[];
   rate_limit_bps?: number;
   max_parallel_dial?: number;
+  exit_via?: string;
+  exit_via_mode?: string;
 };
 
 /** 渠道 = 请求的目标站点。某个 IP 只在某个渠道上被临时禁用，其它渠道照常使用。 */

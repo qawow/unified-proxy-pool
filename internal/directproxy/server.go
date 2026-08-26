@@ -34,14 +34,14 @@ type Config struct {
 }
 
 type Server struct {
-	cfg    Config
-	free   *freproxies.Service
-	ln     net.Listener
+	cfg     Config
+	free    *freproxies.Service
+	ln      net.Listener
 	chainLn net.Listener
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
 
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 	chainHops int
 
 	requests atomic.Int64
@@ -169,6 +169,11 @@ type ChainOptions struct {
 	AllowedCIDRs         []string `json:"allowed_cidrs,omitempty"`
 	RateLimitBPS         int64    `json:"rate_limit_bps"`
 	MaxParallelDial      int      `json:"max_parallel_dial"`
+	// ExitVia is a fixed VPS hop: socks5://user:pass@host:1080 or http://host:port.
+	// Mode exit (default) = last hop, destination sees the VPS IP.
+	// Mode entry = first hop, destination still sees the free-proxy IP.
+	ExitVia     string `json:"exit_via,omitempty"`
+	ExitViaMode string `json:"exit_via_mode,omitempty"`
 }
 
 func DefaultChainOptions() ChainOptions {
@@ -364,7 +369,7 @@ func (s *Server) Status() Status {
 		"windows":   "set http_proxy=" + endpoints["http"] + " && set https_proxy=" + endpoints["http"],
 		"clash_url": endpoints["http"],
 	}
-	path := ChainPathLabel(hops)
+	path := s.chainPathWithVia(hops)
 	chainExamples := map[string]string{
 		"curl":   "curl -x " + chainEP["http"] + " https://httpbin.org/ip",
 		"export": "export http_proxy=" + chainEP["http"] + " https_proxy=" + chainEP["http"] + " ALL_PROXY=" + chainEP["socks5"],
@@ -401,8 +406,8 @@ func (s *Server) Status() Status {
 		ChainRequests:   s.chainRequests.Load(),
 		ChainSuccess:    s.chainSuccess.Load(),
 		ChainFailures:   s.chainFailures.Load(),
-		ChainDesc:       fmt.Sprintf("链式代理：%d 跳 · %s", hops, ChainPathLabel(hops)),
-		ChainPath:       ChainPathLabel(hops),
+		ChainDesc:       fmt.Sprintf("链式代理：%d 跳 · %s", hops, path),
+		ChainPath:       path,
 		ChainLabel:      "链式代理",
 		ChainOptions:    s.GetChainOptions(),
 	}
@@ -653,9 +658,10 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 			// reused, or stickiness would quietly defeat the ban.
 			if !s.channelBanned(channel, addr) {
 				start := time.Now()
-				if conn, err := dialProxyChain(ctx, []freproxies.Proxy{up}, target); err == nil {
+				wired := s.withVia([]freproxies.Proxy{up})
+				if conn, err := dialProxyChain(ctx, wired, target); err == nil {
 					s.recordChannel(channel, addr, true, 0, "", time.Since(start).Milliseconds())
-					return conn, up, nil
+					return conn, lastHop(wired, up), nil
 				}
 			}
 		}
@@ -668,7 +674,8 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 	var lastErr error
 	for _, up := range upstreams {
 		start := time.Now()
-		conn, err := dialProxyChain(ctx, []freproxies.Proxy{up}, target)
+		wired := s.withVia([]freproxies.Proxy{up})
+		conn, err := dialProxyChain(ctx, wired, target)
 		if err == nil {
 			if stickyOn && clientIP != "" {
 				sticky.PutProxy(clientIP, up.Addr, up.Protocol)
@@ -677,7 +684,7 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 			// this layer will ever know; the application-layer verdict, if any,
 			// arrives later via the report API.
 			s.recordChannel(channel, up.Addr, true, 0, "", time.Since(start).Milliseconds())
-			return conn, up, nil
+			return conn, lastHop(wired, up), nil
 		}
 		lastErr = err
 		_ = s.free.Store().MarkValidated(ctx, up.Addr, 0, false)
@@ -769,9 +776,10 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 		// that destination's bans. Filtering every hop would starve the chain over
 		// relay proxies the target never sees.
 		hops = s.avoidBannedExit(hops, rotated, channel)
-		conn, err := dialProxyChain(dialCtx, hops, target)
+		wired := s.withVia(hops)
+		conn, err := dialProxyChain(dialCtx, wired, target)
 		if err == nil {
-			return conn, hops, nil
+			return conn, wired, nil
 		}
 		lastErr = err
 		_ = s.free.Store().MarkValidated(dialCtx, hops[0].Addr, 0, false)

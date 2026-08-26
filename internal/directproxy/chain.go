@@ -3,6 +3,7 @@ package directproxy
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -16,19 +17,24 @@ import (
 
 // tunnelThrough uses an already-connected proxy hop to open a tunnel to nextAddr.
 // protocol is the protocol of the hop we are currently speaking to.
-func tunnelThrough(conn net.Conn, protocol, nextAddr string) (net.Conn, error) {
-	proto := strings.ToLower(strings.TrimSpace(protocol))
+func tunnelThrough(conn net.Conn, hop freproxies.Proxy, nextAddr string) (net.Conn, error) {
+	proto := strings.ToLower(strings.TrimSpace(hop.Protocol))
 	switch proto {
 	case "socks5", "socks", "socks4":
-		return socks5ConnectOver(conn, nextAddr)
+		return socks5ConnectOver(conn, nextAddr, hop.Username, hop.Password)
 	default:
-		return httpConnectOver(conn, nextAddr)
+		return httpConnectOver(conn, nextAddr, hop.Username, hop.Password)
 	}
 }
 
-func httpConnectOver(conn net.Conn, target string) (net.Conn, error) {
+func httpConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error) {
 	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
-	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Connection: Keep-Alive\r\n\r\n", target, target)
+	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Connection: Keep-Alive\r\n", target, target)
+	if user != "" {
+		token := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+		req += "Proxy-Authorization: Basic " + token + "\r\n"
+	}
+	req += "\r\n"
 	if _, err := io.WriteString(conn, req); err != nil {
 		conn.Close()
 		return nil, err
@@ -51,9 +57,14 @@ func httpConnectOver(conn net.Conn, target string) (net.Conn, error) {
 	return conn, nil
 }
 
-func socks5ConnectOver(conn net.Conn, target string) (net.Conn, error) {
+func socks5ConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error) {
 	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+	if user != "" {
+		if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
+			conn.Close()
+			return nil, err
+		}
+	} else if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -62,7 +73,30 @@ func socks5ConnectOver(conn net.Conn, target string) (net.Conn, error) {
 		conn.Close()
 		return nil, err
 	}
-	if resp[0] != 0x05 || resp[1] != 0x00 {
+	if resp[0] != 0x05 {
+		conn.Close()
+		return nil, fmt.Errorf("chain socks5 auth rejected")
+	}
+	switch resp[1] {
+	case 0x00:
+		// no auth
+	case 0x02:
+		ulen := byte(len(user))
+		plen := byte(len(pass))
+		auth := []byte{0x01, ulen}
+		auth = append(auth, []byte(user)...)
+		auth = append(auth, plen)
+		auth = append(auth, []byte(pass)...)
+		if _, err := conn.Write(auth); err != nil {
+			conn.Close()
+			return nil, err
+		}
+		ar := make([]byte, 2)
+		if _, err := io.ReadFull(conn, ar); err != nil || ar[1] != 0x00 {
+			conn.Close()
+			return nil, fmt.Errorf("chain socks5 user/pass rejected")
+		}
+	default:
 		conn.Close()
 		return nil, fmt.Errorf("chain socks5 auth rejected")
 	}
@@ -128,14 +162,14 @@ func dialProxyChain(ctx context.Context, hops []freproxies.Proxy, target string)
 	// Through hop i, reach hop i+1
 	for i := 0; i < len(hops)-1; i++ {
 		next := hops[i+1].Addr
-		conn, err = tunnelThrough(conn, hops[i].Protocol, next)
+		conn, err = tunnelThrough(conn, hops[i], next)
 		if err != nil {
 			return nil, fmt.Errorf("chain hop %d (%s -> %s): %w", i, hops[i].Addr, next, err)
 		}
 	}
 	// Through last hop, reach final target
 	last := hops[len(hops)-1]
-	conn, err = tunnelThrough(conn, last.Protocol, target)
+	conn, err = tunnelThrough(conn, last, target)
 	if err != nil {
 		return nil, fmt.Errorf("chain exit %s -> %s: %w", last.Addr, target, err)
 	}

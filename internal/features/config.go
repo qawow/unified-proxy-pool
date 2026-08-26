@@ -14,14 +14,14 @@ type Config struct {
 	DashboardCards map[string]bool `json:"dashboard_cards,omitempty"`
 
 	// F3
-	DirectStickyEnabled bool  `json:"direct_sticky_enabled"`
-	StickyTTLSec        int   `json:"sticky_ttl_sec"`
+	DirectStickyEnabled  bool  `json:"direct_sticky_enabled"`
+	StickyTTLSec         int   `json:"sticky_ttl_sec"`
 	RateLimitBytesPerSec int64 `json:"rate_limit_bytes_per_sec"`
 
 	// F4
-	FreeValidateURLs       []string `json:"free_validate_urls,omitempty"`
-	SourceAutoDisableRate  float64  `json:"source_auto_disable_rate"` // 0-1, 0=off
-	SourceMinSamples       int      `json:"source_min_samples"`
+	FreeValidateURLs      []string `json:"free_validate_urls,omitempty"`
+	SourceAutoDisableRate float64  `json:"source_auto_disable_rate"` // 0-1, 0=off
+	SourceMinSamples      int      `json:"source_min_samples"`
 
 	// F5
 	DirectAuthRequired bool     `json:"direct_auth_required"`
@@ -31,11 +31,11 @@ type Config struct {
 	PublicOpen bool `json:"public_open,omitempty"`
 
 	// F6
-	WebhookURL          string   `json:"webhook_url,omitempty"`
-	WebhookEvents       []string `json:"webhook_events,omitempty"`
-	AlertValidatedMin   int      `json:"alert_validated_min"`
-	TrafficSampleSec    int      `json:"traffic_sample_sec"`
-	TrafficRetainHours  int      `json:"traffic_retain_hours"`
+	WebhookURL         string   `json:"webhook_url,omitempty"`
+	WebhookEvents      []string `json:"webhook_events,omitempty"`
+	AlertValidatedMin  int      `json:"alert_validated_min"`
+	TrafficSampleSec   int      `json:"traffic_sample_sec"`
+	TrafficRetainHours int      `json:"traffic_retain_hours"`
 
 	// Chain proxy detailed options
 	Chain ChainConfig `json:"chain,omitempty"`
@@ -142,26 +142,28 @@ func normalizeChannels(c ChannelPolicyConfig) ChannelPolicyConfig {
 
 // ChainConfig is the panel-editable multi-hop policy.
 type ChainConfig struct {
-	Enabled               bool     `json:"enabled"`
-	ListenAddr            string   `json:"listen_addr,omitempty"`
-	Hops                  int      `json:"hops"`
-	FailoverTries         int      `json:"failover_tries"`
-	DialTimeoutMS         int      `json:"dial_timeout_ms"`
-	HopTimeoutMS          int      `json:"hop_timeout_ms"`
-	PreferDistinctHost    bool     `json:"prefer_distinct_host"`
-	PreferDistinctRegion  bool     `json:"prefer_distinct_region"`
-	EntryProto            string   `json:"entry_proto,omitempty"`
-	ExitProto             string   `json:"exit_proto,omitempty"`
-	EntryRegion           string   `json:"entry_region,omitempty"`
-	ExitRegion            string   `json:"exit_region,omitempty"`
-	StickyEnabled         bool     `json:"sticky_enabled"`
-	StickyTTLSec          int      `json:"sticky_ttl_sec"`
-	AuthRequired          bool     `json:"auth_required"`
-	Username              string   `json:"username,omitempty"`
-	Password              string   `json:"password,omitempty"`
-	AllowedCIDRs          []string `json:"allowed_cidrs,omitempty"`
-	RateLimitBPS          int64    `json:"rate_limit_bps"`
-	MaxParallelDial       int      `json:"max_parallel_dial"`
+	Enabled              bool     `json:"enabled"`
+	ListenAddr           string   `json:"listen_addr,omitempty"`
+	Hops                 int      `json:"hops"`
+	FailoverTries        int      `json:"failover_tries"`
+	DialTimeoutMS        int      `json:"dial_timeout_ms"`
+	HopTimeoutMS         int      `json:"hop_timeout_ms"`
+	PreferDistinctHost   bool     `json:"prefer_distinct_host"`
+	PreferDistinctRegion bool     `json:"prefer_distinct_region"`
+	EntryProto           string   `json:"entry_proto,omitempty"`
+	ExitProto            string   `json:"exit_proto,omitempty"`
+	EntryRegion          string   `json:"entry_region,omitempty"`
+	ExitRegion           string   `json:"exit_region,omitempty"`
+	StickyEnabled        bool     `json:"sticky_enabled"`
+	StickyTTLSec         int      `json:"sticky_ttl_sec"`
+	AuthRequired         bool     `json:"auth_required"`
+	Username             string   `json:"username,omitempty"`
+	Password             string   `json:"password,omitempty"`
+	AllowedCIDRs         []string `json:"allowed_cidrs,omitempty"`
+	RateLimitBPS         int64    `json:"rate_limit_bps"`
+	MaxParallelDial      int      `json:"max_parallel_dial"`
+	ExitVia              string   `json:"exit_via,omitempty"`
+	ExitViaMode          string   `json:"exit_via_mode,omitempty"`
 }
 
 func DefaultChain() ChainConfig {

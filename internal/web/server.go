@@ -14,8 +14,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"unified-proxy-pool/internal/apitoken"
 	"unified-proxy-pool/internal/aisvc"
+	"unified-proxy-pool/internal/apitoken"
 	"unified-proxy-pool/internal/audit"
 	"unified-proxy-pool/internal/auth"
 	"unified-proxy-pool/internal/blacklist"
@@ -933,6 +933,8 @@ func (a *App) applyFeatureHot(raw string) {
 		if ch.MaxParallelDial > 0 {
 			opts.MaxParallelDial = ch.MaxParallelDial
 		}
+		opts.ExitVia = strings.TrimSpace(ch.ExitVia)
+		opts.ExitViaMode = strings.TrimSpace(ch.ExitViaMode)
 		a.direct.SetChainOptions(opts)
 		a.direct.SetChainHops(opts.Hops)
 	}

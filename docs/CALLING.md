@@ -45,7 +45,28 @@ export ALL_PROXY=socks5://$HOST:7892
 curl -x http://$HOST:7892 https://httpbin.org/ip
 ```
 
-## 3. 链式出网（多跳）
+## 3. 经小 VPS 再出口
+
+7892/7893 默认从免费池随机抽跳。要让**本项目的代理流量**固定经过你的 VPS：
+
+1. VPS 上开 SOCKS5（`ssh -D 0.0.0.0:1080` 或 microsocks / xray）
+2. 面板 **设置 → 链式代理 → 固定 VPS** 填：
+
+```
+socks5://user:pass@VPS公网IP:1080
+```
+
+3. **VPS 位置**选「最后一跳」：路径是 `池子 → VPS → 网站`，对方看到的是 VPS IP。选「第一跳」则是 `VPS → 池子 → 网站`，对方看到的仍是免费代理。
+4. 保存后热更新。测：
+
+```bash
+curl -x http://$HOST:7892 https://httpbin.org/ip
+curl -x http://$HOST:7893 https://httpbin.org/ip
+```
+
+最后一跳时，免费代理必须能 CONNECT 到你的 VPS 端口；连不上就换第一跳，或把 VPS SOCKS 改成 443。
+
+## 4. 链式出网（多跳）
 
 入口 → 中继 → 出口。跳数在面板「设置 → 链式代理」。
 
@@ -53,7 +74,7 @@ curl -x http://$HOST:7892 https://httpbin.org/ip
 curl -x http://$HOST:7893 https://httpbin.org/ip
 ```
 
-## 4. 入池（脚本提交）
+## 5. 入池（脚本提交）
 
 ```bash
 printf '1.2.3.4:8080\nsocks5://user:pass@[2001:db8::1]:1080\n' \
@@ -63,7 +84,7 @@ printf '1.2.3.4:8080\nsocks5://user:pass@[2001:db8::1]:1080\n' \
 
 Clash / `ss://` / `hy2://` / `vless://` 不要走这个接口，走下面第 5 条。
 
-## 5. 订阅 / 手动节点（VLESS、HY2、SS）
+## 6. 订阅 / 手动节点（VLESS、HY2、SS）
 
 面板登录后：
 
@@ -87,7 +108,7 @@ curl -s -b /tmp/upp.txt -X POST "http://$HOST:7891/api/manual-nodes" \
 curl -s -b /tmp/upp.txt -X POST "http://$HOST:7891/api/manual-nodes/<id>/latency-test"
 ```
 
-## 6. 渠道封禁回传
+## 7. 渠道封禁回传
 
 HTTPS 走 CONNECT，池子看不到 403/429，调用方读完响应要回报：
 

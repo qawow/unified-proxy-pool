@@ -53,6 +53,8 @@ type Proxy struct {
 	FailCount int       `json:"fail_count"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	Username  string    `json:"username,omitempty"`
+	Password  string    `json:"password,omitempty"`
 }
 
 // Family returns the stored family, deriving it lazily for records written
@@ -65,20 +67,20 @@ func (p Proxy) Family() string {
 }
 
 type ScraperStat struct {
-	Name       string    `json:"name"`
-	Enabled    bool      `json:"enabled"`
-	Protocol   string    `json:"protocol"`
-	LastRunAt  time.Time `json:"last_run_at"`
-	LastOK     int       `json:"last_ok"`
-	LastFail   int       `json:"last_fail"`
-	LastError  string    `json:"last_error"`
-	TotalOK    int64     `json:"total_ok"`
-	TotalFail  int64     `json:"total_fail"`
-	URLHint    string    `json:"url_hint"`
-	Fragile    bool      `json:"fragile"`
-	Builtin    bool      `json:"builtin"`
-	Format     string    `json:"format"`
-	URLs       []string  `json:"urls,omitempty"`
+	Name      string    `json:"name"`
+	Enabled   bool      `json:"enabled"`
+	Protocol  string    `json:"protocol"`
+	LastRunAt time.Time `json:"last_run_at"`
+	LastOK    int       `json:"last_ok"`
+	LastFail  int       `json:"last_fail"`
+	LastError string    `json:"last_error"`
+	TotalOK   int64     `json:"total_ok"`
+	TotalFail int64     `json:"total_fail"`
+	URLHint   string    `json:"url_hint"`
+	Fragile   bool      `json:"fragile"`
+	Builtin   bool      `json:"builtin"`
+	Format    string    `json:"format"`
+	URLs      []string  `json:"urls,omitempty"`
 }
 
 type Overview struct {
@@ -233,21 +235,21 @@ func BuiltinGroups() []ProxyGroup {
 }
 
 type ValidatorQueues struct {
-	RawCount        int64            `json:"raw_count"`
-	ValidatedCount  int64            `json:"validated_count"`
-	ScoreBuckets    map[string]int64 `json:"score_buckets"`
-	ProtocolCounts  map[string]int64 `json:"protocol_counts"`
-	FamilyCounts    map[string]int64 `json:"family_counts"`
-	LatencyBuckets  map[string]int64 `json:"latency_buckets"`
-	RegionCounts    []RegionCount    `json:"region_counts"`
-	AvgLatencyMS    float64          `json:"avg_latency_ms"`
-	FailTopSources  []SourceFail     `json:"fail_top_sources"`
-	SourceStats     []SourceStatSnap `json:"source_stats,omitempty"`
-	LastBatchOK     int              `json:"last_batch_ok"`
-	LastBatchFail   int              `json:"last_batch_fail"`
-	LastBatchRaw    int              `json:"last_batch_raw"`
-	LastBatchRecheck int             `json:"last_batch_recheck"`
-	LastBatchAt     *time.Time       `json:"last_batch_at,omitempty"`
+	RawCount         int64            `json:"raw_count"`
+	ValidatedCount   int64            `json:"validated_count"`
+	ScoreBuckets     map[string]int64 `json:"score_buckets"`
+	ProtocolCounts   map[string]int64 `json:"protocol_counts"`
+	FamilyCounts     map[string]int64 `json:"family_counts"`
+	LatencyBuckets   map[string]int64 `json:"latency_buckets"`
+	RegionCounts     []RegionCount    `json:"region_counts"`
+	AvgLatencyMS     float64          `json:"avg_latency_ms"`
+	FailTopSources   []SourceFail     `json:"fail_top_sources"`
+	SourceStats      []SourceStatSnap `json:"source_stats,omitempty"`
+	LastBatchOK      int              `json:"last_batch_ok"`
+	LastBatchFail    int              `json:"last_batch_fail"`
+	LastBatchRaw     int              `json:"last_batch_raw"`
+	LastBatchRecheck int              `json:"last_batch_recheck"`
+	LastBatchAt      *time.Time       `json:"last_batch_at,omitempty"`
 	LastBatchMS      int64            `json:"last_batch_ms"`
 	Running          bool             `json:"running"`
 	BatchSize        int              `json:"batch_size"`

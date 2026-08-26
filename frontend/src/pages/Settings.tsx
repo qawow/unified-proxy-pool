@@ -710,6 +710,19 @@ export function SettingsPage() {
                 <Field label="单跳超时 ms">
                   <Input type="number" value={chain.hop_timeout_ms ?? 5000} onChange={(e) => patchChain({ hop_timeout_ms: Number(e.target.value) })} />
                 </Field>
+                <Field label="固定 VPS（exit_via）">
+                  <Input
+                    value={chain.exit_via || ""}
+                    onChange={(e) => patchChain({ exit_via: e.target.value })}
+                    placeholder="socks5://user:pass@vps:1080"
+                  />
+                </Field>
+                <Field label="VPS 位置">
+                  <Select value={chain.exit_via_mode || "exit"} onChange={(e) => patchChain({ exit_via_mode: e.target.value })}>
+                    <option value="exit">最后一跳（网站看到 VPS IP）</option>
+                    <option value="entry">第一跳（家里只连 VPS，出口仍是池子）</option>
+                  </Select>
+                </Field>
                 <Field label="入口协议">
                   <Select value={chain.entry_proto || ""} onChange={(e) => patchChain({ entry_proto: e.target.value })}>
                     <option value="">不限</option>
