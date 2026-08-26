@@ -19,5 +19,8 @@ frontend/dist/
 web/dist/
 !web/dist/.gitkeep
 unified-proxy-pool
+/app
+/sourceyield
+/sourceyield-report
 README-.md
 frontend/tsconfig.tsbuildinfo

@@ -37,6 +37,7 @@ type UpsertRequest struct {
 	StrategyAdvancedJSON string `json:"strategy_advanced_json"`
 	FailoverEnabled      bool   `json:"failover_enabled"`
 	Enabled              bool   `json:"enabled"`
+	Channel              string `json:"channel"`
 }
 
 type MemberInput struct {
@@ -66,7 +67,7 @@ func (s *Service) SetFreeService(free *freproxies.Service) {
 func (s *Service) List(ctx context.Context) ([]models.ProxyPool, error) {
 	rows, err := s.store.DB.QueryContext(ctx, `SELECT p.id, p.name, p.auth_username,
 		p.auth_password_secret, p.strategy, COALESCE(p.strategy_label,''), COALESCE(p.strategy_advanced_json,'{}'),
-		p.failover_enabled, p.enabled, p.last_published_at, p.last_publish_status, p.last_error,
+		p.failover_enabled, p.enabled, COALESCE(p.channel,''), p.last_published_at, p.last_publish_status, p.last_error,
 		p.created_at, p.updated_at, COUNT(m.id) AS member_count,
 		SUM(CASE WHEN ((m.source_type='manual' AND mn.last_status='available') OR (m.source_type='subscription' AND sn.last_status='available') OR (m.source_type='free_proxy')) THEN 1 ELSE 0 END) AS healthy_count
 		FROM proxy_pools p
@@ -93,7 +94,7 @@ func (s *Service) List(ctx context.Context) ([]models.ProxyPool, error) {
 func (s *Service) Get(ctx context.Context, id int64) (models.ProxyPool, error) {
 	row := s.store.DB.QueryRowContext(ctx, `SELECT id, name, auth_username,
 		auth_password_secret, strategy, COALESCE(strategy_label,''), COALESCE(strategy_advanced_json,'{}'),
-		failover_enabled, enabled, last_published_at, last_publish_status, last_error,
+		failover_enabled, enabled, COALESCE(channel,''), last_published_at, last_publish_status, last_error,
 		created_at, updated_at, 0, 0 FROM proxy_pools WHERE id = ?`, id)
 	return scanPool(row)
 }
@@ -106,11 +107,11 @@ func (s *Service) Create(ctx context.Context, req UpsertRequest) (models.ProxyPo
 	now := time.Now().UTC()
 	res, err := s.store.DB.ExecContext(ctx, `INSERT INTO proxy_pools (
 		name, auth_username, auth_password_secret,
-		strategy, strategy_label, strategy_advanced_json, failover_enabled, enabled, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		strategy, strategy_label, strategy_advanced_json, failover_enabled, enabled, channel, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.Name, req.AuthUsername, req.AuthPasswordSecret,
 		defaultStrategy(req.Strategy), req.StrategyLabel, req.StrategyAdvancedJSON, boolToInt(req.FailoverEnabled),
-		boolToInt(req.Enabled), now, now,
+		boolToInt(req.Enabled), strings.TrimSpace(req.Channel), now, now,
 	)
 	if err != nil {
 		return models.ProxyPool{}, err
@@ -137,11 +138,11 @@ func (s *Service) Update(ctx context.Context, id int64, req UpsertRequest) (mode
 	}
 	_, err = s.store.DB.ExecContext(ctx, `UPDATE proxy_pools SET name = ?,
 		auth_username = ?, auth_password_secret = ?, strategy = ?, strategy_label = ?, strategy_advanced_json = ?,
-		failover_enabled = ?, enabled = ?, updated_at = ?
+		failover_enabled = ?, enabled = ?, channel = ?, updated_at = ?
 		WHERE id = ?`,
 		req.Name,
 		req.AuthUsername, req.AuthPasswordSecret, defaultStrategy(req.Strategy), req.StrategyLabel, req.StrategyAdvancedJSON,
-		boolToInt(req.FailoverEnabled), boolToInt(req.Enabled),
+		boolToInt(req.FailoverEnabled), boolToInt(req.Enabled), strings.TrimSpace(req.Channel),
 		time.Now().UTC(), id,
 	)
 	if err != nil {
@@ -494,7 +495,7 @@ func scanPool(scanner interface{ Scan(dest ...any) error }) (models.ProxyPool, e
 	err := scanner.Scan(
 		&item.ID, &item.Name, &item.AuthUsername,
 		&item.AuthPasswordSecret, &item.Strategy, &item.StrategyLabel, &item.StrategyAdvancedJSON,
-		&failoverEnabled, &enabled, &lastPublishedAt, &item.LastPublishStatus,
+		&failoverEnabled, &enabled, &item.Channel, &lastPublishedAt, &item.LastPublishStatus,
 		&item.LastError, &item.CreatedAt, &item.UpdatedAt, &item.CurrentMemberCount, &healthy,
 	)
 	if err != nil {

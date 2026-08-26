@@ -19,6 +19,7 @@ import (
 	"unified-proxy-pool/internal/audit"
 	"unified-proxy-pool/internal/auth"
 	"unified-proxy-pool/internal/blacklist"
+	"unified-proxy-pool/internal/chanpolicy"
 	"unified-proxy-pool/internal/config"
 	"unified-proxy-pool/internal/directproxy"
 	"unified-proxy-pool/internal/events"
@@ -32,6 +33,7 @@ import (
 	"unified-proxy-pool/internal/scheduler"
 	"unified-proxy-pool/internal/scrapers"
 	"unified-proxy-pool/internal/settings"
+	"unified-proxy-pool/internal/sticky"
 	"unified-proxy-pool/internal/subscriptions"
 	"unified-proxy-pool/internal/traffichist"
 	"unified-proxy-pool/internal/webhook"
@@ -57,7 +59,9 @@ type App struct {
 	audit         *audit.Store
 	tokens        *apitoken.Store
 	trafficHist   *traffichist.Store
+	channels      *chanpolicy.Registry
 	prompts       *aisvc.PromptStore
+	getSticky     *sticky.Store
 	shutdown      func()
 	frontend      fs.FS
 	indexHTML     []byte
@@ -68,6 +72,7 @@ type FeatureDeps struct {
 	Audit       *audit.Store
 	Tokens      *apitoken.Store
 	TrafficHist *traffichist.Store
+	Channels    *chanpolicy.Registry
 }
 
 type apiResponse struct {
@@ -110,7 +115,9 @@ func New(authSvc *auth.Service, settingsSvc *settings.Service, nodeSvc *nodes.Se
 		audit:         deps.Audit,
 		tokens:        deps.Tokens,
 		trafficHist:   deps.TrafficHist,
+		channels:      deps.Channels,
 		prompts:       aisvc.NewPromptStore(),
+		getSticky:     sticky.New(10 * time.Minute),
 		shutdown:      shutdown,
 		frontend:      frontendFS,
 		indexHTML:     indexHTML,
@@ -224,6 +231,25 @@ func (a *App) Router() (http.Handler, error) {
 			api.Get("/direct-proxy/status", a.handleDirectProxyStatus)
 			api.Put("/direct-proxy/chain", a.handleDirectProxyChainUpdate)
 			api.Get("/explain", a.handleExplain)
+
+			// Per-channel temporary bans. Channel names are hosts, so the more
+			// specific /bans route is registered before the bare {name} delete to
+			// keep chi from matching "bans" as a channel name.
+			api.Get("/channels", a.handleChannelList)
+			api.Get("/channels/logs", a.handleChannelLogs)
+			api.Post("/channels/logs/clear", a.handleChannelLogsClear)
+			api.Get("/channels/allowlist", a.handleAllowList)
+			api.Post("/channels/allowlist", a.handleAllowAdd)
+			api.Delete("/channels/allowlist", a.handleAllowDelete)
+			api.Get("/channels/rules", a.handleRuleList)
+			api.Post("/channels/rules", a.handleRuleAdd)
+			api.Delete("/channels/rules", a.handleRuleDelete)
+			api.Delete("/channels/rules/{id}", a.handleRuleDelete)
+			api.Get("/channels/{name}/bans", a.handleChannelBans)
+			api.Get("/channels/{name}/logs", a.handleChannelLogs)
+			api.Delete("/channels/{name}/bans", a.handleChannelUnban)
+			api.Post("/channels/{name}/reset", a.handleChannelReset)
+			api.Delete("/channels/{name}", a.handleChannelDelete)
 		})
 	})
 
@@ -238,6 +264,9 @@ func (a *App) Router() (http.Handler, error) {
 		scriptAPI.Post("/api/proxies/submit", a.handleProxySubmit)
 		scriptAPI.Post("/api/proxies/batch-test", a.handleProxyBatchTest)
 		scriptAPI.Post("/api/ai-proxy", a.handleAIProxy)
+		// Outcome reporting is script-facing by nature: the caller that read the
+		// response is the only one who knows what the destination actually said.
+		scriptAPI.Post("/api/channels/report", a.handleChannelReport)
 		scriptAPI.Post("/api/ai-search", a.handleAISearch)
 		scriptAPI.Get("/api/ai-prompts", a.handleAIPromptsList)
 		scriptAPI.Put("/api/ai-prompts", a.handleAIPromptUpsert)
@@ -255,6 +284,10 @@ func (a *App) Router() (http.Handler, error) {
 		// Unauthenticated batch submit for LAN scripts.
 		// Body: plain text, one host:port per line; ?source= labels the origin.
 		pub.Post("/submit", a.handlePublicSubmit)
+		// Unauthenticated channel reporting, same trust model as the rest of
+		// /api/public/*: intended for LAN scripts. Anyone who can reach it can
+		// sideline a proxy for a channel, so keep this port off the internet.
+		pub.Post("/channels/report", a.handleChannelReport)
 	})
 
 	fileServer := http.FileServer(http.FS(a.frontend))
@@ -838,6 +871,12 @@ func (a *App) publishRuntimeAsync() {
 func (a *App) applyFeatureHot(raw string) {
 	fc := features.Parse(raw)
 	webhook.Default.Configure(fc.WebhookURL, fc.WebhookEvents)
+	if a.channels != nil {
+		a.channels.SetPolicy(fc.Channels.ToPolicy())
+	}
+	if a.free != nil {
+		a.free.SetPickDefaults(fc.Channels.PickStrategy, fc.Channels.CooldownDuration())
+	}
 	if a.sched != nil {
 		a.sched.ApplyValidateExtras(fc.ValidateURLs(a.freeCfg.FreeValidateURL), fc.SourceAutoDisableRate, fc.SourceMinSamples)
 	}

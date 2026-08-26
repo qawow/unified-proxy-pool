@@ -393,6 +393,14 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
 		// use traffic package indirectly through freproxies overview traffic attach — pull Default
 	}
 	fmt.Fprintf(&b, "upp_active_connections %d\n", len(conntrack.Default.List()))
+	if a.channels != nil {
+		// Aggregates only. Channels are destination hosts, so a per-channel label
+		// would give this metric unbounded cardinality; the top offenders are
+		// available through /api/channels instead.
+		chCount, banCount := a.channels.Totals()
+		fmt.Fprintf(&b, "upp_channels_total %d\n", chCount)
+		fmt.Fprintf(&b, "upp_channel_bans_active %d\n", banCount)
+	}
 	if a.direct != nil {
 		st := a.direct.Status()
 		fmt.Fprintf(&b, "upp_direct_success %d\n", st.Success)

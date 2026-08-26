@@ -28,7 +28,7 @@ func NewLogBuffer(cap int) *LogBuffer {
 	return &LogBuffer{cap: cap, lines: make([]LogLine, 0, cap)}
 }
 
-var DefaultLogs = NewLogBuffer(250)
+var DefaultLogs = NewLogBuffer(2000)
 
 func (b *LogBuffer) SetRunning(v bool) {
 	b.mu.Lock()

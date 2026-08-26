@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input, Select } from "@/components/ui/input";
 import { useToast } from "@/hooks/useToast";
-import type { ChainOptions, DirectProxyStatus, MihomoStatus, Settings } from "@/types";
+import type { ChainOptions, ChannelPolicyConfig, DirectProxyStatus, MihomoStatus, Settings } from "@/types";
 
 function chainPathPreview(hops: number) {
   const n = Math.max(2, Math.min(4, hops || 2));
@@ -96,6 +96,19 @@ export function SettingsPage() {
       feature: feat,
       feature_json: JSON.stringify(feat),
     });
+  };
+
+  // 渠道策略只存在 feature_json 里，没有对应的顶层 settings 字段，
+  // 所以补丁比 chain 简单：只合并这一个子对象。
+  const channels = useMemo(
+    () => ((settings?.feature as { channels?: ChannelPolicyConfig } | undefined)?.channels ?? {}),
+    [settings],
+  );
+
+  const patchChannels = (patch: Partial<ChannelPolicyConfig>) => {
+    if (!settings) return;
+    const next = { ...(settings.feature || {}), channels: { ...channels, ...patch } };
+    setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
   };
 
   const applyChainNow = async () => {
@@ -309,6 +322,7 @@ export function SettingsPage() {
                   ["lan", "局域网访问"],
                   ["events", "最近动态"],
                   ["regions", "地区分布"],
+                  ["channel_bans", "渠道封禁"],
                 ].map(([key, label]) => {
                   const cards = (settings.feature?.dashboard_cards || {}) as Record<string, boolean>;
                   const on = cards[key] !== false;
@@ -400,7 +414,7 @@ export function SettingsPage() {
                       const next = { ...(settings.feature || {}), webhook_events: events };
                       setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
                     }}
-                    placeholder="validated_low,validate_all_fail,*"
+                    placeholder="validated_low,validate_all_fail,channel_ban,*"
                   />
                 </Field>
                 <Field label="来源自动禁用率（0=关，0.1–1.0）">
@@ -458,6 +472,166 @@ export function SettingsPage() {
                 </Field>
               </div>
               <p className="text-xs text-muted-foreground">保存后热更新校验 URL / Webhook / CIDR / 限速等。API Token、审计见下方系统卡片。</p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>渠道策略与选路</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                渠道 = 请求的目标站点。任一规则命中即把该 IP 在该渠道上临时禁用，其它渠道不受影响。
+                阈值填 0 表示关闭这条规则。明细见「渠道封禁」页。
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={channels.enabled !== false}
+                    onChange={(e) => patchChannels({ enabled: e.target.checked })}
+                  />
+                  启用渠道封禁
+                </label>
+                <Field label="渠道粒度">
+                  <Select
+                    value={String(channels.key_mode || "etld1")}
+                    onChange={(e) => patchChannels({ key_mode: e.target.value })}
+                  >
+                    <option value="etld1">按注册域（item./www. 合并）</option>
+                    <option value="host">按完整域名（子域各自独立）</option>
+                    <option value="off">不分渠道（等于全局）</option>
+                  </Select>
+                </Field>
+                <Field label="选路策略">
+                  <Select
+                    value={String(channels.pick_strategy || "weighted")}
+                    onChange={(e) => patchChannels({ pick_strategy: e.target.value })}
+                  >
+                    <option value="weighted">按质量加权随机</option>
+                    <option value="random">等概率随机</option>
+                    <option value="rr">按渠道轮转</option>
+                  </Select>
+                </Field>
+                <Field label="重复取用冷却秒（0=关）">
+                  <Input
+                    type="number"
+                    min="0"
+                    value={Number(channels.cooldown_sec ?? 30)}
+                    onChange={(e) => patchChannels({ cooldown_sec: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="统计窗口秒">
+                  <Input
+                    type="number"
+                    min="1"
+                    value={Number(channels.window_sec ?? 300)}
+                    onChange={(e) => patchChannels({ window_sec: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="连续失败次数（0=关）">
+                  <Input
+                    type="number"
+                    min="0"
+                    value={Number(channels.consecutive_fails ?? 3)}
+                    onChange={(e) => patchChannels({ consecutive_fails: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="失败率阈值（0=关，0–1）">
+                  <Input
+                    type="number"
+                    step="0.05"
+                    min="0"
+                    max="1"
+                    value={Number(channels.fail_rate ?? 0.6)}
+                    onChange={(e) => patchChannels({ fail_rate: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="失败率最低样本数">
+                  <Input
+                    type="number"
+                    min="1"
+                    value={Number(channels.min_samples ?? 5)}
+                    onChange={(e) => patchChannels({ min_samples: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="超时次数（0=关）">
+                  <Input
+                    type="number"
+                    min="0"
+                    value={Number(channels.timeout_fails ?? 5)}
+                    onChange={(e) => patchChannels({ timeout_fails: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="即时封禁状态码（逗号分隔）">
+                  <Input
+                    value={(channels.ban_statuses ?? [403, 429]).join(",")}
+                    onChange={(e) => {
+                      const codes = e.target.value
+                        .split(",")
+                        .map((s) => Number(s.trim()))
+                        .filter((n) => Number.isFinite(n) && n > 0);
+                      patchChannels({ ban_statuses: codes });
+                    }}
+                    placeholder="403,429"
+                  />
+                </Field>
+                <Field label="首次封禁秒">
+                  <Input
+                    type="number"
+                    min="1"
+                    value={Number(channels.ban_ttl_sec ?? 60)}
+                    onChange={(e) => patchChannels({ ban_ttl_sec: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="封禁上限秒（重复翻倍到此为止）">
+                  <Input
+                    type="number"
+                    min="1"
+                    value={Number(channels.ban_ttl_max_sec ?? 1800)}
+                    onChange={(e) => patchChannels({ ban_ttl_max_sec: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="最多跟踪渠道数">
+                  <Input
+                    type="number"
+                    min="1"
+                    value={Number(channels.max_channels ?? 500)}
+                    onChange={(e) => patchChannels({ max_channels: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="每渠道最多跟踪 IP 数">
+                  <Input
+                    type="number"
+                    min="1"
+                    value={Number(channels.max_entries_per_chan ?? 2000)}
+                    onChange={(e) => patchChannels({ max_entries_per_chan: Number(e.target.value) })}
+                  />
+                </Field>
+                <Field label="请求日志保留小时">
+                  <Input
+                    type="number"
+                    min="1"
+                    value={Number(channels.log_retain_hours ?? 48)}
+                    onChange={(e) => patchChannels({ log_retain_hours: Number(e.target.value) })}
+                  />
+                </Field>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={channels.reprobe_on_expiry !== false}
+                    onChange={(e) => patchChannels({ reprobe_on_expiry: e.target.checked })}
+                  />
+                  到期先复检再放回（看到成功才真正解封）
+                </label>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                HTTPS 走 CONNECT 隧道，池子只能看到能否连通，看不到里面的状态码；这类信号需调用方通过
+                <code className="mx-1 rounded bg-white/50 px-1 py-0.5 font-mono dark:bg-white/10">
+                  POST /api/channels/report
+                </code>
+                回传。保存后即时生效。
+              </p>
             </CardContent>
           </Card>
 

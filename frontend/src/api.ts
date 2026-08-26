@@ -1,5 +1,10 @@
 import type {
   ApiResponse,
+  Channel,
+  ChannelBan,
+  ChannelLog,
+  ChannelAllow,
+  ChannelRule,
   FreeProxy,
   FreeProxyListResult,
   ManualNode,
@@ -162,6 +167,45 @@ export const endpoints = {
       api("/api/blacklist", { method: "POST", body: JSON.stringify(body) }),
     remove: (host: string) => api(`/api/blacklist?host=${encodeURIComponent(host)}`, { method: "DELETE" }),
   },
+  channels: {
+    list: async (params?: { q?: string; onlyBanned?: boolean }) => {
+      const qs = new URLSearchParams();
+      if (params?.q) qs.set("q", params.q);
+      if (params?.onlyBanned) qs.set("only_banned", "1");
+      const suffix = qs.toString();
+      return asArray(await api<Channel[]>(`/api/channels${suffix ? `?${suffix}` : ""}`));
+    },
+    bans: async (channel: string) =>
+      asArray(await api<ChannelBan[]>(`/api/channels/${encodeURIComponent(channel)}/bans`)),
+    unban: (channel: string, addr: string) =>
+      api(`/api/channels/${encodeURIComponent(channel)}/bans?addr=${encodeURIComponent(addr)}`, {
+        method: "DELETE",
+      }),
+    reset: (channel: string) =>
+      api(`/api/channels/${encodeURIComponent(channel)}/reset`, { method: "POST" }),
+    remove: (channel: string) =>
+      api(`/api/channels/${encodeURIComponent(channel)}`, { method: "DELETE" }),
+    logs: async (params?: { channel?: string; limit?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.channel) qs.set("channel", params.channel);
+      qs.set("limit", String(params?.limit ?? 150));
+      const data = await api<{ items: ChannelLog[] }>(`/api/channels/logs?${qs.toString()}`);
+      return data?.items ?? [];
+    },
+    clearLogs: () => api("/api/channels/logs/clear", { method: "POST" }),
+    allowlist: async () => asArray(await api<ChannelAllow[]>("/api/channels/allowlist")),
+    allow: (body: { channel?: string; addr: string; reason?: string }) =>
+      api("/api/channels/allowlist", { method: "POST", body: JSON.stringify(body) }),
+    deny: (addr: string, channel = "") =>
+      api(`/api/channels/allowlist?addr=${encodeURIComponent(addr)}&channel=${encodeURIComponent(channel)}`, {
+        method: "DELETE",
+      }),
+    rules: async () => asArray(await api<ChannelRule[]>("/api/channels/rules")),
+    addRule: (body: Partial<ChannelRule>) =>
+      api<ChannelRule>("/api/channels/rules", { method: "POST", body: JSON.stringify(body) }),
+    deleteRule: (id: string) =>
+      api(`/api/channels/rules?id=${encodeURIComponent(id)}`, { method: "DELETE" }),
+  },
   tokens: {
     list: async () => asArray(await api<{ id: number; name: string; prefix: string; scopes: string; token?: string }[]>("/api/tokens")),
     create: (name: string, scopes?: string) =>
@@ -271,7 +315,8 @@ export const endpoints = {
       url: string;
       apikey: string;
       model?: string;
-      level?: number;
+      effort?: string;
+      level?: number | string;
       prompt_key?: string;
       prompt?: string;
       content?: string;

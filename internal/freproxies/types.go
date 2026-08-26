@@ -96,6 +96,8 @@ type Overview struct {
 	LANIPs           []string         `json:"lan_ips"`
 	PanelHint        string           `json:"panel_hint"`
 	Traffic          any              `json:"traffic,omitempty"`
+	ChannelBans      int              `json:"channel_bans"`
+	ChannelCount     int              `json:"channel_count"`
 }
 
 type RegionCount struct {
@@ -231,12 +233,47 @@ func BuiltinGroups() []ProxyGroup {
 }
 
 type ValidatorQueues struct {
-	RawCount       int64            `json:"raw_count"`
-	ValidatedCount int64            `json:"validated_count"`
-	ScoreBuckets   map[string]int64 `json:"score_buckets"`
-	ProtocolCounts map[string]int64 `json:"protocol_counts"`
-	FamilyCounts   map[string]int64 `json:"family_counts"`
-	FailTopSources []SourceFail     `json:"fail_top_sources"`
+	RawCount        int64            `json:"raw_count"`
+	ValidatedCount  int64            `json:"validated_count"`
+	ScoreBuckets    map[string]int64 `json:"score_buckets"`
+	ProtocolCounts  map[string]int64 `json:"protocol_counts"`
+	FamilyCounts    map[string]int64 `json:"family_counts"`
+	LatencyBuckets  map[string]int64 `json:"latency_buckets"`
+	RegionCounts    []RegionCount    `json:"region_counts"`
+	AvgLatencyMS    float64          `json:"avg_latency_ms"`
+	FailTopSources  []SourceFail     `json:"fail_top_sources"`
+	SourceStats     []SourceStatSnap `json:"source_stats,omitempty"`
+	LastBatchOK     int              `json:"last_batch_ok"`
+	LastBatchFail   int              `json:"last_batch_fail"`
+	LastBatchRaw    int              `json:"last_batch_raw"`
+	LastBatchRecheck int             `json:"last_batch_recheck"`
+	LastBatchAt     *time.Time       `json:"last_batch_at,omitempty"`
+	LastBatchMS      int64            `json:"last_batch_ms"`
+	Running          bool             `json:"running"`
+	BatchSize        int              `json:"batch_size"`
+	BatchDone        int              `json:"batch_done"`
+	LifetimeOK       int64            `json:"lifetime_ok"`
+	LifetimeFail     int64            `json:"lifetime_fail"`
+	LifetimeBatches  int64            `json:"lifetime_batches"`
+	History          []BatchHistory   `json:"history,omitempty"`
+}
+
+type BatchHistory struct {
+	OK         int       `json:"ok"`
+	Fail       int       `json:"fail"`
+	Raw        int       `json:"raw"`
+	Recheck    int       `json:"recheck"`
+	DurationMS int64     `json:"duration_ms"`
+	At         time.Time `json:"at"`
+}
+
+type SourceStatSnap struct {
+	Name         string  `json:"name"`
+	OK           int64   `json:"ok"`
+	Fail         int64   `json:"fail"`
+	SuccessRate  float64 `json:"success_rate"`
+	AvgLatencyMS float64 `json:"avg_latency_ms"`
+	AutoDisabled bool    `json:"auto_disabled"`
 }
 
 type SourceFail struct {

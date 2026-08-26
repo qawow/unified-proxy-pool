@@ -16,7 +16,9 @@ type Options struct {
 	URL       string // OpenAI-compatible /chat/completions endpoint
 	APIKey    string // Bearer token
 	Model     string // model id (default from endpoint)
-	Level     int    // 0..10 reasoning depth -> influences temperature/max_tokens
+	// Effort is off|low|medium|high|max. The old 0–10 Level is still accepted
+	// by the HTTP layer and folded into this field.
+	Effort    string
 	PromptKey string // which prompt template to use
 	UserMsg   string // content that fills {{.Content}}
 	Timeout   time.Duration
@@ -24,10 +26,11 @@ type Options struct {
 }
 
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Temperature float64       `json:"temperature"`
-	MaxTokens   int           `json:"max_tokens"`
+	Model           string        `json:"model"`
+	Messages        []chatMessage `json:"messages"`
+	Temperature     float64       `json:"temperature"`
+	MaxTokens       int           `json:"max_tokens"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 }
 
 type chatMessage struct {
@@ -71,31 +74,18 @@ func Call(ctx context.Context, opts Options) (string, error) {
 	userMsg := strings.ReplaceAll(prompt.User, "{{.Content}}", opts.UserMsg)
 	userMsg = strings.ReplaceAll(userMsg, "{{.Count}}", "50")
 
-	level := opts.Level
-	if level < 0 {
-		level = 0
-	}
-	if level > 10 {
-		level = 10
-	}
-	// depth dial: higher = more thorough (lower temp, more tokens)
-	temperature := 0.9 - float64(level)*0.05
-	if temperature < 0.2 {
-		temperature = 0.2
-	}
+	ep := paramsForEffort(opts.Effort)
 	maxTokens := opts.MaxTokens
 	if maxTokens <= 0 {
-		maxTokens = 800 + level*300 // 800..3800
-	}
-	if level >= 8 {
-		maxTokens += 1500
+		maxTokens = ep.MaxTokens
 	}
 
 	body := chatRequest{
-		Model:       firstNonEmptyStr(opts.Model, DefaultModel),
-		Messages:    []chatMessage{{Role: "system", Content: prompt.System}, {Role: "user", Content: userMsg}},
-		Temperature: temperature,
-		MaxTokens:   maxTokens,
+		Model:           firstNonEmptyStr(opts.Model, DefaultModel),
+		Messages:        []chatMessage{{Role: "system", Content: prompt.System}, {Role: "user", Content: userMsg}},
+		Temperature:     ep.Temperature,
+		MaxTokens:       maxTokens,
+		ReasoningEffort: ep.ReasoningEffort,
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {

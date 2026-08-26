@@ -8,13 +8,14 @@ import (
 type Store struct {
 	mu  sync.RWMutex
 	ttl time.Duration
-	// clientIP -> upstream addr
+	// clientIP -> last successful upstream
 	m map[string]entry
 }
 
 type entry struct {
-	addr string
-	exp  time.Time
+	addr     string
+	protocol string
+	exp      time.Time
 }
 
 func New(ttl time.Duration) *Store {
@@ -34,25 +35,37 @@ func (s *Store) SetTTL(d time.Duration) {
 }
 
 func (s *Store) Get(clientIP string) (string, bool) {
+	addr, _, ok := s.GetProxy(clientIP)
+	return addr, ok
+}
+
+// GetProxy returns the remembered upstream and the protocol it was dialed with.
+// Protocol matters: reconstructing every sticky hit as HTTP CONNECT breaks a
+// remembered SOCKS5 proxy.
+func (s *Store) GetProxy(clientIP string) (addr, protocol string, ok bool) {
 	if s == nil || clientIP == "" {
-		return "", false
+		return "", "", false
 	}
 	now := time.Now()
 	s.mu.RLock()
-	e, ok := s.m[clientIP]
+	e, found := s.m[clientIP]
 	s.mu.RUnlock()
-	if !ok || now.After(e.exp) {
-		return "", false
+	if !found || now.After(e.exp) {
+		return "", "", false
 	}
-	return e.addr, true
+	return e.addr, e.protocol, true
 }
 
 func (s *Store) Put(clientIP, addr string) {
+	s.PutProxy(clientIP, addr, "")
+}
+
+func (s *Store) PutProxy(clientIP, addr, protocol string) {
 	if s == nil || clientIP == "" || addr == "" {
 		return
 	}
 	s.mu.Lock()
-	s.m[clientIP] = entry{addr: addr, exp: time.Now().Add(s.ttl)}
+	s.m[clientIP] = entry{addr: addr, protocol: protocol, exp: time.Now().Add(s.ttl)}
 	// opportunistic cleanup
 	if len(s.m) > 5000 {
 		now := time.Now()

@@ -3,7 +3,7 @@ import { AlertTriangle, CheckCircle2, Edit3, RefreshCw, Search, Send, Trash2 } f
 import { endpoints } from "@/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Input, Select } from "@/components/ui/input";
 import { useToast } from "@/hooks/useToast";
 import { PageHeader } from "@/components/PageHeader";
 
@@ -118,7 +118,7 @@ export function AIProxyPage() {
   const [url, setUrl] = useState("");
   const [apikey, setApikey] = useState("");
   const [model, setModel] = useState("");
-  const [level, setLevel] = useState(5);
+  const [level, setLevel] = useState("medium");
   const [promptKey, setPromptKey] = useState("proxy_extract");
   const [content, setContent] = useState("");
   const [searching, setSearching] = useState(false);
@@ -175,7 +175,7 @@ export function AIProxyPage() {
         url: url.trim(),
         apikey: apikey.trim(),
         model: model.trim() || undefined,
-        level,
+        effort: level,
         prompt_key: promptKey,
         content: content.trim() || undefined,
       });
@@ -269,21 +269,17 @@ export function AIProxyPage() {
 
               <div className="grid gap-3 md:grid-cols-[1fr_1fr]">
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-muted-foreground">
-                    思考等级：{level} / 10
-                  </label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={10}
-                    value={level}
-                    onChange={(e) => setLevel(Number(e.target.value))}
-                    className="w-full accent-sky-500"
-                  />
-                  <div className="flex justify-between text-[10px] text-muted-foreground">
-                    <span>简洁快速</span>
-                    <span>深度推理</span>
-                  </div>
+                  <label className="mb-1 block text-xs font-medium text-muted-foreground">思考等级</label>
+                  <Select value={level} onChange={(e) => setLevel(e.target.value)}>
+                    <option value="off">off · 不推理</option>
+                    <option value="low">low · 低</option>
+                    <option value="medium">medium · 中（默认）</option>
+                    <option value="high">high · 高</option>
+                    <option value="max">max · 最高</option>
+                  </Select>
+                  <p className="mt-1 text-[10px] text-muted-foreground">
+                    发给接口的是各家通用的 reasoning_effort（OpenAI / DeepSeek / 兼容网关）。off 不带该字段。
+                  </p>
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-muted-foreground">提示词模板</label>

@@ -8,15 +8,19 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"unified-proxy-pool/internal/chanpolicy"
 	"unified-proxy-pool/internal/directproxy"
 	"unified-proxy-pool/internal/freproxies"
 	"unified-proxy-pool/internal/scrapers"
+	"unified-proxy-pool/internal/sourcestats"
+	"unified-proxy-pool/internal/validator"
 	"unified-proxy-pool/internal/traffic"
 )
 
@@ -35,6 +39,9 @@ func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item.Traffic = traffic.Get(r.Context())
+	if a.channels != nil {
+		item.ChannelCount, item.ChannelBans = a.channels.Totals()
+	}
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: item})
 }
 
@@ -76,20 +83,139 @@ func (a *App) handleFreeProxyList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: result})
 }
 
+// maxPickCount bounds ?count=. A caller wanting more than this wants the export
+// endpoint, not a rotation batch.
+const maxPickCount = 100
+
+// pickOptionsFromRequest reads the shared selection parameters.
+//
+// ?channel= names the destination bucket directly; ?target= lets the caller pass
+// the URL or host it is about to hit and have the pool derive the same name it
+// would derive itself.
+func (a *App) pickOptionsFromRequest(r *http.Request) freproxies.PickOptions {
+	q := r.URL.Query()
+	opt := freproxies.PickOptions{
+		Protocol: firstNonEmpty(q.Get("proto"), q.Get("type"), q.Get("protocol")),
+		Region:   q.Get("region"),
+		Family:   normalizeFamilyParam(firstNonEmpty(q.Get("family"), q.Get("ip_family"))),
+		Strategy: q.Get("strategy"),
+	}
+	if channel := strings.TrimSpace(q.Get("channel")); channel != "" {
+		opt.Channel = chanpolicy.NormalizeChannelName(channel)
+	} else if target := strings.TrimSpace(q.Get("target")); target != "" && a.channels != nil {
+		opt.Channel = a.channels.ChannelFor(target)
+	}
+	return opt
+}
+
+// pickCount reads ?count=, returning 0 when absent so callers can keep their
+// single-object response shape.
+func queryTruthy(r *http.Request, keys ...string) bool {
+	for _, k := range keys {
+		v := strings.ToLower(strings.TrimSpace(r.URL.Query().Get(k)))
+		if v == "1" || v == "true" || v == "yes" || v == "on" {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) stickySessionKey(r *http.Request) (key string, enabled bool) {
+	if queryTruthy(r, "refresh") && !queryTruthy(r, "sticky", "keep") && r.URL.Query().Get("session") == "" {
+		return "", false
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if session != "" {
+		return "sess:" + session, true
+	}
+	if queryTruthy(r, "sticky", "keep", "reuse") {
+		return "ip:" + clientIP(r), true
+	}
+	return "", false
+}
+
+func (a *App) pickWithSticky(r *http.Request, opt freproxies.PickOptions) (freproxies.Proxy, bool, error) {
+	key, enabled := a.stickySessionKey(r)
+	refresh := queryTruthy(r, "refresh")
+	if enabled && !refresh && a.getSticky != nil {
+		if addr, proto, ok := a.getSticky.GetProxy(key); ok {
+			host, portStr, err := net.SplitHostPort(addr)
+			if err == nil {
+				port, _ := strconv.Atoi(portStr)
+				return freproxies.Proxy{Host: host, Port: port, Addr: addr, Protocol: proto}, true, nil
+			}
+			return freproxies.Proxy{Addr: addr, Protocol: proto}, true, nil
+		}
+	}
+	res, err := a.free.Pick(r.Context(), opt)
+	if err != nil {
+		return freproxies.Proxy{}, false, err
+	}
+	p := res.Items[0]
+	if enabled && a.getSticky != nil {
+		a.getSticky.PutProxy(key, p.Addr, p.Protocol)
+	}
+	return p, false, nil
+}
+
+func (a *App) rememberSticky(r *http.Request, p freproxies.Proxy) {
+	key, enabled := a.stickySessionKey(r)
+	if !enabled || a.getSticky == nil {
+		return
+	}
+	a.getSticky.PutProxy(key, p.Addr, p.Protocol)
+}
+
+func pickCount(r *http.Request) int {
+	raw := firstNonEmpty(r.URL.Query().Get("count"), r.URL.Query().Get("n"), r.URL.Query().Get("limit"))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	if n > maxPickCount {
+		n = maxPickCount
+	}
+	return n
+}
+
 func (a *App) handleFreeProxyRandom(w http.ResponseWriter, r *http.Request) {
 	if a.free == nil {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "free proxy disabled"})
 		return
 	}
-	proto := firstNonEmpty(r.URL.Query().Get("proto"), r.URL.Query().Get("type"), r.URL.Query().Get("protocol"))
-	region := r.URL.Query().Get("region")
-	family := normalizeFamilyParam(firstNonEmpty(r.URL.Query().Get("family"), r.URL.Query().Get("ip_family")))
-	item, err := a.free.RandomFamilyFilter(r.Context(), proto, region, family)
+	opt := a.pickOptionsFromRequest(r)
+	count := pickCount(r)
+	opt.N = count
+	if opt.N <= 0 {
+		opt.N = 1
+	}
+	if count <= 0 {
+		if p, _, err := a.pickWithSticky(r, opt); err == nil {
+			writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: p})
+			return
+		}
+	}
+	res, err := a.free.Pick(r.Context(), opt)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: item})
+	// No ?count= keeps the historical single-object payload; asking for a batch
+	// opts into the list shape.
+	if count <= 0 {
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: res.Items[0]})
+		return
+	}
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+		"items":    res.Items,
+		"count":    len(res.Items),
+		"channel":  res.Channel,
+		"strategy": res.Strategy,
+		"relaxed":  res.Relaxed,
+	}})
 }
 
 // normalizeFamilyParam maps user-facing aliases (4/v4/inet6/…) onto the
@@ -109,38 +235,92 @@ func normalizeFamilyParam(v string) string {
 }
 
 // handlePublicGet mirrors classic proxy_pool /get — returns host:port plain or JSON.
+//
+// Sticky / long-lived reuse:
+//
+//	?sticky=1            reuse last proxy for this client IP (until TTL)
+//	?session=job-42      reuse by explicit session key (cross-host)
+//	(no sticky/session)  always pick a fresh proxy
+//	?refresh=1           force a new pick; if sticky/session is also set, replace the cache
 func (a *App) handlePublicGet(w http.ResponseWriter, r *http.Request) {
 	if a.free == nil {
 		http.Error(w, "no proxy", http.StatusNotFound)
 		return
 	}
-	proto := r.URL.Query().Get("type")
-	if proto == "" {
-		proto = r.URL.Query().Get("proto")
+	opt := a.pickOptionsFromRequest(r)
+	count := pickCount(r)
+	opt.N = count
+	if opt.N <= 0 {
+		opt.N = 1
 	}
-	region := r.URL.Query().Get("region")
-	family := normalizeFamilyParam(firstNonEmpty(r.URL.Query().Get("family"), r.URL.Query().Get("ip_family")))
-	item, err := a.free.RandomFamilyFilter(r.Context(), proto, region, family)
-	if err != nil {
-		http.Error(w, "no proxy", http.StatusNotFound)
-		return
+
+	var res freproxies.PickResult
+	var err error
+	reused := false
+	if count <= 0 {
+		var p freproxies.Proxy
+		p, reused, err = a.pickWithSticky(r, opt)
+		if err == nil {
+			res.Items = []freproxies.Proxy{p}
+		}
 	}
+	if len(res.Items) == 0 {
+		res, err = a.free.Pick(r.Context(), opt)
+		if err != nil {
+			http.Error(w, "no proxy", http.StatusNotFound)
+			return
+		}
+		if count <= 0 {
+			a.rememberSticky(r, res.Items[0])
+		}
+	}
+	item := res.Items[0]
 	format := strings.ToLower(r.URL.Query().Get("format"))
 	if format == "json" || r.Header.Get("Accept") == "application/json" {
-		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
-			"proxy":     item.Addr,
-			"protocol":  item.Protocol,
-			"source":    item.Source,
-			"score":     item.Score,
-			"latency":   item.LatencyMS,
-			"region":    item.Region,
-			"ip_family": item.Family(),
-		}})
+		if count > 0 {
+			out := make([]map[string]any, 0, len(res.Items))
+			for _, it := range res.Items {
+				out = append(out, publicProxyPayload(it))
+			}
+			writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+				"items":    out,
+				"count":    len(out),
+				"channel":  res.Channel,
+				"strategy": res.Strategy,
+				"relaxed":  res.Relaxed,
+			}})
+			return
+		}
+		payload := publicProxyPayload(item)
+		payload["sticky"] = reused
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: payload})
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
+	if count > 0 {
+		// One per line, matching how the plain-text endpoints are consumed
+		// elsewhere in this API.
+		addrs := make([]string, 0, len(res.Items))
+		for _, it := range res.Items {
+			addrs = append(addrs, it.Addr)
+		}
+		_, _ = w.Write([]byte(strings.Join(addrs, "\n")))
+		return
+	}
 	_, _ = w.Write([]byte(item.Addr))
+}
+
+func publicProxyPayload(item freproxies.Proxy) map[string]any {
+	return map[string]any{
+		"proxy":     item.Addr,
+		"protocol":  item.Protocol,
+		"source":    item.Source,
+		"score":     item.Score,
+		"latency":   item.LatencyMS,
+		"region":    item.Region,
+		"ip_family": item.Family(),
+	}
 }
 
 func (a *App) handleFreeProxyCount(w http.ResponseWriter, r *http.Request) {
@@ -547,6 +727,47 @@ func (a *App) handleValidatorQueues(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	p := validator.LiveProgress()
+	b := p.Last
+	item.LastBatchOK = p.OK
+	item.LastBatchFail = p.Fail
+	if item.LastBatchOK == 0 && item.LastBatchFail == 0 {
+		item.LastBatchOK = b.OK
+		item.LastBatchFail = b.Fail
+	}
+	item.LastBatchRaw = b.Raw
+	item.LastBatchRecheck = b.Recheck
+	item.LastBatchMS = b.Duration.Milliseconds()
+	if !b.At.IsZero() {
+		t := b.At
+		item.LastBatchAt = &t
+	}
+	item.Running = p.Running
+	item.BatchSize = p.Size
+	item.BatchDone = p.OK + p.Fail
+	item.LifetimeOK = p.LifetimeOK
+	item.LifetimeFail = p.LifetimeFail
+	item.LifetimeBatches = p.LifetimeBatches
+	for _, h := range p.History {
+		item.History = append(item.History, freproxies.BatchHistory{
+			OK: h.OK, Fail: h.Fail, Raw: h.Raw, Recheck: h.Recheck,
+			DurationMS: h.Duration.Milliseconds(), At: h.At,
+		})
+	}
+	stats := sourcestats.Default.List()
+	snaps := make([]freproxies.SourceStatSnap, 0, len(stats))
+	for _, st := range stats {
+		snaps = append(snaps, freproxies.SourceStatSnap{
+			Name: st.Name, OK: st.OK, Fail: st.Fail,
+			SuccessRate: st.SuccessRate, AvgLatencyMS: st.AvgLatencyMS,
+			AutoDisabled: st.AutoDisabled,
+		})
+	}
+	sort.Slice(snaps, func(i, j int) bool { return snaps[i].Fail+snaps[i].OK > snaps[j].Fail+snaps[j].OK })
+	if len(snaps) > 15 {
+		snaps = snaps[:15]
+	}
+	item.SourceStats = snaps
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: item})
 }
 
@@ -967,6 +1188,8 @@ func (a *App) handleExplain(w http.ResponseWriter, r *http.Request) {
 • 出口池（一键按类型选择节点/订阅/手动节点）
 • 链式代理（多跳，跳数/容错/去重/粘性等可配）
 • 单跳 DirectProxy（7892）
+• 渠道封禁：按目标站点临时禁用 IP（明文 HTTP 自动识别 403/429；HTTPS 需调用方 POST /api/channels/report 回传）
+• 选路策略：加权随机 / 等概率 / 按渠道轮转，支持 ?count= 批量取
 • AI 代理入池（POST /api/ai-proxy）
 • 实时面板、性能监控、Webhook 告警
 

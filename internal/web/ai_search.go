@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,7 +76,8 @@ func (a *App) handleAISearch(w http.ResponseWriter, r *http.Request) {
 		URL       string `json:"url"`
 		APIKey    string `json:"apikey"`
 		Model     string `json:"model"`
-		Level     int    `json:"level"`
+		Effort    string `json:"effort"`
+		Level     any    `json:"level"`
 		PromptKey string `json:"prompt_key"`
 		Prompt    string `json:"prompt"` // inline custom system prompt (optional)
 		Content   string `json:"content"`
@@ -107,7 +109,7 @@ func (a *App) handleAISearch(w http.ResponseWriter, r *http.Request) {
 		URL:       req.URL,
 		APIKey:    req.APIKey,
 		Model:     req.Model,
-		Level:     req.Level,
+		Effort:    resolveEffort(req.Effort, req.Level),
 		PromptKey: req.PromptKey,
 		UserMsg:   userMsg,
 		Timeout:   90 * time.Second,
@@ -126,7 +128,7 @@ func (a *App) handleAISearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.audit != nil {
 		a.audit.Log(r.Context(), "admin", "ai.search", clientIP(r), map[string]any{
-			"url": req.URL, "level": req.Level, "found": len(proxies),
+			"url": req.URL, "effort": resolveEffort(req.Effort, req.Level), "found": len(proxies),
 		})
 	}
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
@@ -165,3 +167,21 @@ func extractJSONArrayLines(answer string) []string {
 // to keep the file self-contained for documentation purposes.
 var _ = context.Background
 var _ = io.Discard
+
+// resolveEffort prefers the portable effort string. A leftover numeric
+// `level` (0–10) or a name stuffed into that field still works.
+func resolveEffort(effort string, level any) string {
+	if s := strings.TrimSpace(effort); s != "" {
+		return aisvc.NormalizeEffort(s)
+	}
+	switch v := level.(type) {
+	case string:
+		return aisvc.NormalizeEffort(v)
+	case float64:
+		return aisvc.NormalizeEffort(strconv.FormatFloat(v, 'f', -1, 64))
+	case int:
+		return aisvc.NormalizeEffort(strconv.Itoa(v))
+	default:
+		return aisvc.EffortMedium
+	}
+}

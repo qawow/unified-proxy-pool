@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { endpoints, ApiError } from "@/api";
 import { Layout } from "@/components/Layout";
 import { SseProvider } from "@/components/SseProvider";
+import { ChannelsPage } from "@/pages/Channels";
 import { DashboardPage } from "@/pages/Dashboard";
 import { LoginPage } from "@/pages/Login";
 import { NodesPage } from "@/pages/Nodes";
@@ -70,6 +71,7 @@ export default function App() {
         <Route path="proxies" element={<ProxiesPage />} />
         <Route path="sources" element={<SourcesPage />} />
         <Route path="validator" element={<ValidatorPage />} />
+        <Route path="channels" element={<ChannelsPage />} />
         <Route path="subscriptions" element={<SubscriptionsPage />} />
         <Route path="subscriptions/:id" element={<SubscriptionDetailPage />} />
         <Route path="nodes" element={<NodesPage />} />

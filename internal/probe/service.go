@@ -15,6 +15,7 @@ import (
 	"golang.org/x/net/proxy"
 
 	"unified-proxy-pool/internal/db"
+	"unified-proxy-pool/internal/netutil"
 	"unified-proxy-pool/internal/events"
 	"unified-proxy-pool/internal/mihomo"
 	"unified-proxy-pool/internal/models"
@@ -285,7 +286,7 @@ func (s *Service) runLatency(ctx context.Context, item task) {
 	if err != nil {
 		return
 	}
-	node, err := s.syncProbeInventoryAndGetNode(ctx, item.SourceType, item.SourceNodeID, settingsRow.MihomoControllerSecret, settingsRow.LogLevel, -1)
+	node, err := s.lookupRuntimeNode(ctx, item.SourceType, item.SourceNodeID)
 	if err != nil {
 		_ = s.setStatus(ctx, item.SourceType, item.SourceNodeID, "unavailable", err.Error())
 		return
@@ -295,7 +296,16 @@ func (s *Service) runLatency(ctx context.Context, item task) {
 	taskCtx, cancel := context.WithTimeout(ctx, time.Duration(settingsRow.LatencyTimeoutMS+3000)*time.Millisecond)
 	defer cancel()
 
-	delay, err := s.mihomo.Delay(taskCtx, settingsRow.MihomoControllerSecret, runtimeNodeName(node), settingsRow.LatencyTestURL, settingsRow.LatencyTimeoutMS)
+	if !isNativeProtocol(node.Protocol) {
+		node, err = s.syncProbeInventoryAndGetNode(ctx, item.SourceType, item.SourceNodeID, settingsRow.MihomoControllerSecret, settingsRow.LogLevel, -1)
+		if err != nil {
+			_ = s.updateResult(ctx, item, nil, nil, "unavailable", "mihomo inventory: "+err.Error(), false)
+			s.events.Publish("probe.finished", map[string]any{"source_type": item.SourceType, "source_node_id": item.SourceNodeID, "test_type": "latency", "success": false, "error": err.Error()})
+			return
+		}
+	}
+
+	delay, err := s.measureNodeLatency(taskCtx, node, settingsRow.MihomoControllerSecret, settingsRow.LatencyTestURL, settingsRow.LatencyTimeoutMS)
 	if err != nil {
 		_ = s.updateResult(ctx, item, nil, nil, "unavailable", err.Error(), false)
 		s.events.Publish("probe.finished", map[string]any{"source_type": item.SourceType, "source_node_id": item.SourceNodeID, "test_type": "latency", "success": false, "error": err.Error()})
@@ -446,6 +456,7 @@ func (s *Service) measureDownloadSpeed(ctx context.Context, slotIndex int, targe
 	if err != nil {
 		return 0, err
 	}
+	netutil.ApplyDefaultHeaders(req.Header)
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {

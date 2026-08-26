@@ -25,11 +25,16 @@ type Service struct {
 	// optional filters
 	blocked        func(addr string) bool
 	sourceDisabled func(source string) bool
-	geoQueue       chan string
-	hot            *HotCache
-	overviewMu     sync.Mutex
-	overviewCache  Overview
-	overviewAt     time.Time
+	// channelPolicy supplies per-channel temporary bans. Optional: nil means
+	// selection ignores channels entirely.
+	channelPolicy   ChannelPolicy
+	defaultStrategy string
+	picks           *pickState
+	geoQueue        chan string
+	hot             *HotCache
+	overviewMu      sync.Mutex
+	overviewCache   Overview
+	overviewAt      time.Time
 }
 
 func NewService(store Store, registry *crawlers.Registry, broker *events.Broker, redisOK bool) *Service {
@@ -40,6 +45,7 @@ func NewService(store Store, registry *crawlers.Registry, broker *events.Broker,
 		events:   broker,
 		redisOK:  redisOK,
 		geoQueue: make(chan string, 2048),
+		picks:    newPickState(),
 	}
 	s.hot = NewHotCache(store, 96, 3*time.Second)
 	return s
@@ -68,6 +74,26 @@ func (s *Service) SetBlockedFn(fn func(addr string) bool) {
 
 func (s *Service) SetSourceDisabledFn(fn func(source string) bool) {
 	s.sourceDisabled = fn
+}
+
+// SetChannelPolicy attaches the per-channel ban registry used by selection.
+func (s *Service) SetChannelPolicy(cp ChannelPolicy) {
+	if s != nil {
+		s.channelPolicy = cp
+	}
+}
+
+// SetPickDefaults hot-applies the panel's selection settings.
+func (s *Service) SetPickDefaults(strategy string, cooldown time.Duration) {
+	if s == nil {
+		return
+	}
+	if v := normalizeStrategy(strategy); v != "" {
+		s.defaultStrategy = v
+	}
+	if s.picks != nil && cooldown >= 0 {
+		s.picks.setCooldown(cooldown)
+	}
 }
 
 // StartGeoWorker fills region asynchronously for IPs enqueued after validate.
@@ -182,38 +208,18 @@ func (s *Service) RandomFilter(ctx context.Context, protocol, region string) (Pr
 }
 
 // RandomFamilyFilter picks a random proxy, optionally constrained to one IP family.
+//
+// It is a thin wrapper over Pick so leftover callers get the same weighting,
+// cooldown and channel-ban behaviour as the public get endpoint. The old
+// store.Random fast path sampled a three-proxy latency window and ignored all
+// of that, which is why a family-less request used to return the same handful
+// of IPs over and over.
 func (s *Service) RandomFamilyFilter(ctx context.Context, protocol, region, family string) (Proxy, error) {
-	// store.Random cannot filter by family and samples the same small
-	// lowest-latency window on every call, so retrying it for a rare family
-	// mostly burns round-trips. Skip straight to the ladder, which pushes family
-	// down into the store instead of filtering after the fact.
-	if family == "" {
-		// try a few times to skip blacklist
-		for i := 0; i < 8; i++ {
-			p, err := s.store.Random(ctx, protocol)
-			if err != nil {
-				// The sampler reads a bounded window and knows nothing about
-				// region, so its error means "nothing here", not "pool empty".
-				// Fall through to the ladder, which can relax the query.
-				break
-			}
-			if s.blocked != nil && s.blocked(p.Addr) {
-				continue
-			}
-			if s.sourceDisabled != nil && s.sourceDisabled(p.Source) {
-				continue
-			}
-			if region != "" && p.Region != "" && !strings.Contains(strings.ToLower(p.Region), strings.ToLower(region)) {
-				continue
-			}
-			return p, nil
-		}
-	}
-	items, err := s.PickValidatedNFilter(ctx, protocol, region, family, 1)
+	res, err := s.Pick(ctx, PickOptions{Protocol: protocol, Region: region, Family: family, N: 1})
 	if err != nil {
 		return Proxy{}, err
 	}
-	return items[0], nil
+	return res.Items[0], nil
 }
 
 // SubmitResult reports what a SubmitRaw call actually changed.

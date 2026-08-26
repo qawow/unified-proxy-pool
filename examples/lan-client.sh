@@ -71,6 +71,14 @@ if [[ "${RUN_TEST:-0}" == "1" ]]; then
 fi
 
 echo
+echo "=== 按渠道取代理 + 回传结果 ==="
+echo "HTTPS 走 CONNECT，池子看不到里面的 403/429，调用方读完响应要 POST 回去："
+echo "  ADDR=\$(curl -sS '${PANEL}/api/public/get?target=https://httpbin.org/ip')"
+echo "  curl -sS -X POST '${PANEL}/api/public/channels/report' \\"
+echo "    -H 'Content-Type: application/json' \\"
+echo "    -d \"{\\\"target\\\":\\\"https://httpbin.org/ip\\\",\\\"addr\\\":\\\"\${ADDR}\\\",\\\"ok\\\":true,\\\"status\\\":200}\""
+
+echo
 echo "Windows CMD:"
 echo "  set http_proxy=${HTTP_PROXY_URL}"
 echo "  set https_proxy=${HTTP_PROXY_URL}"

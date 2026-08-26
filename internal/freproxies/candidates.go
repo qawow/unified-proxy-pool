@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"slices"
 	"strings"
+	"time"
 
 	"unified-proxy-pool/internal/models"
 )
@@ -165,30 +166,99 @@ func (s *Service) PickValidatedNFamily(ctx context.Context, protocol, family str
 }
 
 func (s *Service) PickValidatedNFilter(ctx context.Context, protocol, region, family string, n int) ([]Proxy, error) {
-	if n <= 0 {
-		n = 1
+	res, err := s.Pick(ctx, PickOptions{Protocol: protocol, Region: region, Family: family, N: n})
+	if err != nil {
+		return nil, err
 	}
+	return res.Items, nil
+}
+
+// Pick is the single selection entry point. Every other Pick* function is a thin
+// wrapper over it.
+//
+// When opt.Channel is set, proxies temporarily banned for that channel are
+// skipped. If honouring the bans would leave nothing to serve, the pick is
+// retried without them and PickResult.Relaxed is set — a possibly-banned proxy
+// beats a 502.
+func (s *Service) Pick(ctx context.Context, opt PickOptions) (PickResult, error) {
+	if opt.N <= 0 {
+		opt.N = 1
+	}
+	if opt.Strategy == "" {
+		opt.Strategy = s.defaultStrategy
+	}
+
+	var banned map[string]time.Time
+	if opt.Channel != "" && s.channelPolicy != nil {
+		banned = s.channelPolicy.BanSet(opt.Channel)
+	}
+
+	items, err := s.gatherCandidates(ctx, opt, banned)
+	if len(items) == 0 && len(banned) > 0 {
+		// The channel has sidelined everything this filter could reach. Serving
+		// nothing is worse than serving a proxy the channel dislikes, so try again
+		// ignoring the bans and tell the caller we did.
+		if relaxed, rErr := s.gatherCandidates(ctx, opt, nil); len(relaxed) > 0 {
+			out := s.applyStrategy(relaxed, opt)
+			return PickResult{Items: out, Channel: opt.Channel, Relaxed: true, Strategy: opt.strategy()}, nil
+		} else if rErr != nil {
+			err = rErr
+		}
+	}
+	if len(items) == 0 {
+		if err == nil {
+			err = noProxyError(opt.Family)
+		}
+		return PickResult{Channel: opt.Channel, Strategy: opt.strategy()}, err
+	}
+	out := s.applyStrategy(items, opt)
+	return PickResult{Items: out, Channel: opt.Channel, Strategy: opt.strategy()}, nil
+}
+
+func noProxyError(family string) error {
+	if family != "" {
+		return fmt.Errorf("no free proxy available for family %s", family)
+	}
+	return fmt.Errorf("no free proxy available")
+}
+
+// gatherCandidates walks the cheap sources first and only descends to broader
+// queries when the current rung yields nothing usable.
+//
+// It returns the whole filtered window rather than the first n matches: weighted
+// sampling needs a population to weigh, and truncating here would reduce the
+// strategy to "take whatever came back first".
+func (s *Service) gatherCandidates(ctx context.Context, opt PickOptions, banned map[string]time.Time) ([]Proxy, error) {
+	// Wide enough that weights meaningfully differ; a window of 8 makes weighted
+	// and random selection nearly indistinguishable.
+	window := max(opt.N*8, 64)
 	try := func(items []Proxy) []Proxy {
-		return s.filterPick(items, region, family, n)
+		return s.filterCandidates(items, opt, banned)
 	}
 	// Hot cache first — zero Redis on hit
 	if s.hot != nil {
-		if out := try(s.hot.Pick(max(n*3, 8), protocol, region)); len(out) > 0 {
+		if out := try(s.hot.Pick(window, opt.Protocol, opt.Region)); len(out) > 0 {
 			return out, nil
 		}
 	}
-	if items, err := s.store.RandomN(ctx, protocol, max(n*3, 8)); err == nil {
+	if items, err := s.store.RandomN(ctx, opt.Protocol, window); err == nil {
 		if out := try(items); len(out) > 0 {
 			return out, nil
 		}
 	}
-	if protocol != "" {
-		if items, err := s.store.RandomN(ctx, "", max(n*3, 8)); err == nil {
-			if out := try(items); len(out) > 0 {
+	if opt.Protocol != "" {
+		// Protocol relaxed deliberately, and only here: filterCandidates enforces
+		// it on the rungs above so a socks5 request is not quietly answered with an
+		// http proxy while real socks5 proxies were still reachable.
+		relaxed := opt
+		relaxed.Protocol = ""
+		if items, err := s.store.RandomN(ctx, "", window); err == nil {
+			if out := s.filterCandidates(items, relaxed, banned); len(out) > 0 {
 				return out, nil
 			}
 		}
 	}
+	protocol, region, family, n := opt.Protocol, opt.Region, opt.Family, opt.N
 	// Progressively relax the query: drop protocol/region, then accept
 	// unvalidated proxies. Family is never relaxed — handing an IPv4 proxy to a
 	// caller that asked for IPv6 would break it silently. It is pushed down into
@@ -218,24 +288,33 @@ func (s *Service) PickValidatedNFilter(ctx context.Context, protocol, region, fa
 			continue
 		}
 		served = true
+		// The in-process filter has to match the rung that was actually queried:
+		// rungs below the first drop protocol and region on purpose, so enforcing
+		// the caller's original values here would reject every row they returned.
+		rung := opt
+		rung.Protocol = f.Protocol
+		rung.Region = f.Region
 		// try() also drops blacklisted and disabled-source proxies, which the
 		// store filter knows nothing about, so a non-empty page can still yield
 		// nothing pickable — keep descending in that case.
-		if out := try(list.Items); len(out) > 0 {
+		if out := s.filterCandidates(list.Items, rung, banned); len(out) > 0 {
 			return out, nil
 		}
 	}
 	if !served && lastErr != nil {
 		return nil, lastErr
 	}
-	if family != "" {
-		return nil, fmt.Errorf("no free proxy available for family %s", family)
-	}
-	return nil, fmt.Errorf("no free proxy available")
+	return nil, nil
 }
 
-func (s *Service) filterPick(items []Proxy, region, family string, n int) []Proxy {
-	out := make([]Proxy, 0, n)
+// filterCandidates drops everything the caller cannot use. It returns the full
+// surviving set, not the first N: the selection strategy needs the population.
+//
+// This is the single choke point for exclusions — global blacklist, disabled
+// source, and per-channel ban all meet here, so no selection path can bypass one
+// of them.
+func (s *Service) filterCandidates(items []Proxy, opt PickOptions, banned map[string]time.Time) []Proxy {
+	out := make([]Proxy, 0, len(items))
 	for _, p := range items {
 		if s.blocked != nil && s.blocked(p.Addr) {
 			continue
@@ -243,16 +322,23 @@ func (s *Service) filterPick(items []Proxy, region, family string, n int) []Prox
 		if s.sourceDisabled != nil && s.sourceDisabled(p.Source) {
 			continue
 		}
-		if region != "" && p.Region != "" && !strings.EqualFold(p.Region, region) && !strings.Contains(strings.ToLower(p.Region), strings.ToLower(region)) {
+		if _, ok := banned[p.Addr]; ok {
 			continue
 		}
-		if family != "" && !strings.EqualFold(p.Family(), family) {
+		// Protocol is enforced here as well as in the store query: the hot cache
+		// falls back to its unfiltered snapshot when a protocol matches nothing,
+		// so without this check a socks5 request could be answered with an http
+		// proxy. gatherCandidates relaxes it explicitly when it means to.
+		if opt.Protocol != "" && !strings.EqualFold(p.Protocol, opt.Protocol) {
+			continue
+		}
+		if opt.Region != "" && p.Region != "" && !strings.EqualFold(p.Region, opt.Region) && !strings.Contains(strings.ToLower(p.Region), strings.ToLower(opt.Region)) {
+			continue
+		}
+		if opt.Family != "" && !strings.EqualFold(p.Family(), opt.Family) {
 			continue
 		}
 		out = append(out, p)
-		if len(out) >= n {
-			break
-		}
 	}
 	return out
 }

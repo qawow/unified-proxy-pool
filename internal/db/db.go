@@ -76,6 +76,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			name TEXT NOT NULL,
 			url TEXT NOT NULL,
 			headers_json TEXT NOT NULL DEFAULT '{}',
+			fetch_proxy TEXT NOT NULL DEFAULT '',
 			enabled INTEGER NOT NULL DEFAULT 1,
 			sync_interval_sec INTEGER NOT NULL,
 			last_sync_at TIMESTAMP NULL,
@@ -237,6 +238,12 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "settings", "feature_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "proxy_pools", "channel", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "subscriptions", "fetch_proxy", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	// F2–F6 tables
 	extra := []string{
 		`CREATE TABLE IF NOT EXISTS proxy_blacklist (
@@ -273,11 +280,104 @@ func (s *Store) migrate(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_traffic_samples_ts ON traffic_samples(ts);`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_logs_at ON audit_logs(at);`,
+		// Per-channel temporary bans. Persisted so a restart does not release
+		// every sidelined proxy at once; the sliding-window counters behind them
+		// are deliberately not persisted (stale evidence must not ban).
+		`CREATE TABLE IF NOT EXISTS channel_bans (
+			channel TEXT NOT NULL,
+			addr TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			banned_at TIMESTAMP NOT NULL,
+			until_at TIMESTAMP NOT NULL,
+			strikes INTEGER NOT NULL DEFAULT 1,
+			PRIMARY KEY (channel, addr)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_channel_bans_until ON channel_bans(until_at);`,
+		// Recent request outcomes for the channel panel. Capped by retention, not
+		// by a primary key — this is a log, not a current-state table.
+		`CREATE TABLE IF NOT EXISTS channel_outcomes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			at TIMESTAMP NOT NULL,
+			channel TEXT NOT NULL,
+			addr TEXT NOT NULL,
+			ok INTEGER NOT NULL DEFAULT 0,
+			status INTEGER NOT NULL DEFAULT 0,
+			err TEXT NOT NULL DEFAULT '',
+			latency_ms INTEGER NOT NULL DEFAULT 0,
+			reported INTEGER NOT NULL DEFAULT 0,
+			banned INTEGER NOT NULL DEFAULT 0,
+			reason TEXT NOT NULL DEFAULT ''
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_channel_outcomes_at ON channel_outcomes(at);`,
+		`CREATE INDEX IF NOT EXISTS idx_channel_outcomes_channel ON channel_outcomes(channel, at);`,
+		// Addresses (optionally scoped to a channel) that automatic rules must not
+		// ban. Empty channel = never auto-ban this addr anywhere.
+		`CREATE TABLE IF NOT EXISTS channel_allowlist (
+			channel TEXT NOT NULL,
+			addr TEXT NOT NULL,
+			reason TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL,
+			PRIMARY KEY (channel, addr)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_probe_history_tested ON probe_history(tested_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_probe_history_node ON probe_history(source_type, source_node_id, tested_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_subscription_nodes_sub ON subscription_nodes(subscription_id, last_status);`,
+		`CREATE TABLE IF NOT EXISTS free_proxy_snapshot (
+			addr TEXT PRIMARY KEY,
+			body_json TEXT NOT NULL,
+			in_raw INTEGER NOT NULL DEFAULT 0,
+			in_scored INTEGER NOT NULL DEFAULT 0,
+			updated_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS scraper_toggles (
+			name TEXT PRIMARY KEY,
+			enabled INTEGER NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS source_stats (
+			name TEXT PRIMARY KEY,
+			ok INTEGER NOT NULL DEFAULT 0,
+			fail INTEGER NOT NULL DEFAULT 0,
+			latency_sum_ms INTEGER NOT NULL DEFAULT 0,
+			auto_disabled INTEGER NOT NULL DEFAULT 0,
+			disabled_until TIMESTAMP NULL,
+			updated_at TIMESTAMP NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS validate_batches (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			ok INTEGER NOT NULL,
+			fail INTEGER NOT NULL,
+			raw_n INTEGER NOT NULL DEFAULT 0,
+			recheck_n INTEGER NOT NULL DEFAULT 0,
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			at TIMESTAMP NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_validate_batches_at ON validate_batches(at);`,
+		`CREATE TABLE IF NOT EXISTS channel_rules (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			channel TEXT NOT NULL DEFAULT '',
+			kind TEXT NOT NULL,
+			statuses TEXT NOT NULL DEFAULT '',
+			threshold INTEGER NOT NULL DEFAULT 0,
+			rate REAL NOT NULL DEFAULT 0,
+			min_samples INTEGER NOT NULL DEFAULT 0,
+			match TEXT NOT NULL DEFAULT '',
+			ttl_sec INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			created_at TIMESTAMP NOT NULL
+		);`,
 	}
 	for _, stmt := range extra {
 		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("feature migration: %w", err)
 		}
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM probe_history WHERE tested_at < datetime('now', '-14 days')`); err != nil {
+		return fmt.Errorf("prune probe_history: %w", err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM validate_batches WHERE id NOT IN (SELECT id FROM (SELECT id FROM validate_batches ORDER BY id DESC LIMIT 200))`); err != nil {
+		return fmt.Errorf("prune validate_batches: %w", err)
 	}
 	return nil
 }

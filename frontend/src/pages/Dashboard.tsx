@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, Gauge, Globe2, Radar, Server, ShieldCheck } from "lucide-react";
+import { Activity, Gauge, Globe2, Radar, Server, ShieldBan, ShieldCheck } from "lucide-react";
 import { endpoints } from "@/api";
 import { PageHeader } from "@/components/PageHeader";
 import { StatCard } from "@/components/StatCard";
@@ -139,6 +139,15 @@ export function DashboardPage() {
         {vis("avg_score") ? <StatCard title="平均评分" value={data ? data.avg_score.toFixed(1) : "-"} hint="已验证代理" icon={Activity} tone="violet" /> : null}
         {vis("total") ? <StatCard title="代理总数" value={formatNum(data?.total_proxies)} hint="含未验证" icon={Server} tone="sky" /> : null}
         {vis("single_hop") ? <StatCard title="单跳出口" value={direct?.running ? "在线" : "离线"} hint={String(direct?.client_http || "-")} icon={Globe2} tone="mint" /> : null}
+        {vis("channel_bans") ? (
+          <StatCard
+            title="渠道封禁"
+            value={formatNum(data?.channel_bans)}
+            hint={`跟踪 ${formatNum(data?.channel_count)} 个渠道`}
+            icon={ShieldBan}
+            tone="amber"
+          />
+        ) : null}
       </div>
 
       {vis("chain") && direct?.chain_enabled ? (

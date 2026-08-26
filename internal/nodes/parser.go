@@ -64,6 +64,9 @@ func ParseNodeURI(raw string) (ParsedNode, error) {
 		return parseSimpleURLNode("vless", raw)
 	case strings.HasPrefix(raw, "hysteria2://"):
 		return parseSimpleURLNode("hysteria2", raw)
+	case strings.HasPrefix(raw, "hy2://"):
+		// hy2:// is the common short form of hysteria2://
+		return parseSimpleURLNode("hysteria2", "hysteria2://"+strings.TrimPrefix(raw, "hy2://"))
 	case strings.HasPrefix(raw, "tuic://"):
 		return parseSimpleURLNode("tuic", raw)
 	case strings.HasPrefix(raw, "vmess://"):
@@ -105,7 +108,7 @@ func parseSS(raw string) (ParsedNode, error) {
 	if !ok {
 		return ParsedNode{}, errors.New("invalid ss structure")
 	}
-	method, password, ok := strings.Cut(auth, ":")
+	method, password, ok := decodeSSUserInfo(auth)
 	if !ok {
 		return ParsedNode{}, errors.New("invalid ss auth")
 	}
@@ -212,7 +215,7 @@ func parseSimpleURLNode(protocol, raw string) (ParsedNode, error) {
 	}
 	if u.User != nil {
 		if username := u.User.Username(); username != "" {
-			if protocol == "trojan" {
+			if protocol == "trojan" || protocol == "hysteria2" {
 				normalized["password"] = username
 			} else {
 				normalized["uuid"] = username
@@ -235,6 +238,12 @@ func parseSimpleURLNode(protocol, raw string) (ParsedNode, error) {
 			normalized[key] = values[0]
 		} else {
 			normalized[key] = values
+		}
+	}
+	if protocol == "hysteria2" {
+		if v, ok := normalized["insecure"]; ok {
+			s := strings.ToLower(fmt.Sprint(v))
+			normalized["skip-cert-verify"] = s == "1" || s == "true"
 		}
 	}
 	return ParsedNode{
@@ -285,6 +294,45 @@ func normalizeProxyMaps(items []map[string]any) ([]ParsedNode, error) {
 		return nil, errors.New("no valid proxy items")
 	}
 	return result, nil
+}
+
+// decodeSSUserInfo accepts:
+//   method:password
+//   percent-encoded method:password
+//   SIP002 base64(method:password)  e.g. YWVzLTI1Ni1nY206QnV0dGVyZmx5MTIzQHF3ZTk1Mjc=
+func decodeSSUserInfo(auth string) (method, password string, ok bool) {
+	auth = strings.TrimSpace(auth)
+	if auth == "" {
+		return "", "", false
+	}
+	if method, password, ok = strings.Cut(auth, ":"); ok {
+		if decoded, err := url.QueryUnescape(password); err == nil {
+			password = decoded
+		}
+		return method, password, true
+	}
+	decoded, err := decodeFlexibleBase64(auth)
+	if err != nil {
+		return "", "", false
+	}
+	method, password, ok = strings.Cut(string(decoded), ":")
+	if !ok || method == "" || password == "" {
+		return "", "", false
+	}
+	return method, password, true
+}
+
+func decodeFlexibleBase64(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	s = strings.ReplaceAll(s, "-", "+")
+	s = strings.ReplaceAll(s, "_", "/")
+	if pad := len(s) % 4; pad != 0 {
+		s += strings.Repeat("=", 4-pad)
+	}
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		return b, nil
+	}
+	return base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "="))
 }
 
 func copyQuery(target map[string]any, rawQuery string) {

@@ -13,6 +13,8 @@
 | AI 入池 | JSON / 纯文本批量导入 · session 或 Bearer Token · 来源标记 · 重复/无效项反馈 |
 | **链式代理** | `7893` 多跳 · 跳数/容错/去重/协议地区/粘性/认证可配；成员来自出口池选择 |
 | 出口池 | 支持按类型一键选择节点/订阅/免费代理；链式、单跳均使用出口池成员 |
+| **渠道封禁** | 按目标站点隔离：某 IP 在淘宝被限流只在淘宝撤下，其它站点照用 · 403/429 自动封 · 到期自解 · 重启恢复 |
+| 选路策略 | 按质量加权随机 / 等概率 / 按渠道轮转 · 重复取用冷却 · `?count=` 批量取 |
 | 可观测 | 入站/出站连接 · `/metrics` · 流量采样 · Webhook 告警 |
 | 说明接口 | `/api/explain?q=xxx` 返回代理池功能说明，支持 AI 其他调用 |
 
@@ -68,13 +70,25 @@ Dockerfile 自动构建前端 + Go + 下载 Mihomo（v1.19.22）。
 
 面板访问：`http://localhost:7891`
 
-## 局域网客户端
+## 按接口调用
+
+不同口干不同的事，不要混用：
+
+| 你想做的事 | 用哪个 | 例子 |
+|------------|--------|------|
+| 脚本取一条 IP | `GET :7891/api/public/get` | `curl http://HOST:7891/api/public/get` |
+| 本机上网走池子 | 单跳 `:7892` | `curl -x http://HOST:7892 https://httpbin.org/ip` |
+| 多跳出口 | 链式 `:7893` | `curl -x http://HOST:7893 https://httpbin.org/ip` |
+| 把代理推进池 | `POST /api/public/submit` | 纯文本 `host:port` / `socks5://` |
+| Clash 节点（ss/hy2/vless） | 面板订阅或手动节点 | 不要用 submit |
+
+完整对照见 [docs/CALLING.md](docs/CALLING.md)，本机打印命令：
 
 ```bash
-chmod +x examples/lan-client.sh
-./examples/lan-client.sh                 # 本机生成命令
-./examples/lan-client.sh 172.18.49.135   # 指定服务器 IP
-RUN_TEST=1 ./examples/lan-client.sh 172.18.49.135
+chmod +x examples/call.sh examples/lan-client.sh
+./examples/call.sh 192.168.2.198
+./examples/lan-client.sh 192.168.2.198
+RUN_TEST=1 ./examples/lan-client.sh 192.168.2.198
 ```
 
 ### 单跳
@@ -126,6 +140,7 @@ export http_proxy=http://172.18.49.135:7893 https_proxy=http://172.18.49.135:789
 | `/proxies` | 代理池（连接串复制、详情、导出、清理、拉黑） |
 | `/sources` | 采集源 |
 | `/validator` | 校验统计 + **实时日志** |
+| `/channels` | 渠道封禁（按目标站点看失败率、封禁明细、手动解封） |
 | `/subscriptions` | 订阅 |
 | `/nodes` | 手动节点 |
 | `/ai-proxy` | AI / 脚本代理批量入池 |
@@ -140,6 +155,14 @@ curl 'http://LAN:7891/api/public/get?format=json&region=US&proto=http'
 curl http://LAN:7891/api/public/count
 curl http://LAN:7891/api/public/health
 curl http://LAN:7891/metrics
+
+# 按渠道取代理：该站点封禁中的 IP 不会返回；一次取 10 条做轮换
+curl 'http://LAN:7891/api/public/get?channel=taobao.com&count=10'
+
+# HTTPS 的 403/429 池子看不到（CONNECT 隧道是不透明的），需要你回传
+curl -X POST http://LAN:7891/api/public/channels/report \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"https://item.taobao.com/x","addr":"1.2.3.4:8080","ok":false,"status":403}'
 ```
 
 完整接口见 [docs/API.md](docs/API.md)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。

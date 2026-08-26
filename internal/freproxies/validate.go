@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"unified-proxy-pool/internal/netutil"
 )
 
 // CheckProxy runs the pool's own liveness check against a single proxy and
@@ -62,6 +64,7 @@ func checkHTTPProxy(ctx context.Context, p Proxy, validateURL string, timeout ti
 	if err != nil {
 		return 0, false
 	}
+	netutil.ApplyDefaultHeaders(req.Header)
 	start := time.Now()
 	resp, err := client.Do(req)
 	latency := time.Since(start).Milliseconds()

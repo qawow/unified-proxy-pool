@@ -2,7 +2,10 @@ package sourcestats
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"unified-proxy-pool/internal/db"
 )
 
 type Stat struct {
@@ -17,8 +20,10 @@ type Stat struct {
 }
 
 type Registry struct {
-	mu sync.RWMutex
-	m  map[string]*Stat
+	mu    sync.RWMutex
+	m     map[string]*Stat
+	db    *db.Store
+	dirty atomic.Bool
 }
 
 func New() *Registry {
@@ -53,6 +58,7 @@ func (r *Registry) Record(source string, ok bool, latencyMS int64) {
 	if st.OK > 0 {
 		st.AvgLatencyMS = float64(st.LatencySumMS) / float64(st.OK)
 	}
+	r.markDirty()
 }
 
 func (r *Registry) Evaluate(minSamples int, minRate float64) {
@@ -78,6 +84,7 @@ func (r *Registry) Evaluate(minSamples int, minRate float64) {
 			st.DisabledUntil = time.Time{}
 		}
 	}
+	r.markDirty()
 }
 
 func (r *Registry) IsDisabled(source string) bool {
@@ -113,5 +120,6 @@ func (r *Registry) Reenable(name string) {
 	if st, ok := r.m[name]; ok {
 		st.AutoDisabled = false
 		st.DisabledUntil = time.Time{}
+		r.markDirty()
 	}
 }

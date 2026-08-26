@@ -15,6 +15,49 @@ func TestParseSSNode(t *testing.T) {
 	}
 }
 
+func TestParseSSSIP002Base64UserInfo(t *testing.T) {
+	// ss://base64(method:password)@host:port#name  — the form that previously
+	// failed with "invalid ss auth" because userinfo has no raw colon.
+	userinfo := base64.StdEncoding.EncodeToString([]byte("aes-256-gcm:Butterfly123"))
+	raw := "ss://" + userinfo + "@103.236.66.4:10001#%E4%BA%9A%E5%A4%AA%E5%9C%B0%E5%8C%BA"
+	node, err := ParseNodeURI(raw)
+	if err != nil {
+		t.Fatalf("ParseNodeURI() error = %v", err)
+	}
+	if node.Protocol != "ss" || node.Server != "103.236.66.4" || node.Port != 10001 {
+		t.Fatalf("unexpected ss node: %+v", node)
+	}
+	if got := node.Normalized["cipher"]; got != "aes-256-gcm" {
+		t.Fatalf("cipher = %#v, want aes-256-gcm", got)
+	}
+	if got := node.Normalized["password"]; got != "Butterfly123" {
+		t.Fatalf("password = %#v, want Butterfly123", got)
+	}
+}
+
+func TestParseHy2Alias(t *testing.T) {
+	raw := "hy2://sOiWCQ2AdIV0OWNuqQVyWp4JZnRxdyLROSjX@faq.wwwinternetvideo.click:443/?insecure=1&sni=cabinet.example.com#%E8%8B%B1%E5%9B%BD"
+	node, err := ParseNodeURI(raw)
+	if err != nil {
+		t.Fatalf("ParseNodeURI() error = %v", err)
+	}
+	if node.Protocol != "hysteria2" {
+		t.Fatalf("Protocol = %q, want hysteria2", node.Protocol)
+	}
+	if node.Server != "faq.wwwinternetvideo.click" || node.Port != 443 {
+		t.Fatalf("unexpected hy2 endpoint: %+v", node)
+	}
+	if got := node.Normalized["type"]; got != "hysteria2" {
+		t.Fatalf("normalized type = %#v, want hysteria2", got)
+	}
+	if got := node.Normalized["password"]; got != "sOiWCQ2AdIV0OWNuqQVyWp4JZnRxdyLROSjX" {
+		t.Fatalf("password = %#v", got)
+	}
+	if got := node.Normalized["skip-cert-verify"]; got != true {
+		t.Fatalf("skip-cert-verify = %#v, want true", got)
+	}
+}
+
 func TestParseVMessNode(t *testing.T) {
 	payload := `{"v":"2","ps":"vmess-node","add":"vmess.example.com","port":"443","id":"uuid"}`
 	node, err := ParseNodeURI("vmess://" + base64.StdEncoding.EncodeToString([]byte(payload)))

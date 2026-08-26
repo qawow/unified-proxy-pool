@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"unified-proxy-pool/internal/netutil"
 )
 
 type Result struct {
@@ -94,6 +96,7 @@ func (s *Service) Lookup(ctx context.Context, ip string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	netutil.ApplyDefaultHeaders(req.Header)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return Result{}, err

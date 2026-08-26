@@ -8,10 +8,32 @@ import (
 	"time"
 
 	"unified-proxy-pool/internal/config"
+	"unified-proxy-pool/internal/db"
 	"unified-proxy-pool/internal/freproxies"
 	"unified-proxy-pool/internal/sourcestats"
 	"unified-proxy-pool/internal/webhook"
 )
+
+type BatchSummary struct {
+	OK       int       `json:"ok"`
+	Fail     int       `json:"fail"`
+	Raw      int       `json:"raw"`
+	Recheck  int       `json:"recheck"`
+	Duration time.Duration
+	At       time.Time `json:"at"`
+}
+
+type Progress struct {
+	Running          bool
+	Size             int
+	OK               int
+	Fail             int
+	LifetimeOK       int64
+	LifetimeFail     int64
+	LifetimeBatches  int64
+	Last             BatchSummary
+	History          []BatchSummary
+}
 
 type Service struct {
 	mu        sync.RWMutex
@@ -20,10 +42,36 @@ type Service struct {
 	extraURLs []string
 	minRate   float64
 	minSample int
+	lastBatch BatchSummary
+	store     *db.Store
+	batchSize int
+	batchOK   int
+	batchFail int
+	lifeOK    int64
+	lifeFail  int64
+	lifeN     int64
+	history   []BatchSummary
 }
 
+var liveMu sync.RWMutex
+var live *Service
+
 func New(cfg config.App, free *freproxies.Service) *Service {
-	return &Service{cfg: cfg, free: free, minRate: 0.15, minSample: 20}
+	s := &Service{cfg: cfg, free: free, minRate: 0.15, minSample: 20}
+	liveMu.Lock()
+	live = s
+	liveMu.Unlock()
+	return s
+}
+
+func LiveLastBatch() BatchSummary {
+	liveMu.RLock()
+	s := live
+	liveMu.RUnlock()
+	if s == nil {
+		return BatchSummary{}
+	}
+	return s.LastBatch()
 }
 
 func (s *Service) ApplyFreeConfig(url string, timeoutMS, concurrency int) {
@@ -56,6 +104,73 @@ func (s *Service) ApplyExtras(urls []string, minRate float64, minSample int) {
 	if minSample > 0 {
 		s.minSample = minSample
 	}
+}
+
+func (s *Service) SetDB(store *db.Store) {
+	if s == nil || store == nil {
+		return
+	}
+	ctx := context.Background()
+	s.mu.Lock()
+	s.store = store
+	s.mu.Unlock()
+	if lifeOK, lifeFail, lifeN, err := store.SumValidateBatches(ctx); err == nil {
+		s.mu.Lock()
+		s.lifeOK, s.lifeFail, s.lifeN = lifeOK, lifeFail, lifeN
+		s.mu.Unlock()
+	}
+	if rows, err := store.ListValidateBatches(ctx, 20); err == nil {
+		hist := make([]BatchSummary, 0, len(rows))
+		for _, r := range rows {
+			hist = append(hist, BatchSummary{
+				OK: r.OK, Fail: r.Fail, Raw: r.Raw, Recheck: r.Recheck,
+				Duration: time.Duration(r.DurationMS) * time.Millisecond, At: r.At,
+			})
+		}
+		s.mu.Lock()
+		s.history = hist
+		if len(hist) > 0 {
+			s.lastBatch = hist[0]
+			s.batchOK = hist[0].OK
+			s.batchFail = hist[0].Fail
+			s.batchSize = hist[0].OK + hist[0].Fail
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (s *Service) Snapshot() Progress {
+	if s == nil {
+		return Progress{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	hist := append([]BatchSummary(nil), s.history...)
+	return Progress{
+		Running: DefaultLogs.Running(),
+		Size: s.batchSize, OK: s.batchOK, Fail: s.batchFail,
+		LifetimeOK: s.lifeOK, LifetimeFail: s.lifeFail, LifetimeBatches: s.lifeN,
+		Last: s.lastBatch, History: hist,
+	}
+}
+
+func LiveProgress() Progress {
+	liveMu.RLock()
+	svc := live
+	liveMu.RUnlock()
+	if svc == nil {
+		return Progress{}
+	}
+	return svc.Snapshot()
+}
+
+func (s *Service) LastBatch() BatchSummary {
+	if s == nil {
+		return BatchSummary{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastBatch
 }
 
 func (s *Service) validateURLs() []string {
@@ -128,6 +243,12 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 		timeout = 8 * time.Second
 	}
 
+	started := time.Now()
+	s.mu.Lock()
+	s.batchSize = len(batch)
+	s.batchOK = 0
+	s.batchFail = 0
+	s.mu.Unlock()
 	DefaultLogs.SetRunning(true)
 	DefaultLogs.Add("info", "", "开始校验 batch="+strconv.Itoa(len(batch))+
 		" raw="+strconv.Itoa(len(raw))+" recheck="+strconv.Itoa(len(scored))+
@@ -174,17 +295,43 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 				DefaultLogs.Add("fail", p.Addr, msg, p.Source, 0)
 				sourcestats.Default.Record(p.Source, false, 0)
 			}
+			s.mu.Lock()
+			s.batchOK = okCount
+			s.batchFail = failCount
+			s.mu.Unlock()
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
 	sourcestats.Default.Evaluate(minSample, minRate)
+	elapsed := time.Since(started)
+	finished := BatchSummary{
+		OK: okCount, Fail: failCount, Raw: len(raw), Recheck: len(scored),
+		Duration: elapsed, At: time.Now().UTC(),
+	}
+	s.mu.Lock()
+	s.lastBatch = finished
+	s.batchOK = okCount
+	s.batchFail = failCount
+	s.lifeOK += int64(okCount)
+	s.lifeFail += int64(failCount)
+	s.lifeN++
+	s.history = append([]BatchSummary{finished}, s.history...)
+	if len(s.history) > 20 {
+		s.history = s.history[:20]
+	}
+	s.mu.Unlock()
+	if s.store != nil {
+		_ = s.store.InsertValidateBatch(ctx, okCount, failCount, len(raw), len(scored), elapsed.Milliseconds())
+	}
+	sourcestats.Default.Flush()
 	summary := "validate batch done ok=" + strconv.Itoa(okCount) + " fail=" + strconv.Itoa(failCount) +
-		" raw=" + strconv.Itoa(len(raw)) + " recheck=" + strconv.Itoa(len(scored))
+		" raw=" + strconv.Itoa(len(raw)) + " recheck=" + strconv.Itoa(len(scored)) +
+		" dur=" + elapsed.Truncate(time.Millisecond).String()
 	_ = store.PushEvent(ctx, summary)
 	DefaultLogs.Add("info", "", summary, "", 0)
 	s.free.NotifyValidateBatch(okCount, failCount)
-	log.Printf("validate batch: ok=%d fail=%d (raw=%d recheck=%d)", okCount, failCount, len(raw), len(scored))
+	log.Printf("validate batch: ok=%d fail=%d (raw=%d recheck=%d dur=%s)", okCount, failCount, len(raw), len(scored), elapsed.Truncate(time.Millisecond))
 	if okCount == 0 && failCount > 0 {
 		webhook.Default.Notify("validate_all_fail", map[string]any{"fail": failCount})
 	}

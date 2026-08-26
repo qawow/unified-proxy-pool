@@ -10,9 +10,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"unified-proxy-pool/internal/db"
 )
 
 const (
@@ -744,32 +747,89 @@ func (s *redisStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 		return ValidatorQueues{}, err
 	}
 
-	protocols := map[string]int64{}
-	families := map[string]int64{}
-	sourceFails := map[string]int64{}
-	for _, p := range s.mgetProxies(ctx, sampleAddrs) {
-		protocols[p.Protocol]++
-		families[p.Family()]++
-		if p.FailCount > 0 {
-			sourceFails[p.Source] += int64(p.FailCount)
-		}
-	}
-	fails := make([]SourceFail, 0, len(sourceFails))
-	for k, v := range sourceFails {
-		fails = append(fails, SourceFail{Name: k, Fails: v})
-	}
-	sort.Slice(fails, func(i, j int) bool { return fails[i].Fails > fails[j].Fails })
-	if len(fails) > 10 {
-		fails = fails[:10]
-	}
+	meta := summarizeValidated(s.mgetProxies(ctx, sampleAddrs))
 	return ValidatorQueues{
 		RawCount:       raw,
 		ValidatedCount: validated,
 		ScoreBuckets:   buckets,
-		ProtocolCounts: protocols,
-		FamilyCounts:   families,
-		FailTopSources: fails,
+		ProtocolCounts: meta.protocols,
+		FamilyCounts:   meta.families,
+		LatencyBuckets: meta.latency,
+		RegionCounts:   meta.regions,
+		AvgLatencyMS:   meta.avgLatency,
+		FailTopSources: meta.fails,
 	}, nil
+}
+
+type validatedMeta struct {
+	protocols  map[string]int64
+	families   map[string]int64
+	latency    map[string]int64
+	regions    []RegionCount
+	fails      []SourceFail
+	avgLatency float64
+}
+
+func summarizeValidated(proxies []Proxy) validatedMeta {
+	m := validatedMeta{
+		protocols: map[string]int64{},
+		families:  map[string]int64{},
+		latency:   map[string]int64{"0-200": 0, "201-500": 0, "501-1000": 0, "1001+": 0},
+	}
+	sourceFails := map[string]int64{}
+	regionN := map[string]int64{}
+	var latSum int64
+	var latN int64
+	for _, p := range proxies {
+		proto := p.Protocol
+		if proto == "" {
+			proto = "http"
+		}
+		m.protocols[proto]++
+		m.families[p.Family()]++
+		switch {
+		case p.LatencyMS <= 200:
+			m.latency["0-200"]++
+		case p.LatencyMS <= 500:
+			m.latency["201-500"]++
+		case p.LatencyMS <= 1000:
+			m.latency["501-1000"]++
+		default:
+			m.latency["1001+"]++
+		}
+		if p.LatencyMS > 0 {
+			latSum += p.LatencyMS
+			latN++
+		}
+		if p.FailCount > 0 {
+			src := p.Source
+			if src == "" {
+				src = "unknown"
+			}
+			sourceFails[src] += int64(p.FailCount)
+		}
+		if p.Region != "" {
+			regionN[p.Region]++
+		}
+	}
+	if latN > 0 {
+		m.avgLatency = float64(latSum) / float64(latN)
+	}
+	for k, v := range sourceFails {
+		m.fails = append(m.fails, SourceFail{Name: k, Fails: v})
+	}
+	sort.Slice(m.fails, func(i, j int) bool { return m.fails[i].Fails > m.fails[j].Fails })
+	if len(m.fails) > 10 {
+		m.fails = m.fails[:10]
+	}
+	for k, v := range regionN {
+		m.regions = append(m.regions, RegionCount{Region: k, Count: v})
+	}
+	sort.Slice(m.regions, func(i, j int) bool { return m.regions[i].Count > m.regions[j].Count })
+	if len(m.regions) > 8 {
+		m.regions = m.regions[:8]
+	}
+	return m
 }
 
 // AvgScore averages the scored set client-side.
@@ -830,6 +890,10 @@ type memoryStore struct {
 	// would both leak JSON into the operator's feed and let ordinary panel
 	// activity evict the history a trend is computed from.
 	yields map[string][]SourceYieldRecord
+
+	persist     *db.Store
+	dirty       atomic.Bool
+	stopPersist chan struct{}
 }
 
 func NewMemoryStore() Store {
@@ -845,9 +909,24 @@ func NewMemoryStore() Store {
 	}
 }
 
-func (s *memoryStore) Backend() string                { return "memory" }
+func (s *memoryStore) Backend() string {
+	if s.persist != nil {
+		return "memory+sqlite"
+	}
+	return "memory"
+}
 func (s *memoryStore) Ping(ctx context.Context) error { return nil }
-func (s *memoryStore) Close() error                   { return nil }
+func (s *memoryStore) Close() error {
+	if s.stopPersist != nil {
+		select {
+		case <-s.stopPersist:
+		default:
+			close(s.stopPersist)
+		}
+		s.flushSnapshot()
+	}
+	return nil
+}
 
 func (s *memoryStore) AddRaw(ctx context.Context, proxies []Proxy) (int, error) {
 	s.mu.Lock()
@@ -898,6 +977,9 @@ func (s *memoryStore) AddRaw(ctx context.Context, proxies []Proxy) (int, error) 
 			delete(s.raw, addr)
 		}
 	}
+	if added > 0 {
+		s.markDirty()
+	}
 	return added, nil
 }
 
@@ -917,6 +999,7 @@ func (s *memoryStore) Delete(ctx context.Context, addr string) error {
 	delete(s.proxies, addr)
 	delete(s.raw, addr)
 	delete(s.scored, addr)
+	s.markDirty()
 	return nil
 }
 
@@ -970,6 +1053,7 @@ func (s *memoryStore) MarkValidated(ctx context.Context, addr string, latencyMS 
 		delete(s.raw, addr)
 		s.scored[addr] = struct{}{}
 		s.proxies[addr] = p
+		s.markDirty()
 		return nil
 	}
 	p.FailCount++
@@ -978,9 +1062,11 @@ func (s *memoryStore) MarkValidated(ctx context.Context, addr string, latencyMS 
 		delete(s.proxies, addr)
 		delete(s.raw, addr)
 		delete(s.scored, addr)
+		s.markDirty()
 		return nil
 	}
 	s.proxies[addr] = p
+	s.markDirty()
 	return nil
 }
 
@@ -1089,6 +1175,7 @@ func (s *memoryStore) Trim(ctx context.Context) error {
 			delete(s.scored, addr)
 		}
 	}
+	s.markDirty()
 	return nil
 }
 
@@ -1158,6 +1245,7 @@ func (s *memoryStore) SetScraperEnabled(ctx context.Context, name string, enable
 		delete(s.enabled, name)
 		s.disabled[name] = struct{}{}
 	}
+	s.markDirty()
 	return nil
 }
 
@@ -1221,9 +1309,7 @@ func (s *memoryStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	buckets := map[string]int64{"0-20": 0, "21-50": 0, "51-80": 0, "81-100": 0}
-	protocols := map[string]int64{}
-	families := map[string]int64{}
-	sourceFails := map[string]int64{}
+	sample := make([]Proxy, 0, len(s.scored))
 	for addr := range s.scored {
 		p := s.proxies[addr]
 		switch {
@@ -1236,24 +1322,19 @@ func (s *memoryStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 		default:
 			buckets["81-100"]++
 		}
-		protocols[p.Protocol]++
-		families[p.Family()]++
-		if p.FailCount > 0 {
-			sourceFails[p.Source] += int64(p.FailCount)
-		}
+		sample = append(sample, p)
 	}
-	fails := make([]SourceFail, 0, len(sourceFails))
-	for k, v := range sourceFails {
-		fails = append(fails, SourceFail{Name: k, Fails: v})
-	}
-	sort.Slice(fails, func(i, j int) bool { return fails[i].Fails > fails[j].Fails })
+	meta := summarizeValidated(sample)
 	return ValidatorQueues{
 		RawCount:       int64(len(s.raw)),
 		ValidatedCount: int64(len(s.scored)),
 		ScoreBuckets:   buckets,
-		ProtocolCounts: protocols,
-		FamilyCounts:   families,
-		FailTopSources: fails,
+		ProtocolCounts: meta.protocols,
+		FamilyCounts:   meta.families,
+		LatencyBuckets: meta.latency,
+		RegionCounts:   meta.regions,
+		AvgLatencyMS:   meta.avgLatency,
+		FailTopSources: meta.fails,
 	}, nil
 }
 
@@ -1280,5 +1361,6 @@ func (s *memoryStore) UpdateRegion(ctx context.Context, addr, region string) err
 	p.Region = region
 	p.UpdatedAt = time.Now().UTC()
 	s.proxies[addr] = p
+	s.markDirty()
 	return nil
 }

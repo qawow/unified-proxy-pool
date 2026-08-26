@@ -16,6 +16,7 @@ const emptyForm = {
   name: "",
   url: "",
   headers_json: "",
+  fetch_proxy: "",
   sync_interval_sec: 3600,
   enabled: true,
 };
@@ -61,6 +62,7 @@ export function SubscriptionsPage() {
         name: form.name,
         url: form.url,
         headers_json: form.headers_json,
+        fetch_proxy: form.fetch_proxy,
         sync_interval_sec: Number(form.sync_interval_sec) || 0,
         enabled: form.enabled,
       };
@@ -113,12 +115,19 @@ export function SubscriptionsPage() {
               <Field label="订阅 URL">
                 <Input value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} required />
               </Field>
+              <Field label="获取时套代理">
+                <Input
+                  value={form.fetch_proxy}
+                  onChange={(e) => setForm({ ...form, fetch_proxy: e.target.value })}
+                  placeholder="空=直连；direct=单跳7892；chain=链式7893；或 socks5://user:pass@host:port"
+                />
+              </Field>
               <Field label="自定义请求头 JSON">
                 <Textarea
                   rows={4}
                   value={form.headers_json}
                   onChange={(e) => setForm({ ...form, headers_json: e.target.value })}
-                  placeholder='{"User-Agent":"mihomo"}'
+                  placeholder='留空则用浏览器默认头。覆盖示例：{"User-Agent":"clash-meta/1.19","Accept":"text/plain"}'
                 />
               </Field>
               <Field label="自动同步间隔（秒）">
@@ -177,6 +186,7 @@ export function SubscriptionsPage() {
                     name: item.name,
                     url: item.url,
                     headers_json: item.headers_json || "",
+                    fetch_proxy: item.fetch_proxy || "",
                     sync_interval_sec: item.sync_interval_sec,
                     enabled: item.enabled,
                   })}>

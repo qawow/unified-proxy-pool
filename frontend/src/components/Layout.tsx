@@ -12,6 +12,7 @@ import {
   Network,
   Radar,
   Settings,
+  ShieldBan,
   Sun,
   X,
 } from "lucide-react";
@@ -30,6 +31,7 @@ const navGroups = [
       { to: "/proxies", label: "代理池", icon: Globe2 },
       { to: "/sources", label: "采集源", icon: Radar },
       { to: "/validator", label: "校验统计", icon: Activity },
+      { to: "/channels", label: "渠道封禁", icon: ShieldBan },
     ],
   },
   {

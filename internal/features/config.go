@@ -3,6 +3,9 @@ package features
 import (
 	"encoding/json"
 	"strings"
+	"time"
+
+	"unified-proxy-pool/internal/chanpolicy"
 )
 
 // Config holds F1–F6 panel/runtime feature flags persisted as settings.feature_json.
@@ -33,6 +36,105 @@ type Config struct {
 
 	// Chain proxy detailed options
 	Chain ChainConfig `json:"chain,omitempty"`
+
+	// Per-channel temporary bans + selection strategy
+	Channels ChannelPolicyConfig `json:"channels,omitempty"`
+}
+
+// ChannelPolicyConfig is the panel-editable per-channel ban and selection policy.
+// A "channel" is the destination a request is headed for, so a proxy the site has
+// throttled can be sidelined for it alone.
+type ChannelPolicyConfig struct {
+	Enabled bool `json:"enabled"`
+	// KeyMode: etld1 (fold subdomains) | host (exact) | off (no scoping)
+	KeyMode   string `json:"key_mode,omitempty"`
+	WindowSec int    `json:"window_sec"`
+
+	// Ban rules. 0 disables an individual rule.
+	ConsecutiveFails int     `json:"consecutive_fails"`
+	FailRate         float64 `json:"fail_rate"`
+	MinSamples       int     `json:"min_samples"`
+	TimeoutFails     int     `json:"timeout_fails"`
+	BanStatuses      []int   `json:"ban_statuses,omitempty"`
+
+	BanTTLSec    int `json:"ban_ttl_sec"`
+	BanTTLMaxSec int `json:"ban_ttl_max_sec"`
+
+	MaxChannels       int `json:"max_channels"`
+	MaxEntriesPerChan int `json:"max_entries_per_chan"`
+
+	// Selection: weighted | random | rr
+	PickStrategy string `json:"pick_strategy,omitempty"`
+	CooldownSec  int    `json:"cooldown_sec"`
+
+	LogRetainHours  int  `json:"log_retain_hours"`
+	ReprobeOnExpiry bool `json:"reprobe_on_expiry"`
+}
+
+func DefaultChannels() ChannelPolicyConfig {
+	return ChannelPolicyConfig{
+		Enabled:           true,
+		KeyMode:           "etld1",
+		WindowSec:         300,
+		ConsecutiveFails:  3,
+		FailRate:          0.6,
+		MinSamples:        5,
+		TimeoutFails:      5,
+		BanStatuses:       []int{403, 429},
+		BanTTLSec:         60,
+		BanTTLMaxSec:      1800,
+		MaxChannels:       500,
+		MaxEntriesPerChan: 2000,
+		PickStrategy:      "weighted",
+		CooldownSec:       30,
+		LogRetainHours:    48,
+		ReprobeOnExpiry:   true,
+	}
+}
+
+// normalizeChannels fills gaps from the defaults. Like normalizeChain, a
+// never-configured block is indistinguishable from an all-zero one, so an
+// untouched config has to resolve to the shipped defaults rather than to
+// "everything disabled".
+func normalizeChannels(c ChannelPolicyConfig) ChannelPolicyConfig {
+	d := DefaultChannels()
+	if c.WindowSec == 0 && c.BanTTLSec == 0 && c.KeyMode == "" &&
+		c.MaxChannels == 0 && c.PickStrategy == "" && len(c.BanStatuses) == 0 {
+		return d
+	}
+	if c.KeyMode == "" {
+		c.KeyMode = d.KeyMode
+	}
+	if c.WindowSec <= 0 {
+		c.WindowSec = d.WindowSec
+	}
+	if c.MinSamples <= 0 {
+		c.MinSamples = d.MinSamples
+	}
+	if c.BanTTLSec <= 0 {
+		c.BanTTLSec = d.BanTTLSec
+	}
+	if c.BanTTLMaxSec < c.BanTTLSec {
+		c.BanTTLMaxSec = d.BanTTLMaxSec
+	}
+	if c.MaxChannels <= 0 {
+		c.MaxChannels = d.MaxChannels
+	}
+	if c.MaxEntriesPerChan <= 0 {
+		c.MaxEntriesPerChan = d.MaxEntriesPerChan
+	}
+	if c.PickStrategy == "" {
+		c.PickStrategy = d.PickStrategy
+	}
+	if c.CooldownSec < 0 {
+		c.CooldownSec = 0
+	}
+	// Rule thresholds are left as given: 0 means "this rule off", which is a
+	// legitimate choice, unlike a zero window or TTL.
+	if c.FailRate < 0 || c.FailRate > 1 {
+		c.FailRate = d.FailRate
+	}
+	return c
 }
 
 // ChainConfig is the panel-editable multi-hop policy.
@@ -83,8 +185,9 @@ func Default() Config {
 		AlertValidatedMin:     5,
 		TrafficSampleSec:      60,
 		TrafficRetainHours:    48,
-		WebhookEvents:         []string{"validated_low", "validate_all_fail"},
+		WebhookEvents:         []string{"validated_low", "validate_all_fail", "channel_ban"},
 		Chain:                 DefaultChain(),
+		Channels:              DefaultChannels(),
 	}
 }
 
@@ -92,6 +195,7 @@ func DefaultCards() map[string]bool {
 	keys := []string{
 		"available", "health", "live_conn", "up_bytes", "down_bytes",
 		"sources", "avg_score", "total", "single_hop", "chain", "lan", "events", "regions",
+		"channel_bans",
 	}
 	m := make(map[string]bool, len(keys))
 	for _, k := range keys {
@@ -130,6 +234,7 @@ func Parse(raw string) Config {
 		cfg.SourceMinSamples = 20
 	}
 	cfg.Chain = normalizeChain(cfg.Chain)
+	cfg.Channels = normalizeChannels(cfg.Channels)
 	return cfg
 }
 
@@ -188,6 +293,42 @@ func (c Config) CardVisible(key string) bool {
 		return true
 	}
 	return v
+}
+
+// ToPolicy converts the panel config into the runtime policy. The dependency
+// runs this way (features -> chanpolicy) so both startup and the hot-apply path
+// share one conversion instead of each mapping fields by hand.
+func (c ChannelPolicyConfig) ToPolicy() chanpolicy.Policy {
+	statuses := c.BanStatuses
+	if statuses == nil {
+		statuses = DefaultChannels().BanStatuses
+	}
+	return chanpolicy.Policy{
+		Enabled:           c.Enabled,
+		KeyMode:           c.KeyMode,
+		WindowSec:         c.WindowSec,
+		ConsecutiveFails:  c.ConsecutiveFails,
+		FailRate:          c.FailRate,
+		MinSamples:        c.MinSamples,
+		TimeoutFails:      c.TimeoutFails,
+		BanStatuses:       statuses,
+		BanTTLSec:         c.BanTTLSec,
+		BanTTLMaxSec:      c.BanTTLMaxSec,
+		MaxChannels:       c.MaxChannels,
+		MaxEntriesPerChan: c.MaxEntriesPerChan,
+		PickStrategy:      c.PickStrategy,
+		CooldownSec:       c.CooldownSec,
+		LogRetainHours:    c.LogRetainHours,
+		ReprobeOnExpiry:   c.ReprobeOnExpiry,
+	}.Normalize()
+}
+
+// CooldownDuration is the recently-served suppression window for selection.
+func (c ChannelPolicyConfig) CooldownDuration() time.Duration {
+	if c.CooldownSec <= 0 {
+		return 0
+	}
+	return time.Duration(c.CooldownSec) * time.Second
 }
 
 func (c Config) ValidateURLs(fallback string) []string {

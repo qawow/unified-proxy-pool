@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"unified-proxy-pool/internal/chanpolicy"
+	"unified-proxy-pool/internal/conntrack"
 	"unified-proxy-pool/internal/freproxies"
 	"unified-proxy-pool/internal/netutil"
 	"unified-proxy-pool/internal/traffic"
@@ -60,11 +62,89 @@ type Server struct {
 	rateLimitBps  int64
 
 	chainOpts ChainOptions
+
+	// channels records per-destination outcomes so a proxy can be sidelined for
+	// one target site without being penalised everywhere. Optional.
+	channels channelRecorder
+}
+
+// channelRecorder is the slice of chanpolicy.Registry this server needs.
+type channelRecorder interface {
+	ChannelFor(target string) string
+	Record(o chanpolicy.Outcome) *chanpolicy.Ban
+}
+
+// SetChannelPolicy attaches the per-channel outcome recorder.
+func (s *Server) SetChannelPolicy(rec channelRecorder) {
+	s.mu.Lock()
+	s.channels = rec
+	s.mu.Unlock()
+}
+
+func (s *Server) channelRec() channelRecorder {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.channels
+}
+
+// channelFor derives the channel for a dial target, or "" when channel tracking
+// is off.
+func (s *Server) channelFor(target string) string {
+	rec := s.channelRec()
+	if rec == nil {
+		return ""
+	}
+	return rec.ChannelFor(target)
+}
+
+// recordChannel files one outcome. Safe to call with an empty channel or addr.
+func (s *Server) recordChannel(channel, addr string, ok bool, status int, errTag string, latencyMS int64) {
+	if channel == "" || addr == "" {
+		return
+	}
+	rec := s.channelRec()
+	if rec == nil {
+		return
+	}
+	rec.Record(chanpolicy.Outcome{
+		Channel:   channel,
+		Addr:      addr,
+		OK:        ok,
+		Status:    status,
+		Err:       errTag,
+		LatencyMS: latencyMS,
+	})
+}
+
+// errTag reduces a dial error to a short stable tag. The full text is unbounded
+// and would make ban reasons unreadable, but timeout-vs-refused has to survive
+// because the two trip different rules.
+func errTag(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "timeout"), strings.Contains(msg, "deadline exceeded"):
+		return "timeout"
+	case strings.Contains(msg, "refused"):
+		return "conn_refused"
+	case strings.Contains(msg, "reset"):
+		return "conn_reset"
+	case strings.Contains(msg, "no such host"), strings.Contains(msg, "dns"):
+		return "dns_failed"
+	case strings.Contains(msg, "connect status"), strings.Contains(msg, "status"):
+		return "upstream_rejected"
+	default:
+		return "dial_failed"
+	}
 }
 
 type stickyStore interface {
 	Get(clientIP string) (string, bool)
 	Put(clientIP, addr string)
+	GetProxy(clientIP string) (addr, protocol string, ok bool)
+	PutProxy(clientIP, addr, protocol string)
 }
 
 // ChainOptions is runtime multi-hop policy (from feature.chain).
@@ -440,9 +520,38 @@ func (s *Server) Stop() {
 	s.chainRunning.Store(false)
 }
 
+type ctxKey int
+
+const (
+	ctxClientIP ctxKey = iota
+	ctxTrackID
+)
+
+func withClientIP(ctx context.Context, ip string) context.Context {
+	return context.WithValue(ctx, ctxClientIP, ip)
+}
+
+func clientIPFrom(ctx context.Context) string {
+	s, _ := ctx.Value(ctxClientIP).(string)
+	return s
+}
+
+func remoteIP(conn net.Conn) string {
+	if conn == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err != nil {
+		return conn.RemoteAddr().String()
+	}
+	return host
+}
+
 func (s *Server) handle(ctx context.Context, conn net.Conn, chain bool) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	ip := remoteIP(conn)
+	ctx = withClientIP(ctx, ip)
 	br := bufio.NewReader(conn)
 	peek, err := br.Peek(1)
 	if err != nil {
@@ -455,6 +564,11 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, chain bool) {
 	} else {
 		s.requests.Add(1)
 	}
+	// Live-connection registry. Begin/End were never called, so the dashboard
+	// card and upp_active_connections always reported 0.
+	trackID := conntrack.Default.Begin(ch, ip)
+	ctx = context.WithValue(ctx, ctxTrackID, trackID)
+	defer conntrack.Default.End(trackID, 0, 0)
 	// 入站：客户端连入本机监听端口；未进入 relay 时由 defer 释放
 	traffic.Default.BeginInbound(ch)
 	finished := false
@@ -520,7 +634,7 @@ func (s *Server) dialVia(ctx context.Context, upstream freproxies.Proxy, target 
 
 // dialViaWithFailover tries several free proxies until one connects.
 func (s *Server) dialViaWithFailover(ctx context.Context, target string) (net.Conn, freproxies.Proxy, error) {
-	return s.dialViaWithFailoverClient(ctx, target, "")
+	return s.dialViaWithFailoverClient(ctx, target, clientIPFrom(ctx))
 }
 
 func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP string) (net.Conn, freproxies.Proxy, error) {
@@ -528,34 +642,71 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 	stickyOn := s.stickyEnabled && s.sticky != nil
 	sticky := s.sticky
 	s.mu.RUnlock()
+	channel := s.channelFor(target)
 	if stickyOn && clientIP != "" {
-		if addr, ok := sticky.Get(clientIP); ok {
-			up := freproxies.Proxy{Addr: addr, Protocol: "http"}
-			if conn, err := dialProxyChain(ctx, []freproxies.Proxy{up}, target); err == nil {
-				return conn, up, nil
+		if addr, proto, ok := sticky.GetProxy(clientIP); ok {
+			if proto == "" {
+				proto = "http"
+			}
+			up := freproxies.Proxy{Addr: addr, Protocol: proto}
+			// A sticky proxy that the destination has since sidelined must not be
+			// reused, or stickiness would quietly defeat the ban.
+			if !s.channelBanned(channel, addr) {
+				start := time.Now()
+				if conn, err := dialProxyChain(ctx, []freproxies.Proxy{up}, target); err == nil {
+					s.recordChannel(channel, addr, true, 0, "", time.Since(start).Milliseconds())
+					return conn, up, nil
+				}
 			}
 		}
 	}
-	upstreams, err := s.free.PickValidatedN(ctx, "", 8)
+	res, err := s.free.Pick(ctx, freproxies.PickOptions{N: 8, Channel: channel})
 	if err != nil {
 		return nil, freproxies.Proxy{}, err
 	}
+	upstreams := res.Items
 	var lastErr error
 	for _, up := range upstreams {
+		start := time.Now()
 		conn, err := dialProxyChain(ctx, []freproxies.Proxy{up}, target)
 		if err == nil {
 			if stickyOn && clientIP != "" {
-				sticky.Put(clientIP, up.Addr)
+				sticky.PutProxy(clientIP, up.Addr, up.Protocol)
 			}
+			// A successful dial only proves the tunnel opened. For HTTPS that is all
+			// this layer will ever know; the application-layer verdict, if any,
+			// arrives later via the report API.
+			s.recordChannel(channel, up.Addr, true, 0, "", time.Since(start).Milliseconds())
 			return conn, up, nil
 		}
 		lastErr = err
 		_ = s.free.Store().MarkValidated(ctx, up.Addr, 0, false)
+		// Global score already took the hit above; this records that the failure
+		// happened against *this* destination, which is what scopes the ban.
+		s.recordChannel(channel, up.Addr, false, 0, errTag(err), 0)
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("all upstreams failed")
 	}
 	return nil, freproxies.Proxy{}, lastErr
+}
+
+// channelBanned reports whether a specific addr is sidelined for a channel.
+func (s *Server) channelBanned(channel, addr string) bool {
+	if channel == "" || addr == "" {
+		return false
+	}
+	rec := s.channelRec()
+	if rec == nil {
+		return false
+	}
+	type banChecker interface {
+		Banned(channel, addr string) bool
+	}
+	if bc, ok := rec.(banChecker); ok {
+		return bc.Banned(channel, addr)
+	}
+	return false
 }
 
 // dialChainWithFailover: multi-hop 链式代理.
@@ -576,14 +727,16 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 	dialCtx, cancel := context.WithTimeout(ctx, dialTO)
 	defer cancel()
 
+	channel := s.channelFor(target)
+
 	var pool []freproxies.Proxy
 	if s.free != nil && s.free.Hot() != nil {
 		pool = s.free.Hot().PickDistinct(hopsN*8, opts.PreferDistinctRegion, opts.EntryProto, opts.ExitProto, opts.EntryRegion, opts.ExitRegion)
 	}
 	if len(pool) < hopsN {
-		more, err := s.free.PickValidatedN(dialCtx, "", hopsN*8)
+		more, err := s.free.Pick(dialCtx, freproxies.PickOptions{N: hopsN * 8, Channel: channel})
 		if err == nil {
-			pool = append(pool, more...)
+			pool = append(pool, more.Items...)
 		}
 	}
 	if len(pool) == 0 {
@@ -612,6 +765,10 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 		}
 		// apply entry/exit proto soft preference by swap if possible
 		hops = applyEntryExitPrefs(hops, opts)
+		// Only the exit hop is visible to the destination, so only it is subject to
+		// that destination's bans. Filtering every hop would starve the chain over
+		// relay proxies the target never sees.
+		hops = s.avoidBannedExit(hops, rotated, channel)
 		conn, err := dialProxyChain(dialCtx, hops, target)
 		if err == nil {
 			return conn, hops, nil
@@ -621,11 +778,44 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 		if s.free.Hot() != nil {
 			s.free.Hot().Invalidate(hops[0].Addr)
 		}
+		// Deliberately not recorded against the channel: a chain that failed to
+		// build never reached the destination, so there is nothing to attribute to
+		// the exit proxy. Only the entry hop is known to be at fault, and that is
+		// already reflected in its global score above.
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("all chains failed")
 	}
 	return nil, nil, lastErr
+}
+
+// avoidBannedExit swaps the exit hop for one the destination has not sidelined.
+//
+// It searches the wider candidate pool rather than only the chosen hops, and
+// leaves the chain untouched when no clean substitute exists — a chain with a
+// banned exit still beats no chain at all, and the Relaxed path in selection
+// makes the same trade.
+func (s *Server) avoidBannedExit(hops, pool []freproxies.Proxy, channel string) []freproxies.Proxy {
+	if channel == "" || len(hops) == 0 {
+		return hops
+	}
+	last := len(hops) - 1
+	if !s.channelBanned(channel, hops[last].Addr) {
+		return hops
+	}
+	inChain := make(map[string]bool, len(hops))
+	for _, h := range hops {
+		inChain[h.Addr] = true
+	}
+	for _, cand := range pool {
+		if inChain[cand.Addr] || s.channelBanned(channel, cand.Addr) {
+			continue
+		}
+		out := append([]freproxies.Proxy(nil), hops...)
+		out[last] = cand
+		return out
+	}
+	return hops
 }
 
 func applyEntryExitPrefs(hops []freproxies.Proxy, opts ChainOptions) []freproxies.Proxy {
@@ -653,13 +843,33 @@ func applyEntryExitPrefs(hops []freproxies.Proxy, opts ChainOptions) []freproxie
 	return out
 }
 
-func (s *Server) openUpstream(ctx context.Context, target string, chain bool) (net.Conn, error) {
+// openUpstream dials the target and reports which proxy the destination will
+// actually see — the exit hop for a chain, the only hop otherwise.
+//
+// The caller needs that identity to attribute an application-layer verdict (a
+// plain-HTTP status code) to the right proxy. Everything below the tunnel is
+// invisible to us, so this is the only attribution the pool can make on its own.
+func (s *Server) openUpstream(ctx context.Context, target string, chain bool) (net.Conn, freproxies.Proxy, error) {
+	var (
+		conn net.Conn
+		exit freproxies.Proxy
+		err  error
+	)
 	if chain {
-		conn, _, err := s.dialChainWithFailover(ctx, target)
-		return conn, err
+		var hops []freproxies.Proxy
+		conn, hops, err = s.dialChainWithFailover(ctx, target)
+		if len(hops) > 0 {
+			exit = hops[len(hops)-1]
+		}
+	} else {
+		conn, exit, err = s.dialViaWithFailover(ctx, target)
 	}
-	conn, _, err := s.dialViaWithFailover(ctx, target)
-	return conn, err
+	if err == nil && exit.Addr != "" {
+		if id, ok := ctx.Value(ctxTrackID).(int64); ok && id > 0 {
+			conntrack.Default.SetUpstream(id, exit.Addr)
+		}
+	}
+	return conn, exit, err
 }
 
 func dialHTTPConnectVia(ctx context.Context, dialer *net.Dialer, proxyAddr, target string) (net.Conn, error) {
@@ -781,7 +991,7 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 		if !strings.Contains(target, ":") {
 			target += ":443"
 		}
-		up, err := s.openUpstream(ctx, target, chain)
+		up, _, err := s.openUpstream(ctx, target, chain)
 		if err != nil {
 			_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 			return err
@@ -790,6 +1000,10 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 		_, _ = io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
 		_ = client.SetDeadline(time.Time{})
 		_ = up.SetDeadline(time.Time{})
+		// From here the payload is an opaque TLS tunnel: no status code is
+		// observable, so the dial result recorded during openUpstream is the only
+		// automatic signal for this request. Application-layer verdicts (403, 429,
+		// captcha) have to arrive through the report API.
 		return relayTraffic(client, up, ch, finished)
 	}
 
@@ -807,7 +1021,7 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 			host += ":80"
 		}
 	}
-	upConn, err := s.openUpstream(ctx, host, chain)
+	upConn, exit, err := s.openUpstream(ctx, host, chain)
 	if err != nil {
 		_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
 		return err
@@ -820,6 +1034,12 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 	}
 	traffic.Default.BeginOutbound(ch)
 
+	// Plain HTTP is the one path where the response is readable, so it is the only
+	// place the pool can see a 403/429 for itself. Attribute it to the exit proxy,
+	// which is the address the destination actually saw.
+	channel := s.channelFor(host)
+	started := time.Now()
+
 	outReq := req.Clone(ctx)
 	outReq.RequestURI = ""
 	outReq.URL = &url.URL{Scheme: targetURL.Scheme, Opaque: targetURL.Opaque, Host: targetURL.Host, Path: targetURL.Path, RawPath: targetURL.RawPath, RawQuery: targetURL.RawQuery}
@@ -829,14 +1049,22 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 	outReq.Header.Del("Proxy-Connection")
 	if err := outReq.Write(upConn); err != nil {
 		traffic.Default.EndConn(ch, false, 0, 0, true)
+		s.recordChannel(channel, exit.Addr, false, 0, errTag(err), 0)
 		return err
 	}
 	resp, err := http.ReadResponse(bufio.NewReader(upConn), outReq)
 	if err != nil {
 		traffic.Default.EndConn(ch, false, 0, 0, true)
+		s.recordChannel(channel, exit.Addr, false, 0, errTag(err), 0)
 		return err
 	}
 	defer resp.Body.Close()
+	// 4xx/5xx counts as a failure for this destination even though the transport
+	// worked: a 403 means the site rejected this exit IP, which is exactly what a
+	// per-channel ban is for. The status is passed through so status-specific
+	// rules (403, 429) can fire.
+	statusOK := resp.StatusCode < 400
+	s.recordChannel(channel, exit.Addr, statusOK, resp.StatusCode, "", time.Since(started).Milliseconds())
 	if err := resp.Write(client); err != nil {
 		traffic.Default.EndConn(ch, false, 0, 0, true)
 		return err
@@ -957,7 +1185,9 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn, br *bufio.Re
 	port := int(portBuf[0])<<8 | int(portBuf[1])
 	target := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
-	up, err := s.openUpstream(ctx, target, chain)
+	// SOCKS5 carries opaque bytes, so like CONNECT the dial result is the only
+	// signal available here; channel attribution happened inside openUpstream.
+	up, _, err := s.openUpstream(ctx, target, chain)
 	if err != nil {
 		_, _ = client.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return err

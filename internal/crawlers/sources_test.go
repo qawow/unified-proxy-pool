@@ -149,3 +149,16 @@ func TestDefaultSourceURLsMatchProtocol(t *testing.T) {
 		}
 	}
 }
+
+func TestGithubRawMirrorsOrder(t *testing.T) {
+	got := githubRawMirrors("TheSpeedX/SOCKS-List/master/http.txt")
+	if len(got) < 3 {
+		t.Fatalf("want at least 3 mirrors, got %v", got)
+	}
+	if !strings.Contains(got[0], "ghproxy.net/") {
+		t.Fatalf("first mirror should be ghproxy, got %s", got[0])
+	}
+	if !strings.Contains(got[1], "raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt") {
+		t.Fatalf("raw GitHub missing: %v", got)
+	}
+}

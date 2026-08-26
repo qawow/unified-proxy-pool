@@ -14,6 +14,7 @@ import (
 	"unified-proxy-pool/internal/audit"
 	"unified-proxy-pool/internal/auth"
 	"unified-proxy-pool/internal/blacklist"
+	"unified-proxy-pool/internal/chanpolicy"
 	"unified-proxy-pool/internal/config"
 	"unified-proxy-pool/internal/crawlers"
 	"unified-proxy-pool/internal/db"
@@ -64,6 +65,7 @@ func Run() {
 	authSvc := auth.NewService(settingsSvc, store, cfg.SessionMaxAgeSec)
 	nodeSvc := nodes.NewService(store, broker)
 	subSvc := subscriptions.NewService(store, settingsSvc, broker)
+	subSvc.SetLocalExits(cfg.DirectProxyAddr, cfg.ProxyChainAddr)
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	var shutdownOnce sync.Once
 	requestShutdown := func() {
@@ -95,15 +97,15 @@ func Run() {
 	if cfg.FreeProxyEnabled {
 		rs, err := freproxies.OpenRedis(cfg.RedisAddr, cfg.RedisPassword, cfg.RedisDB)
 		if err != nil {
-			log.Printf("redis unavailable (%v), fallback to memory store for free proxies", err)
-			freeStore = freproxies.NewMemoryStore()
+			log.Printf("redis unavailable (%v), fallback to memory+sqlite for free proxies", err)
+			freeStore = freproxies.PersistMemoryStore(freproxies.NewMemoryStore(), store)
 		} else {
 			freeStore = rs
 			redisOK = true
 			log.Printf("redis connected at %s", cfg.RedisAddr)
 		}
 	} else {
-		freeStore = freproxies.NewMemoryStore()
+		freeStore = freproxies.PersistMemoryStore(freproxies.NewMemoryStore(), store)
 	}
 	registry := crawlers.NewRegistry(crawlers.DefaultSources())
 	scraperSvc := scrapers.New(store, registry)
@@ -128,8 +130,50 @@ func Run() {
 	freeSvc.SetBlockedFn(func(addr string) bool { return blStore.Blocked(addr) })
 	freeSvc.SetSourceDisabledFn(func(source string) bool { return sourcestats.Default.IsDisabled(source) })
 
+	// Per-channel temporary bans. The global blacklist above is the hard,
+	// admin-owned ban; this one is automatic, per-destination and expiring.
+	chanStore := chanpolicy.NewSQLStore(store.DB)
+	channels := chanpolicy.New(chanpolicy.Options{
+		Policy:  chanpolicy.Defaults(),
+		Persist: chanStore,
+		OnBan: func(b chanpolicy.Ban) {
+			broker.Publish("channel_ban", b)
+			webhook.Default.Notify("channel_ban", map[string]any{
+				"channel": b.Channel, "addr": b.Addr, "reason": b.Reason,
+				"until": b.Until, "strikes": b.Strikes,
+			})
+		},
+		OnUnban: func(b chanpolicy.Ban) { broker.Publish("channel_unban", b) },
+	})
+	if restored, err := chanStore.LoadBans(); err != nil {
+		log.Printf("channel bans: load failed: %v", err)
+	} else if n := channels.Restore(restored); n > 0 {
+		log.Printf("channel bans: restored %d active ban(s)", n)
+	}
+	if logs, err := chanStore.LoadOutcomes(500); err != nil {
+		log.Printf("channel logs: load failed: %v", err)
+	} else if len(logs) > 0 {
+		channels.RestoreLogs(logs)
+	}
+	if allows, err := chanStore.LoadAllows(); err != nil {
+		log.Printf("channel allowlist: load failed: %v", err)
+	} else if len(allows) > 0 {
+		channels.RestoreAllows(allows)
+		log.Printf("channel allowlist: restored %d entries", len(allows))
+	}
+	if rules, err := chanStore.LoadRules(); err != nil {
+		log.Printf("channel rules: load failed: %v", err)
+	} else if len(rules) > 0 {
+		channels.RestoreRules(rules)
+		log.Printf("channel rules: restored %d", len(rules))
+	}
+	channels.StartSweeper(rootCtx, time.Minute)
+	freeSvc.SetChannelPolicy(channels)
+
 	poolSvc.SetFreeService(freeSvc)
+	sourcestats.Default.Attach(store)
 	valSvc := validator.New(cfg, freeSvc)
+	valSvc.SetDB(store)
 	sched := scheduler.New(cfg, freeSvc, valSvc)
 	sched.SetIntervalProvider(func(ctx context.Context) (scrapeSec, validateSec int) {
 		st, err := settingsSvc.Get(ctx)
@@ -154,6 +198,8 @@ func Run() {
 		if featCfg.StickyTTLSec > 0 {
 			stickyStore.SetTTL(time.Duration(featCfg.StickyTTLSec) * time.Second)
 		}
+		channels.SetPolicy(featCfg.Channels.ToPolicy())
+		freeSvc.SetPickDefaults(featCfg.Channels.PickStrategy, featCfg.Channels.CooldownDuration())
 		trafficHistStore.Start(rootCtx, time.Duration(featCfg.TrafficSampleSec)*time.Second, featCfg.TrafficRetainHours)
 	} else {
 		trafficHistStore.Start(rootCtx, time.Minute, 48)
@@ -169,6 +215,7 @@ func Run() {
 		ChainAddr:    cfg.ProxyChainAddr,
 		ChainHops:    cfg.ProxyChainHops,
 	}, freeSvc)
+	direct.SetChannelPolicy(channels)
 	direct.SetSticky(stickyStore, featCfg.DirectStickyEnabled)
 	direct.SetAllowedCIDRs(featCfg.AllowedCIDRs)
 	direct.SetAuthRequired(featCfg.DirectAuthRequired)
@@ -210,6 +257,7 @@ func Run() {
 		Audit:       auditStore,
 		Tokens:      tokenStore,
 		TrafficHist: trafficHistStore,
+		Channels:    channels,
 	})
 	if err != nil {
 		log.Fatalf("build web app: %v", err)

@@ -8,12 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"unified-proxy-pool/internal/db"
+	"unified-proxy-pool/internal/netutil"
 	"unified-proxy-pool/internal/events"
 	"unified-proxy-pool/internal/models"
 	"unified-proxy-pool/internal/nodes"
@@ -25,15 +28,36 @@ type Service struct {
 	settingsSvc    *settings.Service
 	events         *events.Broker
 	client         *http.Client
+	directProxyURL string
+	chainProxyURL  string
 	mu             sync.Mutex
 	syncing        map[int64]struct{}
 	afterSyncHooks []func(context.Context, int64, []int64)
+}
+
+// SetLocalExits tells sync how to interpret fetch_proxy shortcuts
+// "direct"/"7892" and "chain"/"7893".
+func (s *Service) SetLocalExits(directListen, chainListen string) {
+	s.directProxyURL = localHTTPProxyURL(directListen)
+	s.chainProxyURL = localHTTPProxyURL(chainListen)
+}
+
+func localHTTPProxyURL(listen string) string {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(listen))
+	if err != nil || port == "" {
+		return ""
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
 }
 
 type UpsertRequest struct {
 	Name            string `json:"name"`
 	URL             string `json:"url"`
 	HeadersJSON     string `json:"headers_json"`
+	FetchProxy      string `json:"fetch_proxy"`
 	Enabled         bool   `json:"enabled"`
 	SyncIntervalSec int    `json:"sync_interval_sec"`
 }
@@ -112,7 +136,7 @@ func (s *Service) StartScheduler(ctx context.Context) {
 }
 
 func (s *Service) List(ctx context.Context) ([]models.Subscription, error) {
-	rows, err := s.store.DB.QueryContext(ctx, `SELECT id, name, url, headers_json, enabled, sync_interval_sec, last_sync_at,
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT id, name, url, headers_json, fetch_proxy, enabled, sync_interval_sec, last_sync_at,
 		last_sync_status, last_error, etag, last_modified, created_at, updated_at
 		FROM subscriptions ORDER BY updated_at DESC, id DESC`)
 	if err != nil {
@@ -131,7 +155,7 @@ func (s *Service) List(ctx context.Context) ([]models.Subscription, error) {
 }
 
 func (s *Service) ListWithStats(ctx context.Context) ([]models.SubscriptionListItem, error) {
-	rows, err := s.store.DB.QueryContext(ctx, `SELECT s.id, s.name, s.url, s.headers_json, s.enabled, s.sync_interval_sec,
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT s.id, s.name, s.url, s.headers_json, s.fetch_proxy, s.enabled, s.sync_interval_sec,
 		s.last_sync_at, s.last_sync_status, s.last_error, s.etag, s.last_modified, s.created_at, s.updated_at,
 		COUNT(n.id) AS total_nodes,
 		SUM(CASE WHEN n.last_status = 'available' THEN 1 ELSE 0 END) AS available_nodes,
@@ -139,7 +163,7 @@ func (s *Service) ListWithStats(ctx context.Context) ([]models.SubscriptionListI
 		AVG(n.last_latency_ms) AS average_latency_ms
 		FROM subscriptions s
 		LEFT JOIN subscription_nodes n ON n.subscription_id = s.id
-		GROUP BY s.id, s.name, s.url, s.headers_json, s.enabled, s.sync_interval_sec, s.last_sync_at,
+		GROUP BY s.id, s.name, s.url, s.headers_json, s.fetch_proxy, s.enabled, s.sync_interval_sec, s.last_sync_at,
 			s.last_sync_status, s.last_error, s.etag, s.last_modified, s.created_at, s.updated_at
 		ORDER BY s.updated_at DESC, s.id DESC`)
 	if err != nil {
@@ -159,7 +183,7 @@ func (s *Service) ListWithStats(ctx context.Context) ([]models.SubscriptionListI
 }
 
 func (s *Service) Get(ctx context.Context, id int64) (models.Subscription, error) {
-	row := s.store.DB.QueryRowContext(ctx, `SELECT id, name, url, headers_json, enabled, sync_interval_sec, last_sync_at,
+	row := s.store.DB.QueryRowContext(ctx, `SELECT id, name, url, headers_json, fetch_proxy, enabled, sync_interval_sec, last_sync_at,
 		last_sync_status, last_error, etag, last_modified, created_at, updated_at
 		FROM subscriptions WHERE id = ?`, id)
 	return scanSubscription(row)
@@ -172,9 +196,9 @@ func (s *Service) Create(ctx context.Context, req UpsertRequest) (models.Subscri
 	}
 	now := time.Now().UTC()
 	res, err := s.store.DB.ExecContext(ctx, `INSERT INTO subscriptions (
-		name, url, headers_json, enabled, sync_interval_sec, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		req.Name, req.URL, req.HeadersJSON, boolToInt(req.Enabled), req.SyncIntervalSec, now, now,
+		name, url, headers_json, fetch_proxy, enabled, sync_interval_sec, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		req.Name, req.URL, req.HeadersJSON, req.FetchProxy, boolToInt(req.Enabled), req.SyncIntervalSec, now, now,
 	)
 	if err != nil {
 		return models.Subscription{}, err
@@ -192,8 +216,8 @@ func (s *Service) Update(ctx context.Context, id int64, req UpsertRequest) (mode
 	if err != nil {
 		return models.Subscription{}, err
 	}
-	_, err = s.store.DB.ExecContext(ctx, `UPDATE subscriptions SET name = ?, url = ?, headers_json = ?, enabled = ?, sync_interval_sec = ?, updated_at = ?
-		WHERE id = ?`, req.Name, req.URL, req.HeadersJSON, boolToInt(req.Enabled), req.SyncIntervalSec, time.Now().UTC(), id)
+	_, err = s.store.DB.ExecContext(ctx, `UPDATE subscriptions SET name = ?, url = ?, headers_json = ?, fetch_proxy = ?, enabled = ?, sync_interval_sec = ?, updated_at = ?
+		WHERE id = ?`, req.Name, req.URL, req.HeadersJSON, req.FetchProxy, boolToInt(req.Enabled), req.SyncIntervalSec, time.Now().UTC(), id)
 	if err != nil {
 		return models.Subscription{}, err
 	}
@@ -283,10 +307,13 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 	if err != nil {
 		return SyncOutcome{}, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Super-Proxy-Pool)")
+	netutil.ApplySubscriptionHeaders(req.Header, sub.URL)
 	for key, value := range parseHeaders(sub.HeadersJSON) {
 		req.Header.Set(key, value)
 	}
+	// Remaining browser-like headers only fill blanks; URL-specific and
+	// caller headers already set above win.
+	netutil.ApplyDefaultHeaders(req.Header)
 	if sub.ETag != "" {
 		req.Header.Set("If-None-Match", sub.ETag)
 	}
@@ -294,7 +321,7 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 		req.Header.Set("If-Modified-Since", sub.LastModified)
 	}
 
-	resp, err := s.doWithRetry(req, settingsRow.FailureRetryCount)
+	resp, err := s.doWithRetry(req, settingsRow.FailureRetryCount, s.clientFor(sub))
 	if err != nil {
 		_ = s.setSyncFailure(ctx, sub.ID, err.Error())
 		s.publishSyncFailure(sub.ID, err.Error())
@@ -516,7 +543,7 @@ func scanSubscription(scanner interface{ Scan(dest ...any) error }) (models.Subs
 	var item models.Subscription
 	var enabled int
 	var lastSyncAt sql.NullTime
-	err := scanner.Scan(&item.ID, &item.Name, &item.URL, &item.HeadersJSON, &enabled, &item.SyncIntervalSec, &lastSyncAt,
+	err := scanner.Scan(&item.ID, &item.Name, &item.URL, &item.HeadersJSON, &item.FetchProxy, &enabled, &item.SyncIntervalSec, &lastSyncAt,
 		&item.LastSyncStatus, &item.LastError, &item.ETag, &item.LastModified, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		return models.Subscription{}, err
@@ -539,7 +566,7 @@ func scanSubscriptionListItem(scanner interface{ Scan(dest ...any) error }) (mod
 	var averageLatency sql.NullFloat64
 
 	err := scanner.Scan(
-		&item.ID, &item.Name, &item.URL, &item.HeadersJSON, &enabled, &item.SyncIntervalSec, &lastSyncAt,
+		&item.ID, &item.Name, &item.URL, &item.HeadersJSON, &item.FetchProxy, &enabled, &item.SyncIntervalSec, &lastSyncAt,
 		&item.LastSyncStatus, &item.LastError, &item.ETag, &item.LastModified, &item.CreatedAt, &item.UpdatedAt,
 		&totalNodes, &availableNodes, &invalidNodes, &averageLatency,
 	)
@@ -648,6 +675,7 @@ func (s *Service) normalizeUpsertRequest(ctx context.Context, req UpsertRequest)
 		return UpsertRequest{}, err
 	}
 	req.HeadersJSON = headersJSON
+	req.FetchProxy = strings.TrimSpace(req.FetchProxy)
 
 	if req.SyncIntervalSec <= 0 {
 		st, err := s.settingsSvc.Get(ctx)
@@ -731,7 +759,44 @@ func needsStoredSubscriptionNodeUpdate(existing storedSubscriptionNode, next nod
 		existing.NormalizedJSON != normalizedJSON
 }
 
-func (s *Service) doWithRetry(req *http.Request, retryCount int) (*http.Response, error) {
+func (s *Service) clientFor(sub models.Subscription) *http.Client {
+	proxyURL := s.resolveFetchProxy(sub.FetchProxy)
+	if proxyURL == nil {
+		return s.client
+	}
+	transport := &http.Transport{
+		Proxy:             http.ProxyURL(proxyURL),
+		ForceAttemptHTTP2: false,
+		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	return &http.Client{Timeout: 45 * time.Second, Transport: transport}
+}
+
+func (s *Service) resolveFetchProxy(raw string) *url.URL {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.EqualFold(raw, "none") {
+		return nil
+	}
+	switch strings.ToLower(raw) {
+	case "direct", "pool", "7892", "single":
+		raw = s.directProxyURL
+	case "chain", "7893":
+		raw = s.chainProxyURL
+	}
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil
+	}
+	return u
+}
+
+func (s *Service) doWithRetry(req *http.Request, retryCount int, client *http.Client) (*http.Response, error) {
+	if client == nil {
+		client = s.client
+	}
 	attempts := retryCount + 1
 	if attempts < 1 {
 		attempts = 1
@@ -739,7 +804,7 @@ func (s *Service) doWithRetry(req *http.Request, retryCount int) (*http.Response
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		cloned := req.Clone(req.Context())
-		resp, err := s.client.Do(cloned)
+		resp, err := client.Do(cloned)
 		if err == nil {
 			return resp, nil
 		}

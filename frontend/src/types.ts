@@ -43,6 +43,8 @@ export type Settings = {
     alert_validated_min?: number;
     traffic_sample_sec?: number;
     traffic_retain_hours?: number;
+    chain?: ChainOptions;
+    channels?: ChannelPolicyConfig;
     [key: string]: unknown;
   };
 };
@@ -52,6 +54,7 @@ export type Subscription = {
   name: string;
   url: string;
   headers_json: string;
+  fetch_proxy?: string;
   enabled: boolean;
   sync_interval_sec: number;
   last_sync_at?: string | null;
@@ -231,7 +234,39 @@ export type ValidatorQueues = {
   validated_count: number;
   score_buckets: Record<string, number>;
   protocol_counts: Record<string, number>;
+  family_counts?: Record<string, number>;
+  latency_buckets?: Record<string, number>;
+  region_counts?: { region: string; count: number }[];
+  avg_latency_ms?: number;
   fail_top_sources: { name: string; fails: number }[];
+  source_stats?: {
+    name: string;
+    ok: number;
+    fail: number;
+    success_rate: number;
+    avg_latency_ms: number;
+    auto_disabled: boolean;
+  }[];
+  last_batch_ok?: number;
+  last_batch_fail?: number;
+  last_batch_raw?: number;
+  last_batch_recheck?: number;
+  last_batch_at?: string | null;
+  last_batch_ms?: number;
+  running?: boolean;
+  batch_size?: number;
+  batch_done?: number;
+  lifetime_ok?: number;
+  lifetime_fail?: number;
+  lifetime_batches?: number;
+  history?: {
+    ok: number;
+    fail: number;
+    raw: number;
+    recheck: number;
+    duration_ms: number;
+    at: string;
+  }[];
 };
 
 export type TrafficSnapshot = {
@@ -273,6 +308,8 @@ export type Overview = {
   lan_ips?: string[];
   panel_hint?: string;
   traffic?: TrafficSnapshot;
+  channel_bans?: number;
+  channel_count?: number;
 };
 
 export type DirectProxyStatus = {
@@ -325,4 +362,82 @@ export type ChainOptions = {
   allowed_cidrs?: string[];
   rate_limit_bps?: number;
   max_parallel_dial?: number;
+};
+
+/** 渠道 = 请求的目标站点。某个 IP 只在某个渠道上被临时禁用，其它渠道照常使用。 */
+export type Channel = {
+  name: string;
+  ok: number;
+  fail: number;
+  timeout: number;
+  fail_rate: number;
+  bans: number;
+  entries: number;
+  last_outcome_at?: string;
+  last_ban_at?: string;
+};
+
+export type ChannelBan = {
+  channel: string;
+  addr: string;
+  reason: string;
+  banned_at: string;
+  until: string;
+  strikes: number;
+  ttl_sec: number;
+  pending?: boolean;
+};
+
+export type ChannelLog = {
+  at: string;
+  channel: string;
+  addr: string;
+  ok: boolean;
+  status?: number;
+  err?: string;
+  latency_ms?: number;
+  reported?: boolean;
+  banned?: boolean;
+  reason?: string;
+};
+
+export type ChannelAllow = {
+  channel: string;
+  addr: string;
+  reason: string;
+  created_at: string;
+};
+
+export type ChannelRule = {
+  id: string;
+  name: string;
+  channel?: string;
+  kind: string;
+  statuses?: number[];
+  threshold?: number;
+  rate?: number;
+  min_samples?: number;
+  match?: string;
+  ttl_sec?: number;
+  enabled: boolean;
+  created_at?: string;
+};
+
+export type ChannelPolicyConfig = {
+  enabled?: boolean;
+  key_mode?: string;
+  window_sec?: number;
+  consecutive_fails?: number;
+  fail_rate?: number;
+  min_samples?: number;
+  timeout_fails?: number;
+  ban_statuses?: number[];
+  ban_ttl_sec?: number;
+  ban_ttl_max_sec?: number;
+  max_channels?: number;
+  max_entries_per_chan?: number;
+  pick_strategy?: string;
+  cooldown_sec?: number;
+  log_retain_hours?: number;
+  reprobe_on_expiry?: boolean;
 };

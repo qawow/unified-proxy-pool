@@ -39,6 +39,7 @@ type Subscription struct {
 	Name            string     `json:"name"`
 	URL             string     `json:"url"`
 	HeadersJSON     string     `json:"headers_json"`
+	FetchProxy      string     `json:"fetch_proxy"`
 	Enabled         bool       `json:"enabled"`
 	SyncIntervalSec int        `json:"sync_interval_sec"`
 	LastSyncAt      *time.Time `json:"last_sync_at"`
@@ -107,6 +108,7 @@ type ProxyPool struct {
 	StrategyAdvancedJSON string    `json:"strategy_advanced_json"`
 	FailoverEnabled     bool       `json:"failover_enabled"`
 	Enabled             bool       `json:"enabled"`
+	Channel             string     `json:"channel,omitempty"` // bound dest channel; empty = no filter
 	LastPublishedAt     *time.Time `json:"last_published_at"`
 	LastPublishStatus   string     `json:"last_publish_status"`
 	LastError           string     `json:"last_error"`

@@ -20,10 +20,14 @@
 | GET | `/api/public/health` | 同上 |
 | GET | `/api/public/get` | 纯文本 `host:port`（兼容 proxy_pool） |
 | GET | `/api/public/get?format=json&proto=&region=&family=` | JSON；可筛协议/地区/IP 家族 |
+| GET | `/api/public/get?count=10` | 一次取多条，纯文本每行一条；JSON 下为 `items` 数组 |
+| GET | `/api/public/get?channel=taobao.com` | 按渠道取；该渠道封禁中的 IP 不会返回（见「渠道封禁」） |
+| GET | `/api/public/get?target=https://item.taobao.com/x` | 同上，但由池子自己从 URL 推导渠道名 |
 | GET | `/api/public/proxies/random?proto=&region=&family=` | 随机可用代理 JSON |
 | GET | `/api/public/proxies/count` | `{ total, validated, raw, count }` |
 | GET | `/api/public/count` | 同 count |
-| POST | `/api/public/report` | Body `{ "addr", "ok", "latency_ms?" }` 质量反馈 |
+| POST | `/api/public/report` | Body `{ "addr", "ok", "latency_ms?" }` 质量反馈（全局评分） |
+| POST | `/api/public/channels/report` | 按渠道回传结果，触发该渠道的临时封禁（见下） |
 | POST | `/api/public/submit` | 纯文本，每行一条 `host:port`，批量入池（见下） |
 | GET | `/metrics` | Prometheus 文本指标 |
 
@@ -41,6 +45,8 @@ printf '1.2.3.4:8080\nsocks5://5.6.7.8:1080\n' \
 ```
 
 `/api/public/submit` 免鉴权是给内网脚本用的（512KB 上限）。要鉴权版本和批量验活，用下面的 `/api/proxies/submit`。
+
+`/api/public/channels/report` 同样免鉴权、同样只应开在内网：能访问它的人可以把任意 IP 在任意渠道上禁掉。
 
 ---
 
@@ -213,6 +219,111 @@ IPv6 地址在 `addr` 中始终带方括号，如 `[2001:db8::1]:1080`。
 | DELETE | `/api/blacklist?host=` | 移除 |
 
 拉黑后 `Pick` / public get 会跳过。
+
+黑名单是**全局、手动、不过期**的硬禁用。下面的渠道封禁是**按目标站点、自动、会过期**的软禁用，两者独立生效。
+
+---
+
+## 渠道封禁
+
+「渠道」= 请求的目标站点。同一个代理 IP 在淘宝被限流，不代表在亚马逊也不能用；渠道封禁就是只在出问题的那个站点上把它临时撤下，到期自动恢复。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/channels/report` | 回传结果（鉴权版） |
+| POST | `/api/public/channels/report` | 同上，免鉴权，仅限内网 |
+| GET | `/api/channels?q=&only_banned=1` | 渠道汇总，问题最多的排前面 |
+| GET | `/api/channels/logs?channel=&limit=` | 最近请求日志（内存环，重启清空） |
+| POST | `/api/channels/logs/clear` | 清空请求日志（不影响封禁） |
+| GET | `/api/channels/{name}/bans` | 该渠道当前封禁明细 |
+| GET | `/api/channels/{name}/logs` | 同上，路径里带渠道名 |
+| GET | `/api/channels/allowlist` | 自动封禁白名单 |
+| POST | `/api/channels/allowlist` | `{"channel?","addr","reason?"}`；`channel` 空 = 全局保护 |
+| DELETE | `/api/channels/allowlist?addr=&channel=` | 移出白名单 |
+| DELETE | `/api/channels/{name}/bans?addr=` | 手动解封一个 IP |
+| POST | `/api/channels/{name}/reset` | 清空该渠道的封禁与计数 |
+| DELETE | `/api/channels/{name}` | 删除渠道档案（下次有请求会重新建档） |
+
+### 为什么需要你回传
+
+HTTPS 走 CONNECT 隧道，代理池只能看到「连上了没有」，看不到隧道里的 403、429 或验证码页面。所以：
+
+- **明文 HTTP**：池子自己能读到状态码，403 / 429 会自动记账并封禁，不需要你做任何事。
+- **HTTPS**：只有读到响应的那一方知道结果，必须回传。这不是偷懒，是隧道的物理限制。
+
+```bash
+# 单条
+curl -X POST http://172.18.49.135:7891/api/public/channels/report \
+  -H 'Content-Type: application/json' \
+  -d '{"channel":"taobao.com","addr":"1.2.3.4:8080","ok":false,"status":403}'
+
+# 不想自己算渠道名，就把目标 URL 丢过来
+curl -X POST http://172.18.49.135:7891/api/public/channels/report \
+  -H 'Content-Type: application/json' \
+  -d '{"target":"https://item.taobao.com/item.htm?id=1","addr":"1.2.3.4:8080","ok":false,"status":429}'
+
+# 批量（单次最多 500 条）
+curl -X POST http://172.18.49.135:7891/api/public/channels/report \
+  -H 'Content-Type: application/json' \
+  -d '{"items":[
+        {"channel":"taobao.com","addr":"1.2.3.4:8080","ok":false,"status":403},
+        {"channel":"taobao.com","addr":"5.6.7.8:8080","ok":true,"latency_ms":320}
+      ]}'
+```
+
+字段：`channel` 或 `target` 二选一；`addr`（或 `proxy`）必填；`ok` 省略时按 `status` 判断（<400 视为成功）；`status`、`err`、`latency_ms` 可选。
+
+返回 `{"accepted":N,"rejected":M,"banned":[...]}`，`banned` 里是这次触发的封禁。
+
+### 取代理时带上渠道
+
+```bash
+# 该渠道封禁中的 IP 不会返回
+curl 'http://172.18.49.135:7891/api/public/get?channel=taobao.com'
+# 一次取 10 条做轮换
+curl 'http://172.18.49.135:7891/api/public/get?channel=taobao.com&count=10'
+```
+
+**兜底行为**：如果一个渠道把所有能用的代理都禁了，池子不会返回空，而是忽略封禁给你一个，并在 JSON 里带 `"relaxed": true`。给个可能被限流的代理，总比给个 502 好；`relaxed` 就是告诉你这次是兜底。
+
+### 封禁规则
+
+任一条命中即封。阈值填 0 表示关掉这条规则。
+
+| 规则 | 默认 | 含义 |
+|------|------|------|
+| `ban_statuses` | `[403,429]` | 命中这些状态码立即封 |
+| `consecutive_fails` | 3 | 连续失败次数 |
+| `fail_rate` + `min_samples` | 0.6 / 5 | 窗口内失败率超标（样本够了才算） |
+| `timeout_fails` | 5 | 窗口内超时次数 |
+| `window_sec` | 300 | 统计窗口（滑动） |
+| `ban_ttl_sec` | 60 | 首次封禁时长 |
+| `ban_ttl_max_sec` | 1800 | 反复触发时翻倍的上限 |
+| `key_mode` | `etld1` | 渠道粒度：`etld1` 合并子域 / `host` 按完整域名 / `off` 不分渠道 |
+
+反复触发会指数退避（60s → 120s → 240s …），封到 `ban_ttl_max_sec` 为止。
+
+面板在「渠道封禁」页，阈值在「系统设置 → 渠道策略与选路」，改完即时生效。
+
+### 选路策略
+
+同一处配置里还有取代理的策略：
+
+- `weighted`（默认）按评分、延迟、失败次数加权随机。差的代理概率低但不会永远取不到——不然它永远没机会证明自己恢复了。
+- `random` 等概率随机。
+- `rr` 按渠道各自轮转，渠道之间互不干扰。
+- `cooldown_sec`（默认 30）刚发出去的代理短时间内降权，避免所有请求挤在同一个 IP 上。
+
+### 重启与持久化
+
+封禁记录存在 SQLite 里，重启会恢复还没到期的部分（已过期的直接丢掉）。滑动窗口的计数**不持久化**——重启后重新观察，不拿几小时前的旧证据去封人。
+
+指标只给聚合值，渠道名会导致标签基数爆炸：
+
+```
+upp_channels_total 12
+upp_channel_bans_active 3
+```
 
 ---
 
@@ -401,13 +512,13 @@ curl -sS -X POST 'http://127.0.0.1:7891/api/ai-proxy?source=gpt' \
   "url": "https://api.deepseek.com/chat/completions",
   "apikey": "sk-...",
   "model": "deepseek-chat",
-  "level": 6,
+  "effort": "high",
   "prompt_key": "proxy_extract",
   "content": "粘贴的网页内容或搜索关键词"
 }
 ```
 
-- `level`：0–10 思考深度，影响采样温度与输出 token 上限（越大越深入）。
+- `effort`：思考等级，各家通用的 `off` / `low` / `medium` / `high` / `max`。会写入请求的 `reasoning_effort`（`off` 不带该字段）。旧的数字 `level` 0–10 仍接受并映射过来。
 - `prompt_key`：使用的提示词模板；`prompt` 传非空时直接覆盖 system 提示词。
 - `content` 为空时，模型按提示词自主生成候选（用于 `proxy_ai_generate` 等模板）。
 
@@ -602,6 +713,7 @@ curl -x http://172.18.49.135:7893 https://httpbin.org/ip   # 链式
 
 - `dashboard_cards`: `{ "available": true, "chain": true, … }`
 - `chain`: 同上链式对象
+- `channels`: 渠道封禁与选路策略，见「渠道封禁」
 - `direct_sticky_enabled`, `webhook_url`, `alert_validated_min`, `allowed_cidrs`, …
 - `free_validate_urls`: 多校验 URL 数组
 

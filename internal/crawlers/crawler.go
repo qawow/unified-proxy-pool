@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+
+	"unified-proxy-pool/internal/netutil"
 )
 
 type Proxy struct {
@@ -156,10 +158,16 @@ func NewHTTPClient(timeout time.Duration) *HTTPClient {
 		client: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
-				TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-				MaxIdleConns:        32,
-				IdleConnTimeout:     30 * time.Second,
-				TLSHandshakeTimeout: 8 * time.Second,
+				Proxy: http.ProxyFromEnvironment,
+				DialContext: (&net.Dialer{
+					Timeout: 4 * time.Second,
+				}).DialContext,
+				TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+				MaxIdleConns:          32,
+				IdleConnTimeout:       30 * time.Second,
+				TLSHandshakeTimeout:   5 * time.Second,
+				ResponseHeaderTimeout: 6 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
 			},
 		},
 	}
@@ -170,8 +178,7 @@ func (h *HTTPClient) Get(ctx context.Context, rawURL string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; UnifiedProxyPool/1.0)")
-	req.Header.Set("Accept", "text/html,application/json,text/plain,*/*")
+	netutil.ApplyDefaultHeaders(req.Header)
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, err
@@ -192,7 +199,9 @@ func FetchAll(ctx context.Context, client *HTTPClient, c Crawler) ([]Proxy, erro
 	out := make([]Proxy, 0, 64)
 	var lastErr error
 	for _, u := range c.URLs() {
-		body, err := client.Get(ctx, u)
+		uCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		body, err := client.Get(uCtx, u)
+		cancel()
 		if err != nil {
 			lastErr = err
 			continue
@@ -202,6 +211,7 @@ func FetchAll(ctx context.Context, client *HTTPClient, c Crawler) ([]Proxy, erro
 			lastErr = err
 			continue
 		}
+		got := 0
 		for _, item := range items {
 			if item.Protocol == "" {
 				item.Protocol = c.Protocol()
@@ -212,6 +222,12 @@ func FetchAll(ctx context.Context, client *HTTPClient, c Crawler) ([]Proxy, erro
 			}
 			seen[key] = struct{}{}
 			out = append(out, item)
+			got++
+		}
+		// Fallback URLs are mirrors of the same list: stop after the first
+		// that actually yields proxies so a dead ghproxy does not block jsDelivr.
+		if got > 0 {
+			return out, nil
 		}
 	}
 	if len(out) == 0 && lastErr != nil {

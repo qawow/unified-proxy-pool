@@ -1,39 +1,63 @@
 package crawlers
 
+import "strings"
+
+// githubRawMirrors returns the same GitHub file via several CDNs. FetchAll
+// stops at the first URL that yields proxies, so a dead ghproxy does not
+// take the whole source down.
+//
+// path is "owner/repo/branch/file..." as on raw.githubusercontent.com.
+func githubRawMirrors(path string) []string {
+	path = strings.TrimPrefix(path, "/")
+	raw := "https://raw.githubusercontent.com/" + path
+	js := jsdelivrFromGitHubPath(path)
+	return []string{
+		"https://ghproxy.net/https://raw.githubusercontent.com/" + path,
+		raw,
+		js,
+	}
+}
+
+func jsdelivrFromGitHubPath(path string) string {
+	parts := strings.SplitN(path, "/", 4)
+	if len(parts) < 4 {
+		return "https://cdn.jsdelivr.net/gh/" + path
+	}
+	return "https://cdn.jsdelivr.net/gh/" + parts[0] + "/" + parts[1] + "@" + parts[2] + "/" + parts[3]
+}
+
 // DefaultSources returns the unified, de-duplicated crawler set ported from
 // jhao104/proxy_pool, Python3WebSpider/ProxyPool, scylla and haipproxy.
 func DefaultSources() []Crawler {
-	gh := func(path string) string {
-		return "https://gh.awa91.cyou/https://raw.githubusercontent.com/" + path
-	}
+	gh := githubRawMirrors
 
 	list := []Crawler{
 		// ---- reliable plain text / raw lists (default enabled) ----
-		PlainText("thespeedx-http", []string{gh("TheSpeedX/SOCKS-List/master/http.txt")}, "http", false, true),
-		PlainText("thespeedx-socks4", []string{gh("TheSpeedX/SOCKS-List/master/socks4.txt")}, "socks4", false, true),
-		PlainText("thespeedx-socks5", []string{gh("TheSpeedX/SOCKS-List/master/socks5.txt")}, "socks5", false, true),
-		PlainText("a2u-free-proxy-list", []string{gh("a2u/free-proxy-list/master/free-proxy-list.txt")}, "http", false, true),
-		PlainText("clarketm-proxy-list", []string{gh("clarketm/proxy-list/master/proxy-list.txt")}, "http", false, true),
-		PlainText("sunny9577-proxy-scraper", []string{gh("sunny9577/proxy-scraper/master/proxies.txt")}, "http", false, true),
-		PlainText("jetkai-http", []string{gh("jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt")}, "http", false, true),
-		PlainText("jetkai-socks4", []string{gh("jetkai/proxy-list/main/online-proxies/txt/proxies-socks4.txt")}, "socks4", false, true),
-		PlainText("jetkai-socks5", []string{gh("jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt")}, "socks5", false, true),
-		PlainText("monosans-http", []string{gh("monosans/proxy-list/main/proxies/http.txt")}, "http", false, true),
-		PlainText("monosans-socks4", []string{gh("monosans/proxy-list/main/proxies/socks4.txt")}, "socks4", false, true),
-		PlainText("monosans-socks5", []string{gh("monosans/proxy-list/main/proxies/socks5.txt")}, "socks5", false, true),
+		PlainText("thespeedx-http", gh("TheSpeedX/SOCKS-List/master/http.txt"), "http", false, true),
+		PlainText("thespeedx-socks4", gh("TheSpeedX/SOCKS-List/master/socks4.txt"), "socks4", false, true),
+		PlainText("thespeedx-socks5", gh("TheSpeedX/SOCKS-List/master/socks5.txt"), "socks5", false, true),
+		PlainText("a2u-free-proxy-list", gh("a2u/free-proxy-list/master/free-proxy-list.txt"), "http", false, true),
+		PlainText("clarketm-proxy-list", gh("clarketm/proxy-list/master/proxy-list.txt"), "http", false, true),
+		PlainText("sunny9577-proxy-scraper", gh("sunny9577/proxy-scraper/master/proxies.txt"), "http", false, true),
+		PlainText("jetkai-http", gh("jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt"), "http", false, true),
+		PlainText("jetkai-socks4", gh("jetkai/proxy-list/main/online-proxies/txt/proxies-socks4.txt"), "socks4", false, true),
+		PlainText("jetkai-socks5", gh("jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt"), "socks5", false, true),
+		PlainText("monosans-http", gh("monosans/proxy-list/main/proxies/http.txt"), "http", false, true),
+		PlainText("monosans-socks4", gh("monosans/proxy-list/main/proxies/socks4.txt"), "socks4", false, true),
+		PlainText("monosans-socks5", gh("monosans/proxy-list/main/proxies/socks5.txt"), "socks5", false, true),
 		// mmpx12/proxy-list was removed and every URL now 404s. Left disabled
 		// rather than deleted so the name is not silently reused: the GitHub API
 		// returned 404 for this repo on 2026-08-06 while monosans/proxy-list,
 		// TheSpeedX/PROXY-List and vakhov/fresh-proxy-list all returned 200
 		// through the same call, so it is the repo that is gone, not the network.
-		PlainText("mmpx12-http", []string{gh("mmpx12/proxy-list/master/http.txt")}, "http", true, false),
-		PlainText("mmpx12-socks4", []string{gh("mmpx12/proxy-list/master/socks4.txt")}, "socks4", true, false),
-		PlainText("mmpx12-socks5", []string{gh("mmpx12/proxy-list/master/socks5.txt")}, "socks5", true, false),
-		PlainText("roosterkid-http", []string{gh("roosterkid/openproxylist/main/HTTPS_RAW.txt")}, "http", false, true),
-		PlainText("roosterkid-socks4", []string{gh("roosterkid/openproxylist/main/SOCKS4_RAW.txt")}, "socks4", false, true),
-		PlainText("roosterkid-socks5", []string{gh("roosterkid/openproxylist/main/SOCKS5_RAW.txt")}, "socks5", false, true),
-		PlainText("hookzof-socks5", []string{gh("hookzof/socks5_list/master/proxy.txt")}, "socks5", false, true),
-		PlainText("proxifly-all", []string{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.txt"}, "http", false, true),
+		PlainText("mmpx12-http", gh("mmpx12/proxy-list/master/http.txt"), "http", true, false),
+		PlainText("mmpx12-socks4", gh("mmpx12/proxy-list/master/socks4.txt"), "socks4", true, false),
+		PlainText("mmpx12-socks5", gh("mmpx12/proxy-list/master/socks5.txt"), "socks5", true, false),
+		PlainText("roosterkid-http", gh("roosterkid/openproxylist/main/HTTPS_RAW.txt"), "http", false, true),
+		PlainText("roosterkid-socks4", gh("roosterkid/openproxylist/main/SOCKS4_RAW.txt"), "socks4", false, true),
+		PlainText("roosterkid-socks5", gh("roosterkid/openproxylist/main/SOCKS5_RAW.txt"), "socks5", false, true),
+		PlainText("hookzof-socks5", gh("hookzof/socks5_list/master/proxy.txt"), "socks5", false, true),
+		PlainText("proxifly-all", gh("proxifly/free-proxy-list/main/proxies/all/data.txt"), "http", false, true),
 		PlainText("rmccurdy", []string{"https://www.rmccurdy.com/scripts/proxy/good.txt"}, "http", true, false),
 		PlainText("rudnkh", []string{"https://proxy.rudnkh.me/txt"}, "http", true, false),
 		PlainText("pubproxy", []string{"http://pubproxy.com/api/proxy?limit=20&format=txt&type=http"}, "http", true, false),
@@ -47,46 +71,46 @@ func DefaultSources() []Crawler {
 		PlainText("openproxylist-socks5", []string{"https://api.openproxylist.xyz/socks5.txt"}, "socks5", false, true),
 		// ErcinDedeoglu: 45828 http / 18946 socks5. Very large, so left on —
 		// AddRaw dedupes and Trim caps the pool at MaxRawProxies.
-		PlainText("ercin-http", []string{gh("ErcinDedeoglu/proxies/main/proxies/http.txt")}, "http", false, true),
-		PlainText("ercin-socks4", []string{gh("ErcinDedeoglu/proxies/main/proxies/socks4.txt")}, "socks4", false, true),
-		PlainText("ercin-socks5", []string{gh("ErcinDedeoglu/proxies/main/proxies/socks5.txt")}, "socks5", false, true),
+		PlainText("ercin-http", gh("ErcinDedeoglu/proxies/main/proxies/http.txt"), "http", false, true),
+		PlainText("ercin-socks4", gh("ErcinDedeoglu/proxies/main/proxies/socks4.txt"), "socks4", false, true),
+		PlainText("ercin-socks5", gh("ErcinDedeoglu/proxies/main/proxies/socks5.txt"), "socks5", false, true),
 		// proxyspace: 2872 http / 1566 socks5.
 		PlainText("proxyspace-http", []string{"https://proxyspace.pro/http.txt"}, "http", false, true),
 		PlainText("proxyspace-socks4", []string{"https://proxyspace.pro/socks4.txt"}, "socks4", false, true),
 		PlainText("proxyspace-socks5", []string{"https://proxyspace.pro/socks5.txt"}, "socks5", false, true),
 		// Anonym0usWork1221: 3250 http / 315 socks5.
-		PlainText("anonymouswork-http", []string{gh("Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt")}, "http", false, true),
-		PlainText("anonymouswork-socks4", []string{gh("Anonym0usWork1221/Free-Proxies/main/proxy_files/socks4_proxies.txt")}, "socks4", false, true),
-		PlainText("anonymouswork-socks5", []string{gh("Anonym0usWork1221/Free-Proxies/main/proxy_files/socks5_proxies.txt")}, "socks5", false, true),
+		PlainText("anonymouswork-http", gh("Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt"), "http", false, true),
+		PlainText("anonymouswork-socks4", gh("Anonym0usWork1221/Free-Proxies/main/proxy_files/socks4_proxies.txt"), "socks4", false, true),
+		PlainText("anonymouswork-socks5", gh("Anonym0usWork1221/Free-Proxies/main/proxy_files/socks5_proxies.txt"), "socks5", false, true),
 		// vakhov: 524 http / 21 socks5 — small but refreshed often.
-		PlainText("vakhov-http", []string{gh("vakhov/fresh-proxy-list/master/http.txt")}, "http", false, true),
-		PlainText("vakhov-socks4", []string{gh("vakhov/fresh-proxy-list/master/socks4.txt")}, "socks4", false, true),
-		PlainText("vakhov-socks5", []string{gh("vakhov/fresh-proxy-list/master/socks5.txt")}, "socks5", false, true),
+		PlainText("vakhov-http", gh("vakhov/fresh-proxy-list/master/http.txt"), "http", false, true),
+		PlainText("vakhov-socks4", gh("vakhov/fresh-proxy-list/master/socks4.txt"), "socks4", false, true),
+		PlainText("vakhov-socks5", gh("vakhov/fresh-proxy-list/master/socks5.txt"), "socks5", false, true),
 		// zloi-user/hideip.me: 55 http / 219 socks5.
-		PlainText("hideip-http", []string{gh("zloi-user/hideip.me/main/http.txt")}, "http", false, true),
-		PlainText("hideip-socks4", []string{gh("zloi-user/hideip.me/main/socks4.txt")}, "socks4", false, true),
-		PlainText("hideip-socks5", []string{gh("zloi-user/hideip.me/main/socks5.txt")}, "socks5", false, true),
+		PlainText("hideip-http", gh("zloi-user/hideip.me/main/http.txt"), "http", false, true),
+		PlainText("hideip-socks4", gh("zloi-user/hideip.me/main/socks4.txt"), "socks4", false, true),
+		PlainText("hideip-socks5", gh("zloi-user/hideip.me/main/socks5.txt"), "socks5", false, true),
 		// Protocol-split proxifly lists: 576 http / 124 socks5. More precise than
 		// the combined all/data.txt, which labels everything http.
-		PlainText("proxifly-http", []string{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"}, "http", false, true),
-		PlainText("proxifly-socks4", []string{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt"}, "socks4", false, true),
-		PlainText("proxifly-socks5", []string{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt"}, "socks5", false, true),
+		PlainText("proxifly-http", gh("proxifly/free-proxy-list/main/proxies/protocols/http/data.txt"), "http", false, true),
+		PlainText("proxifly-socks4", gh("proxifly/free-proxy-list/main/proxies/protocols/socks4/data.txt"), "socks4", false, true),
+		PlainText("proxifly-socks5", gh("proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt"), "socks5", false, true),
 		// Pre-checked lists: smaller (243 http / 124 socks5) but higher hit rate.
-		PlainText("elliottophellia-http", []string{gh("elliottophellia/proxylist/master/results/http/global/http_checked.txt")}, "http", false, true),
-		PlainText("elliottophellia-socks5", []string{gh("elliottophellia/proxylist/master/results/socks5/global/socks5_checked.txt")}, "socks5", false, true),
+		PlainText("elliottophellia-http", gh("elliottophellia/proxylist/master/results/http/global/http_checked.txt"), "http", false, true),
+		PlainText("elliottophellia-socks5", gh("elliottophellia/proxylist/master/results/socks5/global/socks5_checked.txt"), "socks5", false, true),
 		// zaeem20: 123 http / 112 socks5.
-		PlainText("zaeem20-http", []string{gh("zaeem20/FREE_PROXIES_LIST/master/http.txt")}, "http", false, true),
-		PlainText("zaeem20-socks4", []string{gh("zaeem20/FREE_PROXIES_LIST/master/socks4.txt")}, "socks4", false, true),
-		PlainText("zaeem20-socks5", []string{gh("zaeem20/FREE_PROXIES_LIST/master/socks5.txt")}, "socks5", false, true),
+		PlainText("zaeem20-http", gh("zaeem20/FREE_PROXIES_LIST/master/http.txt"), "http", false, true),
+		PlainText("zaeem20-socks4", gh("zaeem20/FREE_PROXIES_LIST/master/socks4.txt"), "socks4", false, true),
+		PlainText("zaeem20-socks5", gh("zaeem20/FREE_PROXIES_LIST/master/socks5.txt"), "socks5", false, true),
 		// TuanMinPay: 3315 socks5.
-		PlainText("tuanminpay-socks5", []string{gh("TuanMinPay/live-proxy/master/socks5.txt")}, "socks5", false, true),
-		PlainText("tuanminpay-http", []string{gh("TuanMinPay/live-proxy/master/http.txt")}, "http", false, true),
+		PlainText("tuanminpay-socks5", gh("TuanMinPay/live-proxy/master/socks5.txt"), "socks5", false, true),
+		PlainText("tuanminpay-http", gh("TuanMinPay/live-proxy/master/http.txt"), "http", false, true),
 		// hendrikbgr: 684 http.
-		PlainText("hendrikbgr-http", []string{gh("hendrikbgr/Free-Proxy-Repo/master/proxy_list.txt")}, "http", false, true),
+		PlainText("hendrikbgr-http", gh("hendrikbgr/Free-Proxy-Repo/master/proxy_list.txt"), "http", false, true),
 		// casals-ar: 68781 matches / 9MB. Off by default — one round would fill
 		// MaxRawProxies on its own and crowd out every other source.
-		PlainText("casals-http", []string{gh("casals-ar/proxy-list/main/http")}, "http", false, false),
-		PlainText("casals-socks5", []string{gh("casals-ar/proxy-list/main/socks5")}, "socks5", false, false),
+		PlainText("casals-http", gh("casals-ar/proxy-list/main/http"), "http", false, false),
+		PlainText("casals-socks5", gh("casals-ar/proxy-list/main/socks5"), "socks5", false, false),
 
 		// ---- found by `go run ./cmd/discover` on 2026-08-06 ----
 		// Two numbers per source: total yield, and how much it adds that no
@@ -101,21 +125,21 @@ func DefaultSources() []Crawler {
 		// then Trim evicts other sources' proxies on score ties — everything
 		// enters at ScoreInit, so ties are the normal case. Enable it only if you
 		// raise MaxRawProxies to match.
-		PlainText("solispirit-http", []string{gh("SoliSpirit/proxy-list/main/http.txt")}, "http", false, false),
-		PlainText("solispirit-socks5", []string{gh("SoliSpirit/proxy-list/main/socks5.txt")}, "socks5", false, false),
+		PlainText("solispirit-http", gh("SoliSpirit/proxy-list/main/http.txt"), "http", false, false),
+		PlainText("solispirit-socks5", gh("SoliSpirit/proxy-list/main/socks5.txt"), "socks5", false, false),
 		// B4RC0DE-TM: 3185 http (2936 adds), 1004 socks4 (343), 257 socks5 (92).
-		PlainText("b4rc0de-http", []string{gh("B4RC0DE-TM/proxy-list/main/HTTP.txt")}, "http", false, true),
-		PlainText("b4rc0de-socks4", []string{gh("B4RC0DE-TM/proxy-list/main/SOCKS4.txt")}, "socks4", false, true),
-		PlainText("b4rc0de-socks5", []string{gh("B4RC0DE-TM/proxy-list/main/SOCKS5.txt")}, "socks5", false, true),
+		PlainText("b4rc0de-http", gh("B4RC0DE-TM/proxy-list/main/HTTP.txt"), "http", false, true),
+		PlainText("b4rc0de-socks4", gh("B4RC0DE-TM/proxy-list/main/SOCKS4.txt"), "socks4", false, true),
+		PlainText("b4rc0de-socks5", gh("B4RC0DE-TM/proxy-list/main/SOCKS5.txt"), "socks5", false, true),
 		// rdavydov: 554 http (373 adds), 630 socks4 (172), 247 socks5 (85).
-		PlainText("rdavydov-http", []string{gh("rdavydov/proxy-list/main/proxies/http.txt")}, "http", false, true),
-		PlainText("rdavydov-socks4", []string{gh("rdavydov/proxy-list/main/proxies/socks4.txt")}, "socks4", false, true),
-		PlainText("rdavydov-socks5", []string{gh("rdavydov/proxy-list/main/proxies/socks5.txt")}, "socks5", false, true),
+		PlainText("rdavydov-http", gh("rdavydov/proxy-list/main/proxies/http.txt"), "http", false, true),
+		PlainText("rdavydov-socks4", gh("rdavydov/proxy-list/main/proxies/socks4.txt"), "socks4", false, true),
+		PlainText("rdavydov-socks5", gh("rdavydov/proxy-list/main/proxies/socks5.txt"), "socks5", false, true),
 		// im-razvan: 268 http (87 adds).
-		PlainText("im-razvan-http", []string{gh("im-razvan/proxy_list/main/http.txt")}, "http", false, true),
+		PlainText("im-razvan-http", gh("im-razvan/proxy_list/main/http.txt"), "http", false, true),
 		// prxchk: small (58 http / 32 socks4) but refreshed frequently.
-		PlainText("prxchk-http", []string{gh("prxchk/proxy-list/main/http.txt")}, "http", false, true),
-		PlainText("prxchk-socks4", []string{gh("prxchk/proxy-list/main/socks4.txt")}, "socks4", false, true),
+		PlainText("prxchk-http", gh("prxchk/proxy-list/main/http.txt"), "http", false, true),
+		PlainText("prxchk-socks4", gh("prxchk/proxy-list/main/socks4.txt"), "socks4", false, true),
 
 		// ---- JSON / API style (jhao / webspider) ----
 		//
@@ -125,7 +149,7 @@ func DefaultSources() []Crawler {
 		// 194KB and monosans 363KB for zero extracted proxies each. All three
 		// were default-enabled, so the pool was paying for the fetch and
 		// silently discarding every result.
-		JSONSource("docip", []string{"https://www.docip.net/data/free.json"}, "http", true, true),
+		JSONSource("docip", []string{"https://www.docip.net/data/free.json"}, "http", true, false),
 		JSONSource("geonode", []string{
 			"https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc",
 			"https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc",
@@ -134,13 +158,11 @@ func DefaultSources() []Crawler {
 			"https://roundproxies.com/api/get-free-proxies/?limit=100&page=1&sort_by=lastChecked&sort_type=desc",
 		}, "http", true, false),
 		JSONSource("scdn", []string{"https://proxy.scdn.io/get_proxies.php?protocol=http&count=100"}, "http", true, false),
-		JSONSource("fatezero", []string{"http://proxylist.fatezero.org/proxy.list"}, "http", true, true),
-		JSONSource("proxifly-json", []string{
-			"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/all/data.json",
-		}, "http", false, true),
-		JSONSource("sunny9577-json", []string{gh("sunny9577/proxy-scraper/master/proxies.json")}, "http", false, true),
+		JSONSource("fatezero", []string{"http://proxylist.fatezero.org/proxy.list"}, "http", true, false),
+		JSONSource("proxifly-json", gh("proxifly/free-proxy-list/main/proxies/all/data.json"), "http", false, true),
+		JSONSource("sunny9577-json", gh("sunny9577/proxy-scraper/master/proxies.json"), "http", false, true),
 		// Carries its own per-entry protocol, so one URL covers http/socks4/socks5.
-		JSONSource("monosans-json", []string{gh("monosans/proxy-list/main/proxies.json")}, "http", false, true),
+		JSONSource("monosans-json", gh("monosans/proxy-list/main/proxies.json"), "http", false, true),
 
 		// ---- HTML table sites (fragile, default off except a few) ----
 		HTMLTable("kuaidaili", []string{
@@ -157,9 +179,9 @@ func DefaultSources() []Crawler {
 			"http://www.kxdaili.com/dailiip/2/1.html",
 		}, 0, 1, true, false),
 		HTMLTable("xicidaili", []string{"http://www.xicidaili.com/nn"}, 1, 2, true, false),
-		HTMLTable("free-proxy-list", []string{"https://free-proxy-list.net/"}, 0, 1, true, true),
-		HTMLTable("sslproxies", []string{"https://www.sslproxies.org/"}, 0, 1, true, true),
-		HTMLTable("us-proxy", []string{"https://www.us-proxy.org/"}, 0, 1, true, true),
+		HTMLTable("free-proxy-list", []string{"https://free-proxy-list.net/"}, 0, 1, true, false),
+		HTMLTable("sslproxies", []string{"https://www.sslproxies.org/"}, 0, 1, true, false),
+		HTMLTable("us-proxy", []string{"https://www.us-proxy.org/"}, 0, 1, true, false),
 		HTMLTable("socks-proxy", []string{"https://www.socks-proxy.net/"}, 0, 1, true, false),
 		HTMLTable("ipaddress", []string{"https://www.ipaddress.com/proxy-list/"}, 0, 1, true, false),
 		HTMLTable("proxynova", []string{"https://www.proxynova.com/proxy-server-list/"}, 0, 1, true, false),
