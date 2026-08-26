@@ -44,8 +44,25 @@ func SanitizeProxyMap(payload map[string]any) error {
 	}
 	trimQueryJunk(payload)
 	coerceALPN(payload)
-	coerceBoolFields(payload)
+	coerceBoolFieldsRecursive(payload)
+	dropNonMapOpts(payload)
+	sanitizeEnumField(payload, "network", networks)
+	sanitizeEnumField(payload, "client-fingerprint", fingerprints)
+	sanitizeEnumField(payload, "packet-encoding", packetEncodings)
+
 	typ := strings.ToLower(strings.TrimSpace(fmt.Sprint(payload["type"])))
+	if typ == "" || typ == "<nil>" {
+		return fmt.Errorf("missing type")
+	}
+	if _, ok := knownProxyTypes[typ]; !ok {
+		return fmt.Errorf("unknown proxy type %q", typ)
+	}
+	payload["type"] = typ
+
+	if err := coercePort(payload); err != nil {
+		return err
+	}
+
 	switch typ {
 	case "ss", "ssr":
 		cipher := printableCipher(payload["cipher"])
@@ -54,12 +71,27 @@ func SanitizeProxyMap(payload map[string]any) error {
 		}
 		payload["cipher"] = cipher
 	case "vless":
+		if err := requireString(payload, "uuid"); err != nil {
+			return err
+		}
 		if err := sanitizeVLESSEncryption(payload); err != nil {
 			return err
 		}
 		sanitizeEnumField(payload, "flow", vlessFlows)
 	case "vmess":
 		if err := sanitizeVMess(payload); err != nil {
+			return err
+		}
+	case "trojan":
+		if err := requireString(payload, "password"); err != nil {
+			return err
+		}
+	case "hysteria2", "hysteria":
+		if err := requireAnyString(payload, "password", "auth", "auth-str"); err != nil {
+			return err
+		}
+	case "tuic":
+		if err := requireString(payload, "uuid"); err != nil {
 			return err
 		}
 	}
@@ -184,9 +216,44 @@ func sanitizeEnumField(payload map[string]any, key string, allowed map[string]st
 // boolKeys are fields mihomo decodes as bool. A string "" / "true" from
 // subscriptions becomes: 'tls' expected type 'bool', got unconvertible type 'string'
 // and aborts the whole YAML (proxy 1045 in production).
+var knownProxyTypes = map[string]struct{}{
+	"ss": {}, "ssr": {}, "vmess": {}, "vless": {}, "trojan": {},
+	"hysteria": {}, "hysteria2": {}, "tuic": {}, "wireguard": {},
+	"ssh": {}, "socks5": {}, "http": {}, "snell": {}, "mieru": {},
+	"anytls": {}, "direct": {}, "dns": {}, "reject": {}, "shadowtls": {},
+}
+
+var networks = map[string]struct{}{
+	"": {}, "tcp": {}, "udp": {}, "ws": {}, "http": {}, "h2": {},
+	"grpc": {}, "httpupgrade": {}, "quic": {},
+}
+
+var fingerprints = map[string]struct{}{
+	"": {}, "chrome": {}, "firefox": {}, "safari": {}, "ios": {},
+	"android": {}, "edge": {}, "360": {}, "qq": {}, "random": {}, "none": {},
+}
+
+var packetEncodings = map[string]struct{}{
+	"": {}, "packetaddr": {}, "xudp": {},
+}
+
+var nestedOptKeys = []string{
+	"ws-opts", "grpc-opts", "http-opts", "h2-opts", "reality-opts",
+	"smux-opts", "smux", "ech-opts", "plugin-opts", "multiplex",
+}
+
 var boolKeys = []string{
 	"tls", "skip-cert-verify", "udp", "tfo", "mptcp",
-	"allow-insecure", "insecure", "http2", "smux",
+	"allow-insecure", "insecure", "http2", "enabled",
+}
+
+func coerceBoolFieldsRecursive(payload map[string]any) {
+	coerceBoolFields(payload)
+	for _, v := range payload {
+		if nested, ok := v.(map[string]any); ok {
+			coerceBoolFieldsRecursive(nested)
+		}
+	}
 }
 
 func coerceBoolFields(payload map[string]any) {
@@ -205,6 +272,50 @@ func coerceBoolFields(payload map[string]any) {
 		}
 		payload[key] = b
 	}
+}
+
+func dropNonMapOpts(payload map[string]any) {
+	for _, key := range nestedOptKeys {
+		raw, ok := payload[key]
+		if !ok || raw == nil {
+			continue
+		}
+		if _, isMap := raw.(map[string]any); !isMap {
+			delete(payload, key)
+		}
+	}
+}
+
+func coercePort(payload map[string]any) error {
+	raw, ok := payload["port"]
+	if !ok || raw == nil {
+		return fmt.Errorf("missing port")
+	}
+	port := coerceInt(raw, 0)
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("invalid port %v", raw)
+	}
+	payload["port"] = port
+	return nil
+}
+
+func requireString(payload map[string]any, key string) error {
+	s := strings.TrimSpace(fmt.Sprint(payload[key]))
+	if s == "" || s == "<nil>" {
+		return fmt.Errorf("missing %s", key)
+	}
+	payload[key] = s
+	return nil
+}
+
+func requireAnyString(payload map[string]any, keys ...string) error {
+	for _, key := range keys {
+		s := strings.TrimSpace(fmt.Sprint(payload[key]))
+		if s != "" && s != "<nil>" {
+			return nil
+		}
+	}
+	return fmt.Errorf("missing %s", strings.Join(keys, "/"))
 }
 
 func parseBoolish(v any) (bool, bool) {

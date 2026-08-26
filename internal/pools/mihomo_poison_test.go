@@ -71,6 +71,33 @@ func TestProbeYAMLNeverContainsMihomoFatals(t *testing.T) {
 			},
 			forbid: []string{`tls: "true"`, `tls: 'true'`},
 		},
+		{
+			name: "vless missing uuid",
+			poison: models.RuntimeNode{
+				SourceType: "subscription", SourceNodeID: 2001, DisplayName: "no-uuid",
+				Protocol: "vless", Server: "203.0.113.51", Port: 443, Enabled: true,
+				NormalizedJSON: `{"type":"vless","server":"203.0.113.51","port":443,"tls":true}`,
+			},
+			forbid: []string{"203.0.113.51"},
+		},
+		{
+			name: "trojan missing password",
+			poison: models.RuntimeNode{
+				SourceType: "subscription", SourceNodeID: 2002, DisplayName: "no-pass",
+				Protocol: "trojan", Server: "203.0.113.52", Port: 443, Enabled: true,
+				NormalizedJSON: `{"type":"trojan","server":"203.0.113.52","port":443}`,
+			},
+			forbid: []string{"203.0.113.52"},
+		},
+		{
+			name: "ws-opts string",
+			poison: models.RuntimeNode{
+				SourceType: "subscription", SourceNodeID: 2003, DisplayName: "bad-ws",
+				Protocol: "vless", Server: "203.0.113.53", Port: 443, Enabled: true,
+				NormalizedJSON: `{"type":"vless","server":"203.0.113.53","port":443,"uuid":"u","ws-opts":"nope"}`,
+			},
+			forbid: []string{"ws-opts: nope", "ws-opts: \"nope\""},
+		},
 	}
 
 	for _, tc := range cases {
