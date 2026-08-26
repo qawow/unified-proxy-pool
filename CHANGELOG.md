@@ -30,6 +30,7 @@
 
 ### 修复
 - **局域网调试接口 + 防护**：`/api/public/*`（取代理、入池、health、`/debug`）默认只允许 RFC1918/环回；公网 403。`X-Forwarded-For` 仅本机反代可信。入池另有每 IP 20 次/秒。设置可加 `allowed_cidrs` 或危险项 `public_open`。调试：`GET /api/public/debug` 看 7892/7893 与 mihomo probe 是否在跑、上次异常退出原因。
+- 回归锁：`TestSanitizeProxyMapProductionFatals` + `TestProbeYAMLNeverContainsMihomoFatals` 覆盖 SS 乱码 cipher、alpn 字符串、vless `none=`；订阅字段末尾 `=` 会先剥掉再校验。
 - **一条坏 vless 不再打死 mihomo probe**：`encryption: none=`（线上 id 104004 / `85.133.215.108:235`）会 `invaild vless encryption value: none=` 然后 probe 退出。发布前把 `none=` 收成 `none`，其它非法值跳过。
 - **一条坏 SS 节点不再打死 mihomo probe**：订阅里 `cipher` 乱码（线上：`dash.zendegizibast.ir:2087` → `unknown method: �G`）或 `alpn` 写成字符串（`'alpn' is not a slice`）时，mihomo 解析整份 probe YAML 失败并退出，面板 7891 仍 200、7893/测速抖动。发布前跳过无法初始化的节点，并把 `alpn` 收成列表。复现：池子留一条 `"cipher":"�G"` 的 ss 再 publish，旧镜像会刷 `mihomo probe exited`；修好后同样数据 probe 不再退出。
 - 修复请求指定协议（如 `?proto=socks5`）时，HotCache 在缓存内无匹配协议时会回退返回**其它协议**的代理，且下游不再校验协议、导致池中真有 socks5 代理却被静默换成 http 的问题。协议校验下移到统一的候选过滤入口，仅在池中确实没有该协议时才按既有降级阶梯放宽

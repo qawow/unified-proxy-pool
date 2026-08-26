@@ -42,6 +42,7 @@ func SanitizeProxyMap(payload map[string]any) error {
 	if payload == nil {
 		return fmt.Errorf("empty proxy")
 	}
+	trimQueryJunk(payload)
 	coerceALPN(payload)
 	typ := strings.ToLower(strings.TrimSpace(fmt.Sprint(payload["type"])))
 	switch typ {
@@ -109,6 +110,30 @@ var vlessFlows = map[string]struct{}{
 	"": {},
 	"xtls-rprx-vision": {},
 	"xtls-rprx-vision-udp443": {},
+}
+
+// Keys that subscriptions often leave as "none=" / "tcp=" from broken query
+// parsing. Stripping trailing =&; here stops the next enum field from
+// reaching mihomo uncleaned.
+var queryJunkKeys = []string{
+	"encryption", "flow", "network", "security", "packet-encoding",
+	"client-fingerprint", "cipher", "udp",
+}
+
+func trimQueryJunk(payload map[string]any) {
+	for _, key := range queryJunkKeys {
+		raw, ok := payload[key]
+		if !ok || raw == nil {
+			continue
+		}
+		s, ok := raw.(string)
+		if !ok {
+			continue
+		}
+		cleaned := strings.TrimRight(strings.TrimSpace(s), "=&;")
+		cleaned = strings.TrimSpace(cleaned)
+		payload[key] = cleaned
+	}
 }
 
 func sanitizeVLESSEncryption(payload map[string]any) error {
