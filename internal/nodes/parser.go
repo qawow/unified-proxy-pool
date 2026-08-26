@@ -132,6 +132,9 @@ func parseSS(raw string) (ParsedNode, error) {
 		"password": password,
 	}
 	copyQuery(normalized, query)
+	if err := SanitizeProxyMap(normalized); err != nil {
+		return ParsedNode{}, err
+	}
 	return ParsedNode{
 		DisplayName: name,
 		Protocol:    "ss",
@@ -171,6 +174,9 @@ func parseVMess(raw string) (ParsedNode, error) {
 	data["type"] = "vmess"
 	data["server"] = server
 	data["port"] = port
+	if err := SanitizeProxyMap(data); err != nil {
+		return ParsedNode{}, err
+	}
 	return ParsedNode{
 		DisplayName: name,
 		Protocol:    "vmess",
