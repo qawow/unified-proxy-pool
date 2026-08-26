@@ -354,7 +354,7 @@ func (s *Service) LookupPoolByAuth(ctx context.Context, username, password strin
 	}
 	row := s.store.DB.QueryRowContext(ctx, `SELECT id, name, auth_username,
 		auth_password_secret, strategy, COALESCE(strategy_label,''), COALESCE(strategy_advanced_json,'{}'),
-		failover_enabled, enabled, last_published_at, last_publish_status, last_error,
+		failover_enabled, enabled, COALESCE(channel,''), last_published_at, last_publish_status, last_error,
 		created_at, updated_at, 0, 0 FROM proxy_pools WHERE enabled = 1 AND auth_username = ? AND auth_password_secret = ? LIMIT 1`,
 		username, password)
 	item, err := scanPool(row)
