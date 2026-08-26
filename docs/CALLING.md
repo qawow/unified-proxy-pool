@@ -2,6 +2,8 @@
 
 局域网默认：面板 `7891` · 单跳 `7892` · 链式 `7893`。把 `HOST` 换成软路由 IP。
 
+`/api/public/*` **默认只允许局域网**（`10/8` `172.16/12` `192.168/16` 环回）。公网 IP 会 403。需要额外网段填设置里的 `allowed_cidrs`；确要暴露公网再勾 `public_open`（危险）。`X-Forwarded-For` 只在对端是本机时才信。
+
 ```bash
 HOST=192.168.2.198
 ```
@@ -22,6 +24,8 @@ curl -s "http://$HOST:7891/api/public/get?session=job-1&refresh=1"  # 强制换�
 curl -s "http://$HOST:7891/api/public/get?format=json&proto=http&region=US"
 curl -s "http://$HOST:7891/api/public/get?count=5"
 curl -s "http://$HOST:7891/api/public/count"
+curl -s "http://$HOST:7891/api/public/debug"           # 池子/7892/7893/mihomo probe 是否活着、上次异常退出
+curl -s "http://$HOST:7891/api/public/debug/mihomo"
 ```
 
 用这条代理访问目标：

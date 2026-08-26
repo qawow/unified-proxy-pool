@@ -116,7 +116,7 @@ func (a *App) handleChannelReport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "channel policy disabled"})
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/api/public/") && !allowPublicReport(clientIP(r)) {
+	if strings.HasPrefix(r.URL.Path, "/api/public/") && !allowPublicReport(publicClientIP(r)) {
 		writeJSON(w, http.StatusTooManyRequests, apiResponse{Success: false, Message: "too many reports"})
 		return
 	}

@@ -127,7 +127,7 @@ func New(authSvc *auth.Service, settingsSvc *settings.Service, nodeSvc *nodes.Se
 func (a *App) Router() (http.Handler, error) {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(strictRealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
 
@@ -253,7 +253,7 @@ func (a *App) Router() (http.Handler, error) {
 		})
 	})
 
-	r.Get("/metrics", a.handleMetrics)
+	r.With(a.requireLAN).Get("/metrics", a.handleMetrics)
 
 	// Script-facing batch endpoints. Registered outside the protected group on
 	// purpose: that group's RequireAuth rejects cookie-less requests before any
@@ -273,21 +273,20 @@ func (a *App) Router() (http.Handler, error) {
 		scriptAPI.Delete("/api/ai-prompts", a.handleAIPromptDelete)
 	})
 
-	// Public free-proxy API (no auth) — compatible with common proxy-pool clients on LAN.
+	// Public free-proxy + LAN debug API. No login, but requireLAN blocks
+	// non-RFC1918 clients unless feature.public_open or allowed_cidrs says so.
 	r.Route("/api/public", func(pub chi.Router) {
+		pub.Use(a.requireLAN)
 		pub.Get("/proxies/random", a.handleFreeProxyRandom)
 		pub.Get("/proxies/count", a.handleFreeProxyCount)
 		pub.Get("/get", a.handlePublicGet) // alias: jhao104-style
 		pub.Get("/count", a.handleFreeProxyCount)
 		pub.Get("/health", a.handleHealth)
 		pub.Post("/report", a.handlePublicReport)
-		// Unauthenticated batch submit for LAN scripts.
-		// Body: plain text, one host:port per line; ?source= labels the origin.
 		pub.Post("/submit", a.handlePublicSubmit)
-		// Unauthenticated channel reporting, same trust model as the rest of
-		// /api/public/*: intended for LAN scripts. Anyone who can reach it can
-		// sideline a proxy for a channel, so keep this port off the internet.
 		pub.Post("/channels/report", a.handleChannelReport)
+		pub.Get("/debug", a.handlePublicDebug)
+		pub.Get("/debug/mihomo", a.handlePublicDebugMihomo)
 	})
 
 	fileServer := http.FileServer(http.FS(a.frontend))

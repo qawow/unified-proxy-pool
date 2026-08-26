@@ -26,6 +26,9 @@ type Config struct {
 	// F5
 	DirectAuthRequired bool     `json:"direct_auth_required"`
 	AllowedCIDRs       []string `json:"allowed_cidrs,omitempty"`
+	// PublicOpen exposes /api/public to non-LAN clients. Default false: only
+	// RFC1918/loopback plus AllowedCIDRs. LAN debug stays usable without login.
+	PublicOpen bool `json:"public_open,omitempty"`
 
 	// F6
 	WebhookURL          string   `json:"webhook_url,omitempty"`

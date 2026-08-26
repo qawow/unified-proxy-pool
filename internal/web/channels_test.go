@@ -53,6 +53,7 @@ func doJSON(t *testing.T, app *App, cookie *http.Cookie, method, path, body stri
 		rdr = bytes.NewReader([]byte(body))
 	}
 	req := httptest.NewRequest(method, path, rdr)
+	req.RemoteAddr = "192.168.2.10:1234"
 	req.Header.Set("Content-Type", "application/json")
 	if cookie != nil {
 		req.AddCookie(cookie)

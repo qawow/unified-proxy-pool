@@ -549,6 +549,10 @@ func (a *App) handlePublicSubmit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "free proxy disabled"})
 		return
 	}
+	if !allowPublicSubmit(publicClientIP(r)) {
+		writeJSON(w, http.StatusTooManyRequests, apiResponse{Success: false, Message: "submit rate limited"})
+		return
+	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 512<<10)) // 512 KB max
 	if err != nil || len(body) == 0 {

@@ -450,7 +450,7 @@ export function SettingsPage() {
                     }}
                   />
                 </Field>
-                <Field label="允许 CIDR（逗号分隔，空=不限）">
+                <Field label="允许 CIDR（逗号分隔）">
                   <Input
                     value={Array.isArray(settings.feature?.allowed_cidrs) ? (settings.feature?.allowed_cidrs as string[]).join(",") : ""}
                     onChange={(e) => {
@@ -458,8 +458,20 @@ export function SettingsPage() {
                       const next = { ...(settings.feature || {}), allowed_cidrs: cidrs };
                       setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
                     }}
+                    placeholder="空=仅局域网；可加 100.64.0.0/10"
                   />
                 </Field>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings.feature?.public_open)}
+                    onChange={(e) => {
+                      const next = { ...(settings.feature || {}), public_open: e.target.checked };
+                      setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
+                    }}
+                  />
+                  公网开放 /api/public（危险：取代理/入池不再限局域网）
+                </label>
                 <Field label="多校验 URL（换行）">
                   <Input
                     value={Array.isArray(settings.feature?.free_validate_urls) ? (settings.feature?.free_validate_urls as string[]).join("\n") : ""}

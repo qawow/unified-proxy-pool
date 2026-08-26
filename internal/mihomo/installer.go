@@ -24,15 +24,19 @@ const defaultReleaseAPIURL = "https://api.github.com/repos/MetaCubeX/mihomo/rele
 var goTagPattern = regexp.MustCompile(`-go\d+-`)
 
 type RuntimeStatus struct {
-	HostOS          string `json:"host_os"`
-	HostArch        string `json:"host_arch"`
-	BinaryPath      string `json:"binary_path"`
-	BinaryAvailable bool   `json:"binary_available"`
-	RuntimeDir      string `json:"runtime_dir"`
-	ProdRunning     bool   `json:"prod_running"`
-	ProbeRunning    bool   `json:"probe_running"`
-	ProdPID         int    `json:"prod_pid,omitempty"`
-	ProbePID        int    `json:"probe_pid,omitempty"`
+	HostOS          string     `json:"host_os"`
+	HostArch        string     `json:"host_arch"`
+	BinaryPath      string     `json:"binary_path"`
+	BinaryAvailable bool       `json:"binary_available"`
+	RuntimeDir      string     `json:"runtime_dir"`
+	ProdRunning     bool       `json:"prod_running"`
+	ProbeRunning    bool       `json:"probe_running"`
+	ProdPID         int        `json:"prod_pid,omitempty"`
+	ProbePID        int        `json:"probe_pid,omitempty"`
+	LastProdExit    string     `json:"last_prod_exit,omitempty"`
+	LastProbeExit   string     `json:"last_probe_exit,omitempty"`
+	LastProdExitAt  *time.Time `json:"last_prod_exit_at,omitempty"`
+	LastProbeExitAt *time.Time `json:"last_probe_exit_at,omitempty"`
 }
 
 type ReleaseInfo struct {

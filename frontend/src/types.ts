@@ -38,6 +38,7 @@ export type Settings = {
     source_min_samples?: number;
     direct_auth_required?: boolean;
     allowed_cidrs?: string[];
+    public_open?: boolean;
     webhook_url?: string;
     webhook_events?: string[];
     alert_validated_min?: number;

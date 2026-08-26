@@ -439,9 +439,11 @@ func (a *App) enhancedHealth(w http.ResponseWriter, r *http.Request) {
 			data["validated"] = validated
 			data["raw"] = raw
 			data["backend"] = a.free.Store().Backend()
-			fc := a.settings.FeatureConfig(r.Context())
-			if fc.AlertValidatedMin > 0 && int(validated) < fc.AlertValidatedMin {
-				webhook.Default.Notify("validated_low", map[string]any{"validated": validated, "min": fc.AlertValidatedMin})
+			if a.settings != nil {
+				fc := a.settings.FeatureConfig(r.Context())
+				if fc.AlertValidatedMin > 0 && int(validated) < fc.AlertValidatedMin {
+					webhook.Default.Notify("validated_low", map[string]any{"validated": validated, "min": fc.AlertValidatedMin})
+				}
 			}
 		}
 	}

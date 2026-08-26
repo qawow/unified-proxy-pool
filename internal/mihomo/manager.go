@@ -43,9 +43,13 @@ type Manager struct {
 	hasBinary    bool
 	lastSecret   string
 	stopping     bool
-	prodBackoff  time.Duration
-	probeBackoff time.Duration
-	expectedExit map[int]struct{}
+	prodBackoff     time.Duration
+	probeBackoff    time.Duration
+	expectedExit    map[int]struct{}
+	lastProdExit    string
+	lastProbeExit   string
+	lastProdExitAt  time.Time
+	lastProbeExitAt time.Time
 }
 
 func NewManager(opts Options) *Manager {
@@ -144,6 +148,16 @@ func (m *Manager) Status() RuntimeStatus {
 	if m.probeCmd != nil && m.probeCmd.Process != nil {
 		status.ProbeRunning = true
 		status.ProbePID = m.probeCmd.Process.Pid
+	}
+	status.LastProdExit = m.lastProdExit
+	status.LastProbeExit = m.lastProbeExit
+	if !m.lastProdExitAt.IsZero() {
+		t := m.lastProdExitAt
+		status.LastProdExitAt = &t
+	}
+	if !m.lastProbeExitAt.IsZero() {
+		t := m.lastProbeExitAt
+		status.LastProbeExitAt = &t
 	}
 	return status
 }
@@ -483,10 +497,19 @@ func (m *Manager) handleProcessExit(kind string, pid int, cause error) {
 		m.mu.Unlock()
 		return
 	}
+	msg := ""
+	if cause != nil {
+		msg = cause.Error()
+	}
+	now := time.Now().UTC()
 	if kind == "prod" {
 		m.prodCmd = nil
+		m.lastProdExit = msg
+		m.lastProdExitAt = now
 	} else {
 		m.probeCmd = nil
+		m.lastProbeExit = msg
+		m.lastProbeExitAt = now
 	}
 	if m.stopping {
 		m.mu.Unlock()

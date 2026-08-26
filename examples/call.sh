@@ -31,6 +31,9 @@ case "$CMD" in
     curl -sS "${PANEL}/api/public/health"; echo
     curl -sS "${PANEL}/api/public/count"; echo
     ;;
+  debug)
+    curl -sS "${PANEL}/api/public/debug"; echo
+    ;;
   direct)
     echo "curl -x http://${HOST}:7892 https://httpbin.org/ip"
     curl -sS -m 20 -x "http://${HOST}:7892" https://httpbin.org/ip || true
@@ -51,9 +54,10 @@ Unified Proxy Pool 调用速查  HOST=${HOST}
   单跳       curl -x http://${HOST}:7892 https://httpbin.org/ip
   链式       curl -x http://${HOST}:7893 https://httpbin.org/ip
   健康       curl -s ${PANEL}/api/public/health
+  调试       curl -s ${PANEL}/api/public/debug
 
-子命令:  $0 [HOST] get|health|direct|chain
-说明:    docs/CALLING.md
+子命令:  $0 [HOST] get|health|debug|direct|chain
+说明:    /api/public 默认仅局域网；公网 403。docs/CALLING.md
 EOF
     ;;
 esac
