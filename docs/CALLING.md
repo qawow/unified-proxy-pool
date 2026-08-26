@@ -45,26 +45,31 @@ export ALL_PROXY=socks5://$HOST:7892
 curl -x http://$HOST:7892 https://httpbin.org/ip
 ```
 
-## 3. 经小 VPS 再出口
+## 3. 经小 VPS 再走代理（出口 IP = 代理 IP）
 
-7892/7893 默认从免费池随机抽跳。要让**本项目的代理流量**固定经过你的 VPS：
+7892/7893 默认家里直连免费代理。要让**代理流量先到你的 VPS，再从代理节点出网**（对方看到的是代理 IP，不是 VPS、也不是家里）：
 
-1. VPS 上开 SOCKS5（`ssh -D 0.0.0.0:1080` 或 microsocks / xray）
+```
+本机 → 7892/7893 → 小 VPS → 代理节点 → 网站
+```
+
+1. VPS 上开 SOCKS5（`ssh -D 0.0.0.0:1080` 或 microsocks / xray），安全组放行该端口。
 2. 面板 **设置 → 链式代理 → 固定 VPS** 填：
 
 ```
 socks5://user:pass@VPS公网IP:1080
 ```
 
-3. **VPS 位置**选「最后一跳」：路径是 `池子 → VPS → 网站`，对方看到的是 VPS IP。选「第一跳」则是 `VPS → 池子 → 网站`，对方看到的仍是免费代理。
-4. 保存后热更新。测：
+3. **VPS 位置**选 **第一跳**（出口 IP = 代理）。不要选最后一跳，那会变成网站看到 VPS IP。
+4. 保存（热更新）。测：
 
 ```bash
 curl -x http://$HOST:7892 https://httpbin.org/ip
-curl -x http://$HOST:7893 https://httpbin.org/ip
 ```
 
-最后一跳时，免费代理必须能 CONNECT 到你的 VPS 端口；连不上就换第一跳，或把 VPS SOCKS 改成 443。
+这里应显示**池子里那条代理的 IP**，不是 VPS、也不是家里宽带。
+
+VPS 必须能访问那些代理；家里只需要能连上 VPS。
 
 ## 4. 链式出网（多跳）
 

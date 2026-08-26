@@ -718,9 +718,9 @@ export function SettingsPage() {
                   />
                 </Field>
                 <Field label="VPS 位置">
-                  <Select value={chain.exit_via_mode || "exit"} onChange={(e) => patchChain({ exit_via_mode: e.target.value })}>
-                    <option value="exit">最后一跳（网站看到 VPS IP）</option>
-                    <option value="entry">第一跳（家里只连 VPS，出口仍是池子）</option>
+                  <Select value={chain.exit_via_mode || "entry"} onChange={(e) => patchChain({ exit_via_mode: e.target.value })}>
+                    <option value="entry">第一跳：本机→VPS→代理→网站（出口 IP = 代理）</option>
+                    <option value="exit">最后一跳：本机→代理→VPS→网站（出口 IP = VPS）</option>
                   </Select>
                 </Field>
                 <Field label="入口协议">

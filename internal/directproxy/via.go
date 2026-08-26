@@ -81,10 +81,10 @@ func attachVia(hops []freproxies.Proxy, via freproxies.Proxy, mode string) []fre
 	if via.Addr == "" {
 		return hops
 	}
-	if strings.EqualFold(strings.TrimSpace(mode), "entry") {
-		return append([]freproxies.Proxy{via}, hops...)
+	if strings.EqualFold(strings.TrimSpace(mode), "exit") {
+		return append(append([]freproxies.Proxy{}, hops...), via)
 	}
-	return append(append([]freproxies.Proxy{}, hops...), via)
+	return append([]freproxies.Proxy{via}, hops...)
 }
 
 func (s *Server) chainPathWithVia(hops int) string {
@@ -93,10 +93,10 @@ func (s *Server) chainPathWithVia(hops int) string {
 	if strings.TrimSpace(opts.ExitVia) == "" {
 		return base
 	}
-	if strings.EqualFold(strings.TrimSpace(opts.ExitViaMode), "entry") {
-		return "本机 → VPS → " + strings.TrimPrefix(base, "本机 → ")
+	if strings.EqualFold(strings.TrimSpace(opts.ExitViaMode), "exit") {
+		return strings.TrimSuffix(base, " → 目标") + " → VPS → 目标"
 	}
-	return strings.TrimSuffix(base, " → 目标") + " → VPS → 目标"
+	return "本机 → VPS → " + strings.TrimPrefix(base, "本机 → ")
 }
 
 func (s *Server) withVia(hops []freproxies.Proxy) []freproxies.Proxy {

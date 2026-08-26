@@ -40,6 +40,10 @@ func TestAttachViaExitAndEntry(t *testing.T) {
 	if len(entry) != 2 || entry[0].Addr != "9.9.9.9:1080" {
 		t.Fatalf("entry hops = %+v", entry)
 	}
+	def := attachVia(pool, via, "")
+	if def[0].Addr != "9.9.9.9:1080" {
+		t.Fatalf("empty mode should be entry (VPS first), got %+v", def)
+	}
 }
 
 func TestWithViaEmptyIsNoop(t *testing.T) {
