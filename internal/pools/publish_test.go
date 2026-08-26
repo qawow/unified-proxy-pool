@@ -220,6 +220,45 @@ func TestBuildProbeInventoryConfigDropsBadSSAndFixesALPN(t *testing.T) {
 	}
 }
 
+// Repro: vless encryption "none=" (node 104004 / 85.133.215.108:235) fatals mihomo:
+//   Parse config error: proxy 1008: invaild vless encryption value: none=
+func TestBuildProbeInventoryConfigCleansVLESSEncryption(t *testing.T) {
+	bad := models.RuntimeNode{
+		SourceType:     "subscription",
+		SourceNodeID:   104004,
+		DisplayName:    "Iran",
+		Protocol:       "vless",
+		Server:         "85.133.215.108",
+		Port:           235,
+		Enabled:        true,
+		NormalizedJSON: `{"type":"vless","server":"85.133.215.108","port":235,"uuid":"u","encryption":"none="}`,
+	}
+	good := models.RuntimeNode{
+		SourceType:     "subscription",
+		SourceNodeID:   3,
+		DisplayName:    "ok-vless",
+		Protocol:       "vless",
+		Server:         "9.9.9.9",
+		Port:           443,
+		Enabled:        true,
+		NormalizedJSON: `{"type":"vless","server":"9.9.9.9","port":443,"uuid":"u","encryption":"none"}`,
+	}
+	payload, err := BuildProbeInventoryConfig("secret", "127.0.0.1:19091", 17891, "info", []models.RuntimeNode{bad, good})
+	if err != nil {
+		t.Fatalf("BuildProbeInventoryConfig() error = %v", err)
+	}
+	config := string(payload)
+	if strings.Contains(config, "none=") {
+		t.Fatalf("raw none= leaked into probe config:\n%s", config)
+	}
+	if !strings.Contains(config, "85.133.215.108") {
+		t.Fatalf("cleaned vless node was dropped:\n%s", config)
+	}
+	if !strings.Contains(config, "9.9.9.9") {
+		t.Fatalf("good vless missing:\n%s", config)
+	}
+}
+
 func TestBuildPublishBundleNormalizesUnsupportedLogLevelToInfo(t *testing.T) {
 	member := models.RuntimeNode{
 		SourceType:     "manual",

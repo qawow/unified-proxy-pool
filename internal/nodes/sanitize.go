@@ -51,6 +51,11 @@ func SanitizeProxyMap(payload map[string]any) error {
 			return fmt.Errorf("ss cipher %q is not a known method", cipher)
 		}
 		payload["cipher"] = cipher
+	case "vless":
+		if err := sanitizeVLESSEncryption(payload); err != nil {
+			return err
+		}
+		sanitizeEnumField(payload, "flow", vlessFlows)
 	}
 	server := strings.TrimSpace(fmt.Sprint(payload["server"]))
 	if server == "" || server == "<nil>" {
@@ -91,6 +96,59 @@ func isPrintableASCII(s string) bool {
 		}
 	}
 	return true
+}
+
+// vlessEncryption is what mihomo accepts. "none=" from broken subscribe
+// query strings is not in this set until cleaned.
+var vlessEncryption = map[string]struct{}{
+	"none": {},
+	"mlkem768x25519plus": {},
+}
+
+var vlessFlows = map[string]struct{}{
+	"": {},
+	"xtls-rprx-vision": {},
+	"xtls-rprx-vision-udp443": {},
+}
+
+func sanitizeVLESSEncryption(payload map[string]any) error {
+	raw, ok := payload["encryption"]
+	if !ok || raw == nil {
+		return nil
+	}
+	s := strings.TrimSpace(fmt.Sprint(raw))
+	if s == "" || s == "<nil>" {
+		delete(payload, "encryption")
+		return nil
+	}
+	cleaned := strings.TrimRight(strings.TrimSpace(s), "=&;")
+	cleaned = strings.ToLower(strings.TrimSpace(cleaned))
+	if cleaned == "" {
+		cleaned = "none"
+	}
+	if _, ok := vlessEncryption[cleaned]; !ok {
+		return fmt.Errorf("invalid vless encryption %q", s)
+	}
+	payload["encryption"] = cleaned
+	return nil
+}
+
+func sanitizeEnumField(payload map[string]any, key string, allowed map[string]struct{}) {
+	raw, ok := payload[key]
+	if !ok || raw == nil {
+		return
+	}
+	s := strings.TrimRight(strings.TrimSpace(fmt.Sprint(raw)), "=&;")
+	s = strings.TrimSpace(s)
+	if _, ok := allowed[s]; !ok {
+		delete(payload, key)
+		return
+	}
+	if s == "" {
+		delete(payload, key)
+		return
+	}
+	payload[key] = s
 }
 
 func coerceALPN(payload map[string]any) {

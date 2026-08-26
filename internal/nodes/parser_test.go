@@ -42,6 +42,31 @@ func TestParseSSRejectsUnknownCipher(t *testing.T) {
 	}
 }
 
+func TestSanitizeVLESSEncryptionNoneEquals(t *testing.T) {
+	// Production: subscription_nodes id 104004, 85.133.215.108:235
+	// mihomo: invaild vless encryption value: none=
+	p := map[string]any{
+		"type": "vless", "server": "85.133.215.108", "port": 235,
+		"uuid": "u", "encryption": "none=",
+	}
+	if err := SanitizeProxyMap(p); err != nil {
+		t.Fatalf("SanitizeProxyMap() error = %v", err)
+	}
+	if got := p["encryption"]; got != "none" {
+		t.Fatalf("encryption = %#v, want none", got)
+	}
+}
+
+func TestSanitizeVLESSEncryptionRejectsJunk(t *testing.T) {
+	p := map[string]any{
+		"type": "vless", "server": "1.2.3.4", "port": 443,
+		"uuid": "u", "encryption": "not-a-real-method",
+	}
+	if err := SanitizeProxyMap(p); err == nil {
+		t.Fatal("expected unknown vless encryption to be rejected")
+	}
+}
+
 func TestSanitizeProxyMapCoercesALPNAndRejectsGarbageCipher(t *testing.T) {
 	good := map[string]any{
 		"type": "trojan", "server": "a.example", "port": 443,

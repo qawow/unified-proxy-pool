@@ -246,6 +246,9 @@ func parseSimpleURLNode(protocol, raw string) (ParsedNode, error) {
 			normalized["skip-cert-verify"] = s == "1" || s == "true"
 		}
 	}
+	if err := SanitizeProxyMap(normalized); err != nil {
+		return ParsedNode{}, err
+	}
 	return ParsedNode{
 		DisplayName: name,
 		Protocol:    protocol,
