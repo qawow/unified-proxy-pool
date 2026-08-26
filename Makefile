@@ -1,4 +1,4 @@
-.PHONY: frontend build run test health lan sources check-sources fetch-proxies discover-sources scan-to-pool submit-proxies source-yield source-report source-tune auto-enrich
+.PHONY: frontend build run test health lan sources check-sources fetch-proxies discover-sources scan-to-pool submit-proxies source-yield source-report source-tune auto-enrich check-dockerfile docker
 
 GOPROXY ?= https://goproxy.cn,direct
 DATA_DIR ?= ./data
@@ -23,8 +23,14 @@ run:
 		FREE_VALIDATE_URL=https://www.gstatic.com/generate_204 \
 		go run -buildvcs=false ./cmd/app
 
-test:
+check-dockerfile:
+	bash scripts/check-dockerfile.sh
+
+test: check-dockerfile
 	GOPROXY=$(GOPROXY) go test -buildvcs=false ./...
+
+docker: check-dockerfile
+	docker build -t unified-proxy-pool:local .
 
 health:
 	curl -s http://127.0.0.1:7891/api/health | python3 -m json.tool
