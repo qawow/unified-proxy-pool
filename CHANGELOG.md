@@ -38,6 +38,7 @@
 - 修复请求指定协议（如 `?proto=socks5`）时，HotCache 在缓存内无匹配协议时会回退返回**其它协议**的代理，且下游不再校验协议、导致池中真有 socks5 代理却被静默换成 http 的问题。协议校验下移到统一的候选过滤入口，仅在池中确实没有该协议时才按既有降级阶梯放宽
 
 ### 新功能
+- 本机→VPS 第一跳：预热 SOCKS 连接池（握手复用）、TCP_NODELAY、KeepAlive；`/api/public/debug` 的 `vps_via` 看命中率。
 - 订阅拉取：URL-safe Base64、HTML 拦截、8MB 上限、502/429 重试、SOCKS5 获取代理真正走 SOCKS、同步结果区分新增/更新/删除；超长 URI 不再被截断。延迟测试对无法进 mihomo 的节点给出 skip 原因。
 - 订阅头识别 Cloudflare Workers/Pages（`workers.dev` / `pages.dev` / edgetunnel）自动用 clash.meta UA
 - 采集源增加 `spys-socks`（默认关）；Docker 内核默认 mihomo `v1.19.30`

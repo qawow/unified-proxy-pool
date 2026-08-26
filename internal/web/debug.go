@@ -11,10 +11,10 @@ import (
 func (a *App) handlePublicDebug(w http.ResponseWriter, r *http.Request) {
 	v6 := netutil.GlobalIPv6()
 	data := map[string]any{
-		"ok":      true,
-		"service": "unified-proxy-pool",
-		"lan":     true,
-		"ipv6":    len(v6) > 0,
+		"ok":         true,
+		"service":    "unified-proxy-pool",
+		"lan":        true,
+		"ipv6":       len(v6) > 0,
 		"ipv6_addrs": v6,
 	}
 	if a.free != nil {
@@ -31,17 +31,18 @@ func (a *App) handlePublicDebug(w http.ResponseWriter, r *http.Request) {
 		data["chain_proxy"] = st.ChainRunning
 		data["direct_addr"] = st.ListenAddr
 		data["chain_addr"] = st.ChainListenAddr
+		data["vps_via"] = a.direct.ViaPoolStats()
 	}
 	if a.mihomo != nil {
 		ms := a.mihomo.Status()
 		data["mihomo"] = map[string]any{
-			"binary_available": ms.BinaryAvailable,
-			"prod_running":     ms.ProdRunning,
-			"probe_running":    ms.ProbeRunning,
-			"prod_pid":         ms.ProdPID,
-			"probe_pid":        ms.ProbePID,
-			"last_prod_exit":   ms.LastProdExit,
-			"last_probe_exit":  ms.LastProbeExit,
+			"binary_available":   ms.BinaryAvailable,
+			"prod_running":       ms.ProdRunning,
+			"probe_running":      ms.ProbeRunning,
+			"prod_pid":           ms.ProdPID,
+			"probe_pid":          ms.ProbePID,
+			"last_prod_exit":     ms.LastProdExit,
+			"last_probe_exit":    ms.LastProbeExit,
 			"last_prod_exit_at":  ms.LastProdExitAt,
 			"last_probe_exit_at": ms.LastProbeExitAt,
 		}

@@ -21,7 +21,13 @@ func tunnelThrough(conn net.Conn, hop freproxies.Proxy, nextAddr string) (net.Co
 	proto := strings.ToLower(strings.TrimSpace(hop.Protocol))
 	switch proto {
 	case "socks5", "socks", "socks4":
-		return socks5ConnectOver(conn, nextAddr, hop.Username, hop.Password)
+		if _, ok := conn.(*socksAuthed); !ok {
+			if err := socks5Handshake(conn, hop.Username, hop.Password); err != nil {
+				conn.Close()
+				return nil, err
+			}
+		}
+		return socks5ConnectCmd(conn, nextAddr)
 	default:
 		return httpConnectOver(conn, nextAddr, hop.Username, hop.Password)
 	}
@@ -57,29 +63,24 @@ func httpConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error)
 	return conn, nil
 }
 
-func socks5ConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error) {
-	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
+func socks5Handshake(conn net.Conn, user, pass string) error {
+	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
 	if user != "" {
 		if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
-			conn.Close()
-			return nil, err
+			return err
 		}
 	} else if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-		conn.Close()
-		return nil, err
+		return err
 	}
 	resp := make([]byte, 2)
 	if _, err := io.ReadFull(conn, resp); err != nil {
-		conn.Close()
-		return nil, err
+		return err
 	}
 	if resp[0] != 0x05 {
-		conn.Close()
-		return nil, fmt.Errorf("chain socks5 auth rejected")
+		return fmt.Errorf("chain socks5 auth rejected")
 	}
 	switch resp[1] {
 	case 0x00:
-		// no auth
 	case 0x02:
 		ulen := byte(len(user))
 		plen := byte(len(pass))
@@ -88,18 +89,29 @@ func socks5ConnectOver(conn net.Conn, target, user, pass string) (net.Conn, erro
 		auth = append(auth, plen)
 		auth = append(auth, []byte(pass)...)
 		if _, err := conn.Write(auth); err != nil {
-			conn.Close()
-			return nil, err
+			return err
 		}
 		ar := make([]byte, 2)
 		if _, err := io.ReadFull(conn, ar); err != nil || ar[1] != 0x00 {
-			conn.Close()
-			return nil, fmt.Errorf("chain socks5 user/pass rejected")
+			return fmt.Errorf("chain socks5 user/pass rejected")
 		}
 	default:
-		conn.Close()
-		return nil, fmt.Errorf("chain socks5 auth rejected")
+		return fmt.Errorf("chain socks5 auth rejected")
 	}
+	_ = conn.SetDeadline(time.Time{})
+	return nil
+}
+
+func socks5ConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error) {
+	if err := socks5Handshake(conn, user, pass); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return socks5ConnectCmd(conn, target)
+}
+
+func socks5ConnectCmd(conn net.Conn, target string) (net.Conn, error) {
+	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
 	host, portStr, err := net.SplitHostPort(target)
 	if err != nil {
 		conn.Close()
@@ -150,11 +162,14 @@ func socks5ConnectOver(conn net.Conn, target, user, pass string) (net.Conn, erro
 // dialProxyChain connects: client path TCP→hop0→hop1→...→target
 // hops must be non-empty; length 1 is single-hop.
 func dialProxyChain(ctx context.Context, hops []freproxies.Proxy, target string) (net.Conn, error) {
+	return dialProxyChainPool(ctx, hops, target, nil)
+}
+
+func dialProxyChainPool(ctx context.Context, hops []freproxies.Proxy, target string, pool *viaPool) (net.Conn, error) {
 	if len(hops) == 0 {
 		return nil, fmt.Errorf("empty chain")
 	}
-	dialer := &net.Dialer{Timeout: 8 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", hops[0].Addr)
+	conn, err := dialEntry(ctx, hops[0], pool)
 	if err != nil {
 		return nil, fmt.Errorf("dial entry %s: %w", hops[0].Addr, err)
 	}

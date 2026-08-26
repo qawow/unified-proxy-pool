@@ -99,6 +99,42 @@ func (s *Server) chainPathWithVia(hops int) string {
 	return "本机 → VPS → " + strings.TrimPrefix(base, "本机 → ")
 }
 
+func (s *Server) getViaPool() *viaPool {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.viaPool
+}
+
+func (s *Server) ViaPoolStats() map[string]any {
+	p := s.getViaPool()
+	if p == nil {
+		return map[string]any{"enabled": false}
+	}
+	return p.Stats()
+}
+
+func (s *Server) rebuildViaPool() {
+	opts := s.GetChainOptions()
+	via, err := ParseViaProxy(opts.ExitVia)
+	s.mu.Lock()
+	old := s.viaPool
+	s.viaPool = nil
+	s.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	if err != nil || via.Addr == "" || strings.EqualFold(strings.TrimSpace(opts.ExitViaMode), "exit") {
+		return
+	}
+	p := newViaPool(via)
+	s.mu.Lock()
+	s.viaPool = p
+	s.mu.Unlock()
+}
+
 func (s *Server) withVia(hops []freproxies.Proxy) []freproxies.Proxy {
 	opts := s.GetChainOptions()
 	raw := strings.TrimSpace(opts.ExitVia)

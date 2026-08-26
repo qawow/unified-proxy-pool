@@ -69,7 +69,7 @@ curl -x http://$HOST:7892 https://httpbin.org/ip
 
 这里应显示**池子里那条代理的 IP**，不是 VPS、也不是家里宽带。
 
-VPS 必须能访问那些代理；家里只需要能连上 VPS。
+VPS 必须能访问那些代理；家里只需要能连上 VPS。第一跳会预热到 VPS 的 SOCKS 连接（TCP_NODELAY + KeepAlive + 握手复用），`GET /api/public/debug` 里 `vps_via` 可看命中率。
 
 ## 4. 链式出网（多跳）
 

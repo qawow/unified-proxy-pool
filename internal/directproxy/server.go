@@ -62,6 +62,7 @@ type Server struct {
 	rateLimitBps  int64
 
 	chainOpts ChainOptions
+	viaPool   *viaPool
 
 	// channels records per-destination outcomes so a proxy can be sidelined for
 	// one target site without being penalised everywhere. Optional.
@@ -266,6 +267,7 @@ func (s *Server) SetChainOptions(opts ChainOptions) {
 	}
 	s.cfg.ChainEnabled = opts.Enabled
 	s.mu.Unlock()
+	s.rebuildViaPool()
 }
 
 func (s *Server) GetChainOptions() ChainOptions {
@@ -465,6 +467,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
+	s.rebuildViaPool()
 	go func() {
 		<-runCtx.Done()
 		if s.ln != nil {
@@ -472,6 +475,9 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 		if s.chainLn != nil {
 			_ = s.chainLn.Close()
+		}
+		if p := s.getViaPool(); p != nil {
+			p.Close()
 		}
 	}()
 	return nil
@@ -659,7 +665,7 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 			if !s.channelBanned(channel, addr) {
 				start := time.Now()
 				wired := s.withVia([]freproxies.Proxy{up})
-				if conn, err := dialProxyChain(ctx, wired, target); err == nil {
+				if conn, err := dialProxyChainPool(ctx, wired, target, s.getViaPool()); err == nil {
 					s.recordChannel(channel, addr, true, 0, "", time.Since(start).Milliseconds())
 					return conn, lastHop(wired, up), nil
 				}
@@ -675,7 +681,7 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 	for _, up := range upstreams {
 		start := time.Now()
 		wired := s.withVia([]freproxies.Proxy{up})
-		conn, err := dialProxyChain(ctx, wired, target)
+		conn, err := dialProxyChainPool(ctx, wired, target, s.getViaPool())
 		if err == nil {
 			if stickyOn && clientIP != "" {
 				sticky.PutProxy(clientIP, up.Addr, up.Protocol)
@@ -777,7 +783,7 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 		// relay proxies the target never sees.
 		hops = s.avoidBannedExit(hops, rotated, channel)
 		wired := s.withVia(hops)
-		conn, err := dialProxyChain(dialCtx, wired, target)
+		conn, err := dialProxyChainPool(dialCtx, wired, target, s.getViaPool())
 		if err == nil {
 			return conn, wired, nil
 		}
