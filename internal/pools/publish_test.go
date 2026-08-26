@@ -165,6 +165,11 @@ func TestBuildProbeInventoryConfigSanitizesLegacyTransportTypeOverride(t *testin
 	}
 }
 
+// Repro (pre-fix): leave one ss with cipher "�G" at dash.zendegizibast.ir:2087,
+// publish, then mihomo logs:
+//   Parse config error: proxy 3021: ... cipher: �G initialize error: unknown method: �G
+//   mihomo probe exited unexpectedly
+// :7893 times out while :7891 /api/health stays 200.
 func TestBuildProbeInventoryConfigDropsBadSSAndFixesALPN(t *testing.T) {
 	bad := models.RuntimeNode{
 		SourceType:     "subscription",
@@ -184,21 +189,34 @@ func TestBuildProbeInventoryConfigDropsBadSSAndFixesALPN(t *testing.T) {
 		Server:         "1.2.3.4",
 		Port:           8388,
 		Enabled:        true,
-		NormalizedJSON: `{"type":"ss","server":"1.2.3.4","port":8388,"cipher":"aes-256-gcm","password":"secret","alpn":"h2"}`,
+		NormalizedJSON: `{"type":"ss","server":"1.2.3.4","port":8388,"cipher":"aes-256-gcm","password":"secret"}`,
 	}
-	payload, err := BuildProbeInventoryConfig("secret", "127.0.0.1:19091", 17891, "info", []models.RuntimeNode{bad, good})
+	alpnStr := models.RuntimeNode{
+		SourceType:     "subscription",
+		SourceNodeID:   2,
+		DisplayName:    "alpn-str",
+		Protocol:       "trojan",
+		Server:         "5.6.7.8",
+		Port:           443,
+		Enabled:        true,
+		NormalizedJSON: `{"type":"trojan","server":"5.6.7.8","port":443,"password":"p","alpn":"h2"}`,
+	}
+	payload, err := BuildProbeInventoryConfig("secret", "127.0.0.1:19091", 17891, "info", []models.RuntimeNode{bad, good, alpnStr})
 	if err != nil {
 		t.Fatalf("BuildProbeInventoryConfig() error = %v", err)
 	}
 	config := string(payload)
-	if strings.Contains(config, "dash.zendegizibast.ir") {
-		t.Fatalf("bad ss node leaked into probe config:\n%s", config)
+	if strings.Contains(config, "dash.zendegizibast.ir") || strings.Contains(config, "cipher: \x83G") {
+		t.Fatalf("bad ss node leaked into probe config (would fatal mihomo):\n%s", config)
 	}
 	if !strings.Contains(config, "1.2.3.4") || !strings.Contains(config, "aes-256-gcm") {
 		t.Fatalf("good ss node missing from probe config:\n%s", config)
 	}
-	if strings.Contains(config, "alpn: h2\n") && !strings.Contains(config, "- h2") {
-		t.Fatalf("alpn should be a YAML list, got:\n%s", config)
+	if !strings.Contains(config, "5.6.7.8") {
+		t.Fatalf("trojan with string alpn was dropped:\n%s", config)
+	}
+	if strings.Contains(config, "alpn: h2\n") || strings.Contains(config, "alpn: h2\r") {
+		t.Fatalf("alpn written as scalar (mihomo: 'alpn' is not a slice):\n%s", config)
 	}
 }
 

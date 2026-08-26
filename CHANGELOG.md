@@ -29,6 +29,7 @@
 - `?count=N` 一次取多条且不重复（上限 100）；纯文本每行一条，JSON 为 `items` 数组。不带 `count` 时响应结构与旧版完全一致
 
 ### 修复
+- **一条坏 SS 节点不再打死 mihomo probe**：订阅里 `cipher` 乱码（线上：`dash.zendegizibast.ir:2087` → `unknown method: �G`）或 `alpn` 写成字符串（`'alpn' is not a slice`）时，mihomo 解析整份 probe YAML 失败并退出，面板 7891 仍 200、7893/测速抖动。发布前跳过无法初始化的节点，并把 `alpn` 收成列表。复现：池子留一条 `"cipher":"�G"` 的 ss 再 publish，旧镜像会刷 `mihomo probe exited`；修好后同样数据 probe 不再退出。
 - 修复请求指定协议（如 `?proto=socks5`）时，HotCache 在缓存内无匹配协议时会回退返回**其它协议**的代理，且下游不再校验协议、导致池中真有 socks5 代理却被静默换成 http 的问题。协议校验下移到统一的候选过滤入口，仅在池中确实没有该协议时才按既有降级阶梯放宽
 
 ### 新功能
