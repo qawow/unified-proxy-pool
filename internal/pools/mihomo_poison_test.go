@@ -53,6 +53,24 @@ func TestProbeYAMLNeverContainsMihomoFatals(t *testing.T) {
 			},
 			forbid: []string{"alpn: h2\n", "alpn: h2\r", "'alpn' is not a slice"},
 		},
+		{
+			name: "tls empty string and vmess missing uuid",
+			poison: models.RuntimeNode{
+				SourceType: "subscription", SourceNodeID: 1045, DisplayName: "proxy-1045",
+				Protocol: "vmess", Server: "203.0.113.45", Port: 443, Enabled: true,
+				NormalizedJSON: `{"type":"vmess","server":"203.0.113.45","port":443,"tls":""}`,
+			},
+			forbid: []string{"203.0.113.45", "tls: \"\"", "expected type 'bool'"},
+		},
+		{
+			name: "tls string true coerced not quoted",
+			poison: models.RuntimeNode{
+				SourceType: "subscription", SourceNodeID: 1046, DisplayName: "tls-str",
+				Protocol: "vless", Server: "203.0.113.46", Port: 443, Enabled: true,
+				NormalizedJSON: `{"type":"vless","server":"203.0.113.46","port":443,"uuid":"u","tls":"true"}`,
+			},
+			forbid: []string{`tls: "true"`, `tls: 'true'`},
+		},
 	}
 
 	for _, tc := range cases {

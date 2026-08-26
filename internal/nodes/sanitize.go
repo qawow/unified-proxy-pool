@@ -15,7 +15,7 @@ var ssCiphers = map[string]struct{}{
 	"chacha20-ietf-poly1305": {}, "xchacha20-ietf-poly1305": {},
 	"2022-blake3-aes-128-gcm": {}, "2022-blake3-aes-256-gcm": {},
 	"2022-blake3-chacha20-poly1305": {},
-	"aes-128-cfb": {}, "aes-192-cfb": {}, "aes-256-cfb": {},
+	"aes-128-cfb":                   {}, "aes-192-cfb": {}, "aes-256-cfb": {},
 	"aes-128-ctr": {}, "aes-192-ctr": {}, "aes-256-ctr": {},
 	"aes-128-ofb": {}, "aes-192-ofb": {}, "aes-256-ofb": {},
 	"camellia-128-cfb": {}, "camellia-192-cfb": {}, "camellia-256-cfb": {},
@@ -44,6 +44,7 @@ func SanitizeProxyMap(payload map[string]any) error {
 	}
 	trimQueryJunk(payload)
 	coerceALPN(payload)
+	coerceBoolFields(payload)
 	typ := strings.ToLower(strings.TrimSpace(fmt.Sprint(payload["type"])))
 	switch typ {
 	case "ss", "ssr":
@@ -57,6 +58,10 @@ func SanitizeProxyMap(payload map[string]any) error {
 			return err
 		}
 		sanitizeEnumField(payload, "flow", vlessFlows)
+	case "vmess":
+		if err := sanitizeVMess(payload); err != nil {
+			return err
+		}
 	}
 	server := strings.TrimSpace(fmt.Sprint(payload["server"]))
 	if server == "" || server == "<nil>" {
@@ -102,13 +107,13 @@ func isPrintableASCII(s string) bool {
 // vlessEncryption is what mihomo accepts. "none=" from broken subscribe
 // query strings is not in this set until cleaned.
 var vlessEncryption = map[string]struct{}{
-	"none": {},
+	"none":               {},
 	"mlkem768x25519plus": {},
 }
 
 var vlessFlows = map[string]struct{}{
-	"": {},
-	"xtls-rprx-vision": {},
+	"":                        {},
+	"xtls-rprx-vision":        {},
 	"xtls-rprx-vision-udp443": {},
 }
 
@@ -174,6 +179,118 @@ func sanitizeEnumField(payload map[string]any, key string, allowed map[string]st
 		return
 	}
 	payload[key] = s
+}
+
+// boolKeys are fields mihomo decodes as bool. A string "" / "true" from
+// subscriptions becomes: 'tls' expected type 'bool', got unconvertible type 'string'
+// and aborts the whole YAML (proxy 1045 in production).
+var boolKeys = []string{
+	"tls", "skip-cert-verify", "udp", "tfo", "mptcp",
+	"allow-insecure", "insecure", "http2", "smux",
+}
+
+func coerceBoolFields(payload map[string]any) {
+	for _, key := range boolKeys {
+		raw, ok := payload[key]
+		if !ok || raw == nil {
+			continue
+		}
+		if _, isBool := raw.(bool); isBool {
+			continue
+		}
+		b, ok := parseBoolish(raw)
+		if !ok {
+			delete(payload, key)
+			continue
+		}
+		payload[key] = b
+	}
+}
+
+func parseBoolish(v any) (bool, bool) {
+	switch t := v.(type) {
+	case bool:
+		return t, true
+	case int:
+		return t != 0, true
+	case int64:
+		return t != 0, true
+	case float64:
+		return t != 0, true
+	case string:
+		s := strings.ToLower(strings.TrimSpace(t))
+		s = strings.TrimRight(s, "=&;")
+		switch s {
+		case "1", "true", "yes", "on":
+			return true, true
+		case "", "0", "false", "no", "off":
+			return false, true
+		default:
+			return false, false
+		}
+	default:
+		return false, false
+	}
+}
+
+func sanitizeVMess(payload map[string]any) error {
+	uuid := strings.TrimSpace(fmt.Sprint(payload["uuid"]))
+	if uuid == "" || uuid == "<nil>" {
+		uuid = strings.TrimSpace(fmt.Sprint(payload["id"]))
+	}
+	if uuid == "" || uuid == "<nil>" {
+		return fmt.Errorf("vmess missing uuid")
+	}
+	payload["uuid"] = uuid
+	if _, ok := payload["alterId"]; !ok {
+		payload["alterId"] = 0
+	} else {
+		payload["alterId"] = coerceInt(payload["alterId"], 0)
+	}
+	cipher := strings.TrimSpace(fmt.Sprint(payload["cipher"]))
+	if cipher == "" || cipher == "<nil>" {
+		if s := strings.TrimSpace(fmt.Sprint(payload["scy"])); s != "" && s != "<nil>" {
+			cipher = s
+		} else {
+			cipher = "auto"
+		}
+	}
+	payload["cipher"] = cipher
+	return nil
+}
+
+func coerceInt(v any, fallback int) int {
+	switch t := v.(type) {
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	case string:
+		n := 0
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return fallback
+		}
+		neg := false
+		if s[0] == '-' {
+			neg = true
+			s = s[1:]
+		}
+		for _, r := range s {
+			if r < '0' || r > '9' {
+				return fallback
+			}
+			n = n*10 + int(r-'0')
+		}
+		if neg {
+			return -n
+		}
+		return n
+	default:
+		return fallback
+	}
 }
 
 func coerceALPN(payload map[string]any) {

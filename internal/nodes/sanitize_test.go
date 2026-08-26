@@ -92,6 +92,54 @@ func TestSanitizeProxyMapProductionFatals(t *testing.T) {
 				"cipher": "aes-256-gcm", "password": "secret",
 			},
 		},
+		{
+			name: "tls empty string proxy 1045",
+			in: map[string]any{
+				"type": "vless", "server": "198.51.100.45", "port": 443,
+				"uuid": "u", "tls": "",
+			},
+			check: func(t *testing.T, out map[string]any) {
+				if _, ok := out["tls"].(bool); !ok {
+					t.Fatalf("tls = %#v, want bool", out["tls"])
+				}
+			},
+		},
+		{
+			name: "tls string true",
+			in: map[string]any{
+				"type": "vless", "server": "198.51.100.46", "port": 443,
+				"uuid": "u", "tls": "true",
+			},
+			check: func(t *testing.T, out map[string]any) {
+				b, ok := out["tls"].(bool)
+				if !ok || !b {
+					t.Fatalf("tls = %#v, want true", out["tls"])
+				}
+			},
+		},
+		{
+			name: "vmess missing uuid dropped",
+			in: map[string]any{
+				"type": "vmess", "server": "198.51.100.47", "port": 443,
+				"tls": "",
+			},
+			wantErr: true,
+		},
+		{
+			name: "vmess fills alterId and cipher",
+			in: map[string]any{
+				"type": "vmess", "server": "198.51.100.48", "port": 443,
+				"uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+			},
+			check: func(t *testing.T, out map[string]any) {
+				if out["cipher"] != "auto" {
+					t.Fatalf("cipher = %#v", out["cipher"])
+				}
+				if out["alterId"] != 0 {
+					t.Fatalf("alterId = %#v", out["alterId"])
+				}
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
