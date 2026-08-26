@@ -35,6 +35,60 @@ func TestParseSSSIP002Base64UserInfo(t *testing.T) {
 	}
 }
 
+func TestParseSSRejectsUnknownCipher(t *testing.T) {
+	_, err := ParseNodeURI("ss://not-a-cipher:pass@dash.zendegizibast.ir:2087#bad")
+	if err == nil {
+		t.Fatal("expected unknown ss cipher to fail parse")
+	}
+}
+
+func TestSanitizeProxyMapCoercesALPNAndRejectsGarbageCipher(t *testing.T) {
+	good := map[string]any{
+		"type": "trojan", "server": "a.example", "port": 443,
+		"password": "x", "alpn": "h2,http/1.1",
+	}
+	if err := SanitizeProxyMap(good); err != nil {
+		t.Fatalf("SanitizeProxyMap() error = %v", err)
+	}
+	list, ok := good["alpn"].([]string)
+	if !ok || len(list) != 2 || list[0] != "h2" || list[1] != "http/1.1" {
+		t.Fatalf("alpn = %#v, want [h2 http/1.1]", good["alpn"])
+	}
+
+	bad := map[string]any{
+		"type": "ss", "server": "dash.zendegizibast.ir", "port": 2087,
+		"cipher": "\x83G", "password": "x",
+	}
+	if err := SanitizeProxyMap(bad); err == nil {
+		t.Fatal("expected garbage ss cipher to be rejected")
+	}
+}
+
+func TestParseYAMLSkipsBadSSKeepsGood(t *testing.T) {
+	raw := `
+proxies:
+  - name: bad
+    type: ss
+    server: dash.zendegizibast.ir
+    port: 2087
+    cipher: "\x83G"
+    password: x
+  - name: good
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-256-gcm
+    password: secret
+`
+	nodes, errs := ParseRawNodes(raw)
+	if len(errs) != 0 {
+		t.Fatalf("ParseRawNodes() errs = %v", errs)
+	}
+	if len(nodes) != 1 || nodes[0].DisplayName != "good" {
+		t.Fatalf("got %+v, want only the valid ss node", nodes)
+	}
+}
+
 func TestParseHy2Alias(t *testing.T) {
 	raw := "hy2://sOiWCQ2AdIV0OWNuqQVyWp4JZnRxdyLROSjX@faq.wwwinternetvideo.click:443/?insecure=1&sni=cabinet.example.com#%E8%8B%B1%E5%9B%BD"
 	node, err := ParseNodeURI(raw)

@@ -165,6 +165,43 @@ func TestBuildProbeInventoryConfigSanitizesLegacyTransportTypeOverride(t *testin
 	}
 }
 
+func TestBuildProbeInventoryConfigDropsBadSSAndFixesALPN(t *testing.T) {
+	bad := models.RuntimeNode{
+		SourceType:     "subscription",
+		SourceNodeID:   3021,
+		DisplayName:    "zendegi",
+		Protocol:       "ss",
+		Server:         "dash.zendegizibast.ir",
+		Port:           2087,
+		Enabled:        true,
+		NormalizedJSON: `{"type":"ss","server":"dash.zendegizibast.ir","port":2087,"cipher":"\u0083G","password":"x"}`,
+	}
+	good := models.RuntimeNode{
+		SourceType:     "subscription",
+		SourceNodeID:   1,
+		DisplayName:    "ok-ss",
+		Protocol:       "ss",
+		Server:         "1.2.3.4",
+		Port:           8388,
+		Enabled:        true,
+		NormalizedJSON: `{"type":"ss","server":"1.2.3.4","port":8388,"cipher":"aes-256-gcm","password":"secret","alpn":"h2"}`,
+	}
+	payload, err := BuildProbeInventoryConfig("secret", "127.0.0.1:19091", 17891, "info", []models.RuntimeNode{bad, good})
+	if err != nil {
+		t.Fatalf("BuildProbeInventoryConfig() error = %v", err)
+	}
+	config := string(payload)
+	if strings.Contains(config, "dash.zendegizibast.ir") {
+		t.Fatalf("bad ss node leaked into probe config:\n%s", config)
+	}
+	if !strings.Contains(config, "1.2.3.4") || !strings.Contains(config, "aes-256-gcm") {
+		t.Fatalf("good ss node missing from probe config:\n%s", config)
+	}
+	if strings.Contains(config, "alpn: h2\n") && !strings.Contains(config, "- h2") {
+		t.Fatalf("alpn should be a YAML list, got:\n%s", config)
+	}
+}
+
 func TestBuildPublishBundleNormalizesUnsupportedLogLevelToInfo(t *testing.T) {
 	member := models.RuntimeNode{
 		SourceType:     "manual",

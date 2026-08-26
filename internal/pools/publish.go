@@ -6,10 +6,13 @@ import (
 	"sort"
 	"strings"
 
+	"log"
+
 	"gopkg.in/yaml.v3"
 
 	"unified-proxy-pool/internal/config"
 	"unified-proxy-pool/internal/models"
+	"unified-proxy-pool/internal/nodes"
 )
 
 type PublishBundle struct {
@@ -84,12 +87,15 @@ func buildProdConfig(secret, controller, testURL, logLevel string, poolList []mo
 			if !node.Enabled {
 				continue
 			}
-			name := runtimeNodeName(node)
-			memberNames = append(memberNames, name)
-			if _, ok := seenProxyNames[name]; ok {
+			payload, ok := normalizedNodeMap(node)
+			if !ok {
 				continue
 			}
-			payload := normalizedNodeMap(node)
+			name := runtimeNodeName(node)
+			memberNames = append(memberNames, name)
+			if _, exists := seenProxyNames[name]; exists {
+				continue
+			}
 			payload["name"] = name
 			root["proxies"] = append(root["proxies"].([]map[string]any), payload)
 			seenProxyNames[name] = struct{}{}
@@ -162,7 +168,10 @@ func buildProbeConfig(secret, controller string, probeMixedPort int, logLevel st
 			continue
 		}
 		name := runtimeNodeName(node)
-		payload := normalizedNodeMap(node)
+		payload, ok := normalizedNodeMap(node)
+		if !ok {
+			continue
+		}
 		payload["name"] = name
 		root["proxies"] = append(root["proxies"].([]map[string]any), payload)
 		names = append(names, name)
@@ -193,7 +202,7 @@ func buildProbeConfig(secret, controller string, probeMixedPort int, logLevel st
 	return yaml.Marshal(root)
 }
 
-func normalizedNodeMap(node models.RuntimeNode) map[string]any {
+func normalizedNodeMap(node models.RuntimeNode) (map[string]any, bool) {
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(node.NormalizedJSON), &payload); err != nil || len(payload) == 0 {
 		payload = map[string]any{
@@ -204,7 +213,11 @@ func normalizedNodeMap(node models.RuntimeNode) map[string]any {
 		}
 	}
 	sanitizeRuntimeNodePayload(node, payload)
-	return payload
+	if err := nodes.SanitizeProxyMap(payload); err != nil {
+		log.Printf("skip mihomo node %s/%d (%s:%d): %v", node.SourceType, node.SourceNodeID, node.Server, node.Port, err)
+		return nil, false
+	}
+	return payload, true
 }
 
 func sanitizeRuntimeNodePayload(node models.RuntimeNode, payload map[string]any) {

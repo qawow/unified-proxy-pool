@@ -280,6 +280,9 @@ func normalizeProxyMaps(items []map[string]any) ([]ParsedNode, error) {
 		if name == "" || protocol == "" || server == "" || port == 0 {
 			continue
 		}
+		if err := SanitizeProxyMap(item); err != nil {
+			continue
+		}
 		raw, _ := yaml.Marshal(item)
 		result = append(result, ParsedNode{
 			DisplayName: name,
@@ -305,7 +308,7 @@ func decodeSSUserInfo(auth string) (method, password string, ok bool) {
 	if auth == "" {
 		return "", "", false
 	}
-	if method, password, ok = strings.Cut(auth, ":"); ok {
+	if method, password, ok = strings.Cut(auth, ":"); ok && IsKnownSSCipher(method) {
 		if decoded, err := url.QueryUnescape(password); err == nil {
 			password = decoded
 		}
@@ -316,7 +319,7 @@ func decodeSSUserInfo(auth string) (method, password string, ok bool) {
 		return "", "", false
 	}
 	method, password, ok = strings.Cut(string(decoded), ":")
-	if !ok || method == "" || password == "" {
+	if !ok || !IsKnownSSCipher(method) || password == "" {
 		return "", "", false
 	}
 	return method, password, true
