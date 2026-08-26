@@ -36,6 +36,7 @@ func ParseRawNodes(input string) ([]ParsedNode, []error) {
 	var result []ParsedNode
 	var errs []error
 	scanner := bufio.NewScanner(strings.NewReader(input))
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -309,9 +310,10 @@ func normalizeProxyMaps(items []map[string]any) ([]ParsedNode, error) {
 }
 
 // decodeSSUserInfo accepts:
-//   method:password
-//   percent-encoded method:password
-//   SIP002 base64(method:password)  e.g. YWVzLTI1Ni1nY206QnV0dGVyZmx5MTIzQHF3ZTk1Mjc=
+//
+//	method:password
+//	percent-encoded method:password
+//	SIP002 base64(method:password)  e.g. YWVzLTI1Ni1nY206QnV0dGVyZmx5MTIzQHF3ZTk1Mjc=
 func decodeSSUserInfo(auth string) (method, password string, ok bool) {
 	auth = strings.TrimSpace(auth)
 	if auth == "" {

@@ -19,6 +19,9 @@ func ParseSubscriptionContent(content string) ParseResult {
 	if content == "" {
 		return ParseResult{Errors: []error{errors.New("subscription content is empty")}}
 	}
+	if looksLikeHTML(content) {
+		return ParseResult{Errors: []error{errors.New("got HTML instead of a subscription")}}
+	}
 	if parsed, errs := nodes.ParseRawNodes(content); len(parsed) > 0 {
 		return ParseResult{Nodes: parsed, Errors: errs}
 	}
@@ -30,9 +33,10 @@ func ParseSubscriptionContent(content string) ParseResult {
 
 	var result ParseResult
 	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		node, err := nodes.ParseNodeURI(line)
@@ -48,16 +52,32 @@ func ParseSubscriptionContent(content string) ParseResult {
 	return result
 }
 
+func looksLikeHTML(content string) bool {
+	s := strings.TrimSpace(content)
+	if len(s) > 256 {
+		s = s[:256]
+	}
+	low := strings.ToLower(s)
+	return strings.HasPrefix(low, "<!doctype html") || strings.HasPrefix(low, "<html") ||
+		(strings.Contains(low, "<head>") && strings.Contains(low, "<body"))
+}
+
 func decodeMaybeBase64(input string) string {
 	raw := strings.ReplaceAll(normalizeSubscriptionContent(input), "\n", "")
-	decoded, err := base64.StdEncoding.DecodeString(raw)
-	if err != nil {
-		decoded, err = base64.RawStdEncoding.DecodeString(raw)
-		if err != nil {
-			return ""
+	raw = strings.ReplaceAll(raw, " ", "")
+	encodings := []*base64.Encoding{
+		base64.StdEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.RawURLEncoding,
+	}
+	for _, enc := range encodings {
+		decoded, err := enc.DecodeString(raw)
+		if err == nil && len(decoded) > 0 {
+			return string(decoded)
 		}
 	}
-	return string(decoded)
+	return ""
 }
 
 func normalizeSubscriptionContent(input string) string {

@@ -15,10 +15,12 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/proxy"
+
 	"unified-proxy-pool/internal/db"
-	"unified-proxy-pool/internal/netutil"
 	"unified-proxy-pool/internal/events"
 	"unified-proxy-pool/internal/models"
+	"unified-proxy-pool/internal/netutil"
 	"unified-proxy-pool/internal/nodes"
 	"unified-proxy-pool/internal/settings"
 )
@@ -66,6 +68,8 @@ type SyncOutcome struct {
 	Status       string   `json:"status"`
 	Modified     bool     `json:"modified"`
 	CreatedCount int      `json:"created_count"`
+	UpdatedCount int      `json:"updated_count"`
+	DeletedCount int      `json:"deleted_count"`
 	FailedCount  int      `json:"failed_count"`
 	Errors       []string `json:"errors"`
 }
@@ -349,13 +353,23 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 		s.publishSyncFailure(sub.ID, err.Error())
 		return SyncOutcome{}, err
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
+		return SyncOutcome{}, err
+	}
+	if looksLikeHTML(string(body)) {
+		err := fmt.Errorf("subscription URL returned HTML, not a node list (check fetch_proxy / headers)")
+		_ = s.setSyncFailure(ctx, sub.ID, err.Error())
+		s.publishSyncFailure(sub.ID, err.Error())
 		return SyncOutcome{}, err
 	}
 	result := ParseSubscriptionContent(string(body))
 	if len(result.Nodes) == 0 {
-		err := errors.New("no nodes parsed from subscription")
+		msg := "no nodes parsed from subscription"
+		if len(result.Errors) > 0 {
+			msg = errorSummary(result.Errors)
+		}
+		err := errors.New(msg)
 		_ = s.setSyncFailure(ctx, sub.ID, err.Error())
 		s.publishSyncFailure(sub.ID, err.Error())
 		return SyncOutcome{}, err
@@ -380,6 +394,7 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 
 	now := time.Now().UTC()
 	var syncedNodeIDs []int64
+	created, updated := 0, 0
 	matchedIDs := make(map[int64]struct{}, len(existingNodes))
 	for _, item := range result.Nodes {
 		normalizedJSON := nodes.NormalizeJSON(item.Normalized)
@@ -396,6 +411,7 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 				); err != nil {
 					return SyncOutcome{}, err
 				}
+				updated++
 			}
 			continue
 		}
@@ -413,7 +429,9 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 			return SyncOutcome{}, err
 		}
 		syncedNodeIDs = append(syncedNodeIDs, nodeID)
+		created++
 	}
+	deleted := 0
 	for _, item := range existingNodes {
 		if _, ok := matchedIDs[item.ID]; ok {
 			continue
@@ -421,6 +439,7 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM subscription_nodes WHERE id = ? AND subscription_id = ?`, item.ID, sub.ID); err != nil {
 			return SyncOutcome{}, err
 		}
+		deleted++
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET last_sync_at = ?, last_sync_status = ?, last_error = ?, etag = ?, last_modified = ?, updated_at = ?
 		WHERE id = ?`, now, "ok", errorSummary(result.Errors), resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), now, sub.ID); err != nil {
@@ -431,8 +450,10 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 	}
 	outcome := SyncOutcome{
 		Status:       "ok",
-		Modified:     true,
-		CreatedCount: len(result.Nodes),
+		Modified:     created > 0 || updated > 0 || deleted > 0,
+		CreatedCount: created,
+		UpdatedCount: updated,
+		DeletedCount: deleted,
 		FailedCount:  len(result.Errors),
 		Errors:       stringifyErrors(result.Errors),
 	}
@@ -765,9 +786,26 @@ func (s *Service) clientFor(sub models.Subscription) *http.Client {
 		return s.client
 	}
 	transport := &http.Transport{
-		Proxy:             http.ProxyURL(proxyURL),
 		ForceAttemptHTTP2: false,
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
+	}
+	switch strings.ToLower(proxyURL.Scheme) {
+	case "socks", "socks5", "socks5h":
+		var auth *proxy.Auth
+		if proxyURL.User != nil {
+			pass, _ := proxyURL.User.Password()
+			auth = &proxy.Auth{User: proxyURL.User.Username(), Password: pass}
+		}
+		d, err := proxy.SOCKS5("tcp", proxyURL.Host, auth, proxy.Direct)
+		if err == nil {
+			if cd, ok := d.(proxy.ContextDialer); ok {
+				transport.DialContext = cd.DialContext
+			}
+		} else {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	default:
+		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 	return &http.Client{Timeout: 45 * time.Second, Transport: transport}
 }
@@ -806,6 +844,15 @@ func (s *Service) doWithRetry(req *http.Request, retryCount int, client *http.Cl
 		cloned := req.Clone(req.Context())
 		resp, err := client.Do(cloned)
 		if err == nil {
+			if resp.StatusCode == 429 || resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504 {
+				_ = resp.Body.Close()
+				lastErr = fmt.Errorf("subscription fetch failed: %s", resp.Status)
+				if attempt < attempts-1 {
+					time.Sleep(time.Duration(attempt+1) * 400 * time.Millisecond)
+					continue
+				}
+				return nil, lastErr
+			}
 			return resp, nil
 		}
 		lastErr = err

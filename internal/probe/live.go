@@ -12,6 +12,7 @@ import (
 
 	"unified-proxy-pool/internal/freproxies"
 	"unified-proxy-pool/internal/models"
+	"unified-proxy-pool/internal/nodes"
 )
 
 func isNativeProtocol(protocol string) bool {
@@ -49,6 +50,23 @@ func tcpDialMS(ctx context.Context, host string, port int, timeout time.Duration
 
 type nodeCreds struct {
 	TLS bool
+}
+
+func payloadFromJSON(raw string, node models.RuntimeNode) map[string]any {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil || m == nil {
+		m = map[string]any{}
+	}
+	if node.Protocol != "" {
+		m["type"] = node.Protocol
+	}
+	if node.Server != "" {
+		m["server"] = node.Server
+	}
+	if node.Port > 0 {
+		m["port"] = node.Port
+	}
+	return m
 }
 
 func credsFromNormalizedJSON(raw string) nodeCreds {
@@ -124,6 +142,10 @@ func (s *Service) measureNodeLatency(ctx context.Context, node models.RuntimeNod
 			return probeTLSHandshake(ctx, node.Server, node.Port, timeout)
 		}
 		return probeNativeHTTP(ctx, node, testURL, timeout)
+	}
+
+	if err := nodes.SanitizeProxyMap(payloadFromJSON(node.NormalizedJSON, node)); err != nil {
+		return 0, fmt.Errorf("node skipped (would fatal mihomo): %w", err)
 	}
 
 	if _, err := tcpDialMS(ctx, node.Server, node.Port, timeout); err != nil {

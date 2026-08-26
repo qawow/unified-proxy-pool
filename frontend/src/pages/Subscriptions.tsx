@@ -90,8 +90,16 @@ export function SubscriptionsPage() {
       } else if (action === "toggle") {
         await endpoints.subscriptions.toggle(id);
       } else {
-        await endpoints.subscriptions.sync(id);
-        toast("同步完成", "success");
+        const out = (await endpoints.subscriptions.sync(id)) as {
+          created_count?: number;
+          updated_count?: number;
+          deleted_count?: number;
+          failed_count?: number;
+        } | null;
+        const created = out?.created_count ?? 0;
+        const updated = out?.updated_count ?? 0;
+        const failed = out?.failed_count ?? 0;
+        toast(`同步完成：新增 ${created}，更新 ${updated}，解析失败 ${failed}`, "success");
       }
       await load();
     } catch (error) {

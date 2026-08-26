@@ -17,6 +17,25 @@ func TestParseSubscriptionContentFromBase64List(t *testing.T) {
 	}
 }
 
+func TestParseSubscriptionContentURLSafeBase64(t *testing.T) {
+	rawList := "vless://uuid@example.org:8443#node-b"
+	encoded := base64.URLEncoding.EncodeToString([]byte(rawList))
+	result := ParseSubscriptionContent(encoded)
+	if len(result.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d errs %v", len(result.Nodes), result.Errors)
+	}
+}
+
+func TestParseSubscriptionContentRejectsHTML(t *testing.T) {
+	result := ParseSubscriptionContent("<!DOCTYPE html><html><body>blocked</body></html>")
+	if len(result.Nodes) != 0 {
+		t.Fatalf("html should not parse as nodes: %+v", result.Nodes)
+	}
+	if len(result.Errors) == 0 {
+		t.Fatal("expected html error")
+	}
+}
+
 func TestParseSubscriptionContentFromBOMBase64List(t *testing.T) {
 	rawList := "vless://uuid@example.org:8443#node-b"
 	encoded := "\uFEFF" + base64.StdEncoding.EncodeToString([]byte(rawList))

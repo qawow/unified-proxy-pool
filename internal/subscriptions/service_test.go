@@ -493,7 +493,7 @@ func TestSyncPreservesUnchangedNodeIDAndState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	if !outcome.Modified || outcome.CreatedCount != 1 {
+	if !outcome.Modified || outcome.CreatedCount != 0 || outcome.DeletedCount != 1 {
 		t.Fatalf("unexpected sync outcome: %+v", outcome)
 	}
 
