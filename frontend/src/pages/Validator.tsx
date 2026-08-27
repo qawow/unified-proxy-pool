@@ -290,7 +290,7 @@ export function ValidatorPage() {
               <div className="text-sm text-muted-foreground">跑过一轮校验后，这里按来源统计通过/失败。</div>
             ) : (
               <div className="space-y-2">
-                {(sourceStats.length ? sourceStats : fails.map((f) => ({ name: f.name, ok: 0, fail: f.fails, success_rate: 0, avg_latency_ms: 0, auto_disabled: false }))).map((item) => (
+                {(sourceStats.length ? sourceStats : fails.map((f) => ({ name: f.name, ok: 0, fail: f.fails, success_rate: 0, avg_latency_ms: 0, recent_ok: 0, recent_fail: f.fails, recent_rate: 0, auto_disabled: false }))).map((item) => (
                   <div key={item.name} className="flex items-center justify-between gap-2 rounded-2xl border border-white/50 px-3 py-2 text-sm dark:border-white/10">
                     <span className="font-mono text-xs">
                       {item.name}
