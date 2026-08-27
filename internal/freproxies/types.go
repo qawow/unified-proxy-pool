@@ -77,10 +77,11 @@ type ScraperStat struct {
 	TotalOK   int64     `json:"total_ok"`
 	TotalFail int64     `json:"total_fail"`
 	URLHint   string    `json:"url_hint"`
-	Fragile   bool      `json:"fragile"`
-	Builtin   bool      `json:"builtin"`
-	Format    string    `json:"format"`
-	URLs      []string  `json:"urls,omitempty"`
+	Fragile      bool     `json:"fragile"`
+	Builtin      bool     `json:"builtin"`
+	Format       string   `json:"format"`
+	URLs         []string `json:"urls,omitempty"`
+	AutoDisabled bool     `json:"auto_disabled,omitempty"`
 }
 
 type Overview struct {
@@ -270,12 +271,16 @@ type BatchHistory struct {
 }
 
 type SourceStatSnap struct {
-	Name         string  `json:"name"`
-	OK           int64   `json:"ok"`
-	Fail         int64   `json:"fail"`
-	SuccessRate  float64 `json:"success_rate"`
-	AvgLatencyMS float64 `json:"avg_latency_ms"`
-	AutoDisabled bool    `json:"auto_disabled"`
+	Name          string     `json:"name"`
+	OK            int64      `json:"ok"`
+	Fail          int64      `json:"fail"`
+	SuccessRate   float64    `json:"success_rate"`
+	AvgLatencyMS  float64    `json:"avg_latency_ms"`
+	RecentOK      int64      `json:"recent_ok"`
+	RecentFail    int64      `json:"recent_fail"`
+	RecentRate    float64    `json:"recent_rate"`
+	AutoDisabled  bool       `json:"auto_disabled"`
+	DisabledUntil *time.Time `json:"disabled_until,omitempty"`
 }
 
 type SourceFail struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,8 +50,9 @@ type Service struct {
 	batchFail int
 	lifeOK    int64
 	lifeFail  int64
-	lifeN     int64
-	history   []BatchSummary
+	lifeN      int64
+	history    []BatchSummary
+	sourceBatch map[string][2]int
 }
 
 var liveMu sync.RWMutex
@@ -173,6 +175,37 @@ func (s *Service) LastBatch() BatchSummary {
 	return s.lastBatch
 }
 
+// LastSourceBatch is this-round ok/fail per source (skips like blocked-country omitted).
+func (s *Service) LastSourceBatch() map[string][2]int {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string][2]int, len(s.sourceBatch))
+	for k, v := range s.sourceBatch {
+		out[k] = v
+	}
+	return out
+}
+
+func classifyValidateErr(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "blocked country"):
+		return "blocked_country"
+	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline"):
+		return "timeout"
+	case strings.Contains(msg, "connect") || strings.Contains(msg, "refused") || strings.Contains(msg, "no route"):
+		return "connect"
+	default:
+		return "fail"
+	}
+}
+
 func (s *Service) validateURLs() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -248,6 +281,7 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 	s.batchSize = len(batch)
 	s.batchOK = 0
 	s.batchFail = 0
+	s.sourceBatch = map[string][2]int{}
 	s.mu.Unlock()
 	DefaultLogs.SetRunning(true)
 	DefaultLogs.Add("info", "", "开始校验 batch="+strconv.Itoa(len(batch))+
@@ -259,6 +293,7 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 	var wg sync.WaitGroup
 	var okCount, failCount int
 	var mu sync.Mutex
+	sourceBatch := map[string][2]int{}
 	for _, p := range batch {
 		p := p
 		wg.Add(1)
@@ -282,18 +317,28 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 				lastErr = err
 			}
 			mu.Lock()
+			kind := classifyValidateErr(lastErr)
 			if okResult {
 				okCount++
 				DefaultLogs.Add("ok", p.Addr, "通过", p.Source, latency)
 				sourcestats.Default.Record(p.Source, true, latency)
+				pair := sourceBatch[p.Source]
+				pair[0]++
+				sourceBatch[p.Source] = pair
+			} else if kind == "blocked_country" {
+				msg := lastErr.Error()
+				DefaultLogs.Add("skip", p.Addr, msg, p.Source, 0)
 			} else {
 				failCount++
-				msg := "失败"
+				msg := kind
 				if lastErr != nil {
 					msg = lastErr.Error()
 				}
 				DefaultLogs.Add("fail", p.Addr, msg, p.Source, 0)
 				sourcestats.Default.Record(p.Source, false, 0)
+				pair := sourceBatch[p.Source]
+				pair[1]++
+				sourceBatch[p.Source] = pair
 			}
 			s.mu.Lock()
 			s.batchOK = okCount
@@ -316,6 +361,7 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 	s.lifeOK += int64(okCount)
 	s.lifeFail += int64(failCount)
 	s.lifeN++
+	s.sourceBatch = sourceBatch
 	s.history = append([]BatchSummary{finished}, s.history...)
 	if len(s.history) > 20 {
 		s.history = s.history[:20]

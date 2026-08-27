@@ -284,6 +284,7 @@ export function SourcesPage() {
                     <StatusBadge status={item.enabled ? "enabled" : "disabled"} />
                     {item.builtin ? <StatusBadge status="内置" /> : <StatusBadge status="自定义" />}
                     {item.fragile ? <StatusBadge status="fragile" /> : null}
+                    {item.auto_disabled ? <span className="text-xs text-rose-500">校验自动停用</span> : null}
                     {item.format ? <span className="soft-pill">{item.format}</span> : null}
                   </div>
                   <div className="mt-1 break-all text-xs text-muted-foreground">

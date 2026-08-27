@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"unified-proxy-pool/internal/config"
+	"unified-proxy-pool/internal/geoip"
 	"unified-proxy-pool/internal/models"
 	"unified-proxy-pool/internal/nodes"
 )
@@ -85,6 +86,9 @@ func buildProdConfig(secret, controller, testURL, logLevel string, poolList []mo
 		memberNames := make([]string, 0, len(groupMembers))
 		for _, node := range groupMembers {
 			if !node.Enabled {
+				continue
+			}
+			if geoip.Active().BlockedNode(node.Server, node.DisplayName) {
 				continue
 			}
 			payload, ok := normalizedNodeMap(node)
@@ -165,6 +169,9 @@ func buildProbeConfig(secret, controller string, probeMixedPort int, logLevel st
 	names := make([]string, 0, len(inventory))
 	for _, node := range inventory {
 		if !node.Enabled {
+			continue
+		}
+		if geoip.Active().BlockedNode(node.Server, node.DisplayName) {
 			continue
 		}
 		name := runtimeNodeName(node)

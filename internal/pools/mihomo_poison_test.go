@@ -119,3 +119,27 @@ func TestProbeYAMLNeverContainsMihomoFatals(t *testing.T) {
 		})
 	}
 }
+
+func TestProbeYAMLDropsMainlandChinaNodes(t *testing.T) {
+	cn := models.RuntimeNode{
+		SourceType: "subscription", SourceNodeID: 9, DisplayName: "中国 上海",
+		Protocol: "ss", Server: "203.0.113.88", Port: 8388, Enabled: true,
+		NormalizedJSON: `{"type":"ss","server":"203.0.113.88","port":8388,"cipher":"aes-256-gcm","password":"secret"}`,
+	}
+	hk := models.RuntimeNode{
+		SourceType: "subscription", SourceNodeID: 10, DisplayName: "香港 01",
+		Protocol: "ss", Server: "203.0.113.89", Port: 8388, Enabled: true,
+		NormalizedJSON: `{"type":"ss","server":"203.0.113.89","port":8388,"cipher":"aes-256-gcm","password":"secret"}`,
+	}
+	payload, err := BuildProbeInventoryConfig("secret", "127.0.0.1:19091", 17891, "info", []models.RuntimeNode{cn, hk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(payload)
+	if strings.Contains(config, "203.0.113.88") || strings.Contains(config, "中国") {
+		t.Fatalf("CN node leaked into probe YAML:\n%s", config)
+	}
+	if !strings.Contains(config, "203.0.113.89") {
+		t.Fatalf("HK node missing:\n%s", config)
+	}
+}

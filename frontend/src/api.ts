@@ -160,6 +160,8 @@ export const endpoints = {
         `/api/validator/logs?limit=${limit}`,
       ),
     clearLogs: () => api("/api/validator/logs/clear", { method: "POST" }),
+    reenable: (name: string) =>
+      api(`/api/validator/sources/${encodeURIComponent(name)}/reenable`, { method: "POST" }),
   },
   blacklist: {
     list: async () => asArray(await api<{ host: string; reason: string; until?: string; created_at: string }[]>("/api/blacklist")),

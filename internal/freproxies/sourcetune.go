@@ -55,8 +55,13 @@ type TuneDecision struct {
 }
 
 // looksDead reports whether a measurement found nothing usable.
+// Samples below 20 are treated as inconclusive so a 1-proxy validate batch
+// cannot be mixed with CLI 60-sample history and disable a source.
 func looksDead(rec SourceYieldRecord) bool {
-	return rec.Action == "DISABLE" || (rec.Sampled > 0 && rec.Alive == 0)
+	if rec.Sampled < 20 {
+		return false
+	}
+	return rec.Action == "DISABLE" || rec.Alive == 0
 }
 
 // leadingDead counts how many of the newest measurements in a row read dead.

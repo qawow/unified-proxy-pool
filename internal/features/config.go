@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"unified-proxy-pool/internal/chanpolicy"
+	"unified-proxy-pool/internal/geoip"
 )
 
 // Config holds F1–F6 panel/runtime feature flags persisted as settings.feature_json.
@@ -42,6 +43,14 @@ type Config struct {
 
 	// Per-channel temporary bans + selection strategy
 	Channels ChannelPolicyConfig `json:"channels,omitempty"`
+
+	// CountryFilterEnabled nil = default on. false turns the deny list off.
+	CountryFilterEnabled *bool `json:"country_filter_enabled,omitempty"`
+	// CheckExitCountry nil = default on: geolocate through the proxy, not the host.
+	CheckExitCountry *bool `json:"check_exit_country,omitempty"`
+	// BlockedCountries nil = default ["CN"]. Empty slice = block nothing.
+	// HK/TW/MO are not included; add them here to drop those too.
+	BlockedCountries []string `json:"blocked_countries,omitempty"`
 }
 
 // ChannelPolicyConfig is the panel-editable per-channel ban and selection policy.
@@ -182,6 +191,7 @@ func DefaultChain() ChainConfig {
 }
 
 func Default() Config {
+	on, exitOn := true, true
 	return Config{
 		DashboardCards:        DefaultCards(),
 		StickyTTLSec:          600,
@@ -193,6 +203,9 @@ func Default() Config {
 		WebhookEvents:         []string{"validated_low", "validate_all_fail", "channel_ban"},
 		Chain:                 DefaultChain(),
 		Channels:              DefaultChannels(),
+		CountryFilterEnabled:  &on,
+		CheckExitCountry:      &exitOn,
+		BlockedCountries:      []string{"CN"},
 	}
 }
 
@@ -240,7 +253,48 @@ func Parse(raw string) Config {
 	}
 	cfg.Chain = normalizeChain(cfg.Chain)
 	cfg.Channels = normalizeChannels(cfg.Channels)
+	cfg = normalizeCountry(cfg)
 	return cfg
+}
+
+func normalizeCountry(cfg Config) Config {
+	d := Default()
+	if cfg.CountryFilterEnabled == nil {
+		cfg.CountryFilterEnabled = d.CountryFilterEnabled
+	}
+	if cfg.CheckExitCountry == nil {
+		cfg.CheckExitCountry = d.CheckExitCountry
+	}
+	if cfg.BlockedCountries == nil {
+		cfg.BlockedCountries = append([]string{}, d.BlockedCountries...)
+	}
+	out := make([]string, 0, len(cfg.BlockedCountries))
+	seen := map[string]struct{}{}
+	for _, c := range cfg.BlockedCountries {
+		n := geoip.Normalize(c)
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	cfg.BlockedCountries = out
+	return cfg
+}
+
+func (c Config) CountryEnabled() bool {
+	return c.CountryFilterEnabled == nil || *c.CountryFilterEnabled
+}
+
+func (c Config) ExitCheckEnabled() bool {
+	return c.CheckExitCountry == nil || *c.CheckExitCountry
+}
+
+func (c Config) CountryFilter() geoip.Filter {
+	return geoip.BuildFilter(c.CountryEnabled(), c.ExitCheckEnabled(), c.BlockedCountries)
 }
 
 func normalizeChain(c ChainConfig) ChainConfig {

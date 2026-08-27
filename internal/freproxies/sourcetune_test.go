@@ -268,6 +268,15 @@ func TestPlanAlwaysExplainsItself(t *testing.T) {
 }
 
 // An empty history set must not abort or panic.
+func TestLooksDeadIgnoresTinyValidateBatches(t *testing.T) {
+	if looksDead(SourceYieldRecord{Sampled: 3, Alive: 0, Action: "DISABLE"}) {
+		t.Fatal("a 0/3 validate-batch sample must not count as dead")
+	}
+	if !looksDead(SourceYieldRecord{Sampled: 60, Alive: 0, Action: "DISABLE"}) {
+		t.Fatal("a 0/60 CLI sample must still count as dead")
+	}
+}
+
 func TestPlanHandlesNoHistory(t *testing.T) {
 	decisions, abort := PlanSourceTuning(nil, DefaultTuneConfig())
 	if abort != "" {

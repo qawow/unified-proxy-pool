@@ -15,8 +15,9 @@ import (
 	"golang.org/x/net/proxy"
 
 	"unified-proxy-pool/internal/db"
-	"unified-proxy-pool/internal/netutil"
 	"unified-proxy-pool/internal/events"
+	"unified-proxy-pool/internal/geoip"
+	"unified-proxy-pool/internal/netutil"
 	"unified-proxy-pool/internal/mihomo"
 	"unified-proxy-pool/internal/models"
 	"unified-proxy-pool/internal/nodes"
@@ -209,6 +210,9 @@ func (s *Service) enqueuePoolMemberLatencySweep(ctx context.Context) {
 				continue
 			}
 			seen[key] = struct{}{}
+			if s.shouldSkipProbe(ctx, member.SourceType, member.SourceNodeID) {
+				continue
+			}
 			_ = s.EnqueueLatency(member.SourceType, member.SourceNodeID)
 		}
 	}
@@ -241,6 +245,9 @@ func (s *Service) enqueueBackgroundSpeedSweep(ctx context.Context) {
 			continue
 		}
 		seen[key] = struct{}{}
+		if s.shouldSkipProbe(ctx, node.SourceType, node.SourceNodeID) {
+			continue
+		}
 		_ = s.EnqueueSpeed(node.SourceType, node.SourceNodeID)
 	}
 }
@@ -382,6 +389,20 @@ func (s *Service) syncProbeInventoryAndGetNode(ctx context.Context, sourceType s
 		}
 	}
 	return node, nil
+}
+
+func (s *Service) shouldSkipProbe(ctx context.Context, sourceType string, sourceNodeID int64) bool {
+	node, err := s.lookupRuntimeNode(ctx, sourceType, sourceNodeID)
+	if err != nil {
+		return true
+	}
+	if geoip.Active().BlockedNode(node.Server, node.DisplayName) {
+		return true
+	}
+	if err := nodes.SanitizeProxyMap(payloadFromJSON(node.NormalizedJSON, node)); err != nil {
+		return true
+	}
+	return false
 }
 
 func (s *Service) lookupRuntimeNode(ctx context.Context, sourceType string, sourceNodeID int64) (models.RuntimeNode, error) {

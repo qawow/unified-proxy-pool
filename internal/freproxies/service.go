@@ -12,6 +12,7 @@ import (
 
 	"unified-proxy-pool/internal/crawlers"
 	"unified-proxy-pool/internal/events"
+	"unified-proxy-pool/internal/geoip"
 	"unified-proxy-pool/internal/netutil"
 )
 
@@ -22,6 +23,7 @@ type Service struct {
 	events    *events.Broker
 	redisOK   bool
 	geoLookup func(ctx context.Context, ip string) (string, error)
+	geoSvc    *geoip.Service
 	// optional filters
 	blocked        func(addr string) bool
 	sourceDisabled func(source string) bool
@@ -66,6 +68,10 @@ func (s *Service) Hot() *HotCache {
 
 func (s *Service) SetGeoLookup(fn func(ctx context.Context, ip string) (string, error)) {
 	s.geoLookup = fn
+}
+
+func (s *Service) SetGeoService(g *geoip.Service) {
+	s.geoSvc = g
 }
 
 func (s *Service) SetBlockedFn(fn func(addr string) bool) {
@@ -244,6 +250,8 @@ type SubmitResult struct {
 	// RawAtCap is true when the raw pool is saturated, which is *why* eviction
 	// happens; it tells the caller this is capacity pressure, not a bug.
 	RawAtCap bool `json:"raw_at_cap"`
+	// Blocked is how many well-formed items the country deny list dropped.
+	Blocked int `json:"blocked,omitempty"`
 }
 
 // SubmitRaw adds a batch of raw addresses without validating them.
@@ -283,6 +291,7 @@ func (s *Service) SubmitRaw(ctx context.Context, items []Proxy, source string) (
 		toAdd = append(toAdd, p)
 	}
 	res.Parsed = len(toAdd)
+	toAdd, res.Blocked = s.dropBlocked(toAdd)
 	if len(toAdd) == 0 {
 		return res, nil
 	}
@@ -295,7 +304,10 @@ func (s *Service) SubmitRaw(ctx context.Context, items []Proxy, source string) (
 		return res, err
 	}
 	res.Added = added
-	res.Duplicates = res.Parsed - added
+	res.Duplicates = res.Parsed - res.Blocked - added
+	if res.Duplicates < 0 {
+		res.Duplicates = 0
+	}
 
 	if err2 := s.store.Trim(ctx); err2 != nil {
 		_ = err2 // trim failure is cosmetic; the counts below still reflect reality
@@ -515,10 +527,12 @@ func (s *Service) runOne(ctx context.Context, c crawlers.Crawler) (ScraperStat, 
 			Host:     item.Host,
 			Port:     item.Port,
 			Protocol: item.Protocol,
+			Region:   item.Region,
 			Source:   c.Name(),
 			Score:    ScoreInit,
 		})
 	}
+	converted, _ = s.dropBlocked(converted)
 	added, addErr := s.store.AddRaw(ctx, converted)
 	if addErr != nil {
 		stat.LastError = addErr.Error()
@@ -549,21 +563,44 @@ func (s *Service) TestProxyOpts(ctx context.Context, addr, validateURL string, t
 	p, err := s.store.Get(ctx, addr)
 	if err != nil {
 		p = Proxy{Addr: addr, Host: host, Port: port, Protocol: "http", Source: "manual", Score: ScoreInit}
-		_, _ = s.store.AddRaw(ctx, []Proxy{p})
+		kept, n := s.dropBlocked([]Proxy{p})
+		if n > 0 || len(kept) == 0 {
+			return p, countryBlockedError(p.Region)
+		}
+		_, _ = s.store.AddRaw(ctx, kept)
 		p, _ = s.store.Get(ctx, addr)
+	} else if geoip.Active().Blocks(p.Region) || geoip.Active().BlockedNode(p.Host, "") {
+		_ = s.store.Delete(ctx, addr)
+		return p, countryBlockedError(p.Region)
 	}
 	latency, okResult := checkHTTPProxy(ctx, p, validateURL, timeout)
+	region := p.Region
+	// Via-proxy geo is expensive (ip-api ~45/min). If we already know a
+	// country, trust it for this check; unknown region still goes through.
+	if okResult && geoip.Active().CheckExit && geoip.Normalize(region) == "" {
+		if exit := s.probeExitCountry(ctx, p, timeout); exit != "" {
+			region = exit
+		}
+	}
+	if okResult && region == "" && s.geoLookup != nil && host != "" {
+		gctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		hostRegion, gerr := s.geoLookup(gctx, host)
+		cancel()
+		if gerr == nil && hostRegion != "" {
+			region = hostRegion
+		}
+	}
+	if geoip.Active().Blocks(region) {
+		_ = s.store.MarkValidated(ctx, addr, latency, false)
+		_ = s.store.Delete(ctx, addr)
+		if publish {
+			s.publish("validate.finished", map[string]any{"addr": addr, "ok": false, "reason": "blocked_country", "region": region})
+		}
+		return p, countryBlockedError(region)
+	}
 	_ = s.store.MarkValidated(ctx, addr, latency, okResult)
-	if okResult && s.geoLookup != nil && host != "" {
-		go func(ip string, a string) {
-			gctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			region, err := s.geoLookup(gctx, ip)
-			if err != nil || region == "" {
-				return
-			}
-			_ = s.store.UpdateRegion(context.Background(), a, region)
-		}(host, addr)
+	if okResult && region != "" {
+		_ = s.store.UpdateRegion(ctx, addr, region)
 	}
 	updated, err := s.store.Get(ctx, addr)
 	if err != nil {
@@ -573,7 +610,7 @@ func (s *Service) TestProxyOpts(ctx context.Context, addr, validateURL string, t
 		return p, err
 	}
 	if publish {
-		s.publish("validate.finished", map[string]any{"addr": addr, "ok": okResult, "latency_ms": latency})
+		s.publish("validate.finished", map[string]any{"addr": addr, "ok": okResult, "latency_ms": latency, "region": region})
 	}
 	if !okResult {
 		return updated, fmt.Errorf("proxy validation failed")

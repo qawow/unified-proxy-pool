@@ -25,6 +25,7 @@ import (
 	"unified-proxy-pool/internal/events"
 	"unified-proxy-pool/internal/features"
 	"unified-proxy-pool/internal/freproxies"
+	"unified-proxy-pool/internal/geoip"
 	"unified-proxy-pool/internal/mihomo"
 	"unified-proxy-pool/internal/models"
 	"unified-proxy-pool/internal/nodes"
@@ -213,6 +214,7 @@ func (a *App) Router() (http.Handler, error) {
 			api.Get("/stats/connections", a.handleConnections)
 			api.Get("/validator/queues", a.handleValidatorQueues)
 			api.Post("/validator/run", a.handleValidatorRun)
+			api.Post("/validator/sources/{name}/reenable", a.handleValidatorSourceReenable)
 			api.Get("/validator/logs", a.handleValidatorLogs)
 			api.Post("/validator/logs/clear", a.handleValidatorLogsClear)
 			api.Get("/proxies/export", a.handleProxyExport)
@@ -870,11 +872,27 @@ func (a *App) publishRuntimeAsync() {
 func (a *App) applyFeatureHot(raw string) {
 	fc := features.Parse(raw)
 	webhook.Default.Configure(fc.WebhookURL, fc.WebhookEvents)
+	geoip.SetFilter(fc.CountryFilter())
 	if a.channels != nil {
 		a.channels.SetPolicy(fc.Channels.ToPolicy())
 	}
 	if a.free != nil {
 		a.free.SetPickDefaults(fc.Channels.PickStrategy, fc.Channels.CooldownDuration())
+		go func() {
+			n, err := a.free.PurgeBlocked(context.Background())
+			if err != nil {
+				return
+			}
+			if n > 0 && a.events != nil {
+				a.events.Publish("proxies.purged", map[string]any{"reason": "blocked_country", "count": n})
+			}
+		}()
+	}
+	if a.nodes != nil {
+		go func() { _, _ = a.nodes.DisableBlocked(context.Background()) }()
+	}
+	if a.subscriptions != nil {
+		go func() { _, _ = a.subscriptions.DisableBlocked(context.Background()) }()
 	}
 	if a.sched != nil {
 		a.sched.ApplyValidateExtras(fc.ValidateURLs(a.freeCfg.FreeValidateURL), fc.SourceAutoDisableRate, fc.SourceMinSamples)

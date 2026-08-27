@@ -19,6 +19,7 @@ import (
 
 	"unified-proxy-pool/internal/db"
 	"unified-proxy-pool/internal/events"
+	"unified-proxy-pool/internal/geoip"
 	"unified-proxy-pool/internal/models"
 	"unified-proxy-pool/internal/netutil"
 	"unified-proxy-pool/internal/nodes"
@@ -397,6 +398,9 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 	created, updated := 0, 0
 	matchedIDs := make(map[int64]struct{}, len(existingNodes))
 	for _, item := range result.Nodes {
+		if geoip.Active().BlockedNode(item.Server, item.DisplayName) {
+			continue
+		}
 		normalizedJSON := nodes.NormalizeJSON(item.Normalized)
 		fingerprint := subscriptionNodeFingerprint(item.Protocol, item.Server, item.Port, normalizedJSON)
 		if existing, ok := popStoredSubscriptionNode(existingByFingerprint[fingerprint], item.RawPayload); ok {
@@ -485,6 +489,9 @@ func (s *Service) AllRuntimeNodes(ctx context.Context) ([]models.RuntimeNode, er
 		item.SourceType = "subscription"
 		if err := rows.Scan(&item.SourceNodeID, &item.DisplayName, &item.Protocol, &item.Server, &item.Port, &item.RawPayload, &item.NormalizedJSON, &item.Enabled, &item.LastStatus); err != nil {
 			return nil, err
+		}
+		if geoip.Active().BlockedNode(item.Server, item.DisplayName) {
+			continue
 		}
 		result = append(result, item)
 	}
@@ -891,6 +898,40 @@ func shouldSyncSubscription(item models.Subscription, now time.Time) bool {
 		return true
 	}
 	return !item.LastSyncAt.Add(time.Duration(item.SyncIntervalSec) * time.Second).After(now)
+}
+
+// DisableBlocked permanently deletes subscription nodes the country filter rejects.
+func (s *Service) DisableBlocked(ctx context.Context) (int, error) {
+	if s == nil || s.store == nil {
+		return 0, nil
+	}
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT id, display_name, server FROM subscription_nodes`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var name, server string
+		if err := rows.Scan(&id, &name, &server); err != nil {
+			return 0, err
+		}
+		if geoip.Active().BlockedNode(server, name) {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, id := range ids {
+		if _, err := s.store.DB.ExecContext(ctx, `DELETE FROM subscription_nodes WHERE id = ?`, id); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 func (s *Service) beginSync(id int64) bool {

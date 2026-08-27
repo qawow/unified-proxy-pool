@@ -25,6 +25,8 @@ type Scheduler struct {
 	// last run unix for dynamic interval
 	lastScrapeUnix   atomic.Int64
 	lastValidateUnix atomic.Int64
+	validateRounds   atomic.Int64
+	lastTuneUnix     atomic.Int64
 }
 
 func New(cfg config.App, free *freproxies.Service, val *validator.Service) *Scheduler {
@@ -130,6 +132,22 @@ func (s *Scheduler) validateOnce(ctx context.Context) {
 	defer cancel()
 	s.validator.ValidateBatch(runCtx, 200)
 	s.lastValidateUnix.Store(time.Now().Unix())
+	if s.free != nil {
+		s.free.RecordValidateYield(runCtx, s.validator.LastSourceBatch())
+		n := s.validateRounds.Add(1)
+		now := time.Now().Unix()
+		if n%3 == 0 && now-s.lastTuneUnix.Load() >= 3600 {
+			applied, abort, err := s.free.TuneFromYield(runCtx)
+			s.lastTuneUnix.Store(now)
+			if err != nil {
+				log.Printf("sourcetune: %v", err)
+			} else if abort != "" {
+				log.Printf("sourcetune skipped: %s", abort)
+			} else if applied > 0 {
+				log.Printf("sourcetune applied %d source toggle(s)", applied)
+			}
+		}
+	}
 }
 
 func (s *Scheduler) TriggerScrape(ctx context.Context) {

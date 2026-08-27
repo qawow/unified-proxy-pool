@@ -111,6 +111,7 @@ func Run() {
 	scraperSvc := scrapers.New(store, registry)
 	freeSvc := freproxies.NewService(freeStore, registry, broker, redisOK)
 	geoSvc := geoip.New(nil)
+	freeSvc.SetGeoService(geoSvc)
 	freeSvc.SetGeoLookup(func(ctx context.Context, ip string) (string, error) {
 		r, err := geoSvc.Lookup(ctx, ip)
 		if err != nil {

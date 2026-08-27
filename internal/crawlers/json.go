@@ -14,7 +14,8 @@ var (
 	jsonHostKeys  = []string{"ip", "host", "hostname", "server", "address", "ip_address", "ipAddress"}
 	jsonPortKeys  = []string{"port", "portNumber", "port_number"}
 	jsonAddrKeys  = []string{"proxy", "addr", "address", "ip_port", "ipPort", "endpoint", "url"}
-	jsonProtoKeys = []string{"protocol", "type", "scheme", "proxy_type", "proxyType"}
+	jsonProtoKeys   = []string{"protocol", "type", "scheme", "proxy_type", "proxyType"}
+	jsonCountryKeys = []string{"countryCode", "country_code", "country_code_iso2", "code", "cc", "country", "nation"}
 )
 
 // ParseJSONProxies extracts proxies from the JSON shapes the free APIs use:
@@ -130,11 +131,13 @@ func proxyFromJSONObject(entry map[string]any, defaultProto string) (Proxy, bool
 		}
 	}
 
+	region, _ := firstJSONString(entry, jsonCountryKeys)
+
 	// Separate host + port fields.
 	if host, ok := firstJSONString(entry, jsonHostKeys); ok {
 		if port, ok := firstJSONInt(entry, jsonPortKeys); ok {
 			if h, p, ok := validHostPort(host, port); ok {
-				return Proxy{Host: h, Port: p, Protocol: proto}, true
+				return Proxy{Host: h, Port: p, Protocol: proto, Region: region}, true
 			}
 		}
 	}
@@ -142,7 +145,7 @@ func proxyFromJSONObject(entry map[string]any, defaultProto string) (Proxy, bool
 	// Pre-joined "host:port" (or a full URL) in a single field.
 	if addr, ok := firstJSONString(entry, jsonAddrKeys); ok {
 		if h, p, ok := splitHostPort(stripURLScheme(addr)); ok {
-			return Proxy{Host: h, Port: p, Protocol: proto}, true
+			return Proxy{Host: h, Port: p, Protocol: proto, Region: region}, true
 		}
 	}
 	return Proxy{}, false

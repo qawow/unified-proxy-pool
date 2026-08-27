@@ -208,3 +208,24 @@ func TestDynamicJSONFormatParsesFields(t *testing.T) {
 		})
 	}
 }
+
+func TestParseJSONProxiesKeepsSourceCountry(t *testing.T) {
+	body := `{"data":[
+		{"ip":"1.2.3.4","port":"8080","country":"CN","protocols":["http"]},
+		{"ip":"5.6.7.8","port":"3128","countryCode":"US","protocols":["http"]}
+	]}`
+	got := ParseJSONProxies([]byte(body), "http")
+	if len(got) != 2 {
+		t.Fatalf("len=%d, want 2", len(got))
+	}
+	byHost := map[string]string{}
+	for _, p := range got {
+		byHost[p.Host] = p.Region
+	}
+	if byHost["1.2.3.4"] != "CN" {
+		t.Errorf("CN source country discarded: %q", byHost["1.2.3.4"])
+	}
+	if byHost["5.6.7.8"] != "US" {
+		t.Errorf("US source country discarded: %q", byHost["5.6.7.8"])
+	}
+}

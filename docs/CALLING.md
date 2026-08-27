@@ -81,6 +81,8 @@ curl -x http://$HOST:7893 https://httpbin.org/ip
 
 ## 5. 入池（脚本提交）
 
+中国大陆节点默认进不了池、也不会被 7892/7893 选中。设置 → 国家过滤：默认屏蔽 `CN`，校验时经代理看真实出口国家。要放行大陆节点把屏蔽列表清空或关掉开关。
+
 ```bash
 printf '1.2.3.4:8080\nsocks5://user:pass@[2001:db8::1]:1080\n' \
   | curl -sS -X POST "http://$HOST:7891/api/public/submit?source=my-job" \

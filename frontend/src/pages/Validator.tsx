@@ -23,7 +23,11 @@ type Queues = {
     fail: number;
     success_rate: number;
     avg_latency_ms: number;
+    recent_ok?: number;
+    recent_fail?: number;
+    recent_rate?: number;
     auto_disabled: boolean;
+    disabled_until?: string | null;
   }[];
   last_batch_ok?: number;
   last_batch_fail?: number;
@@ -73,7 +77,7 @@ export function ValidatorPage() {
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [running, setRunning] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [logFilter, setLogFilter] = useState<"all" | "ok" | "fail">("all");
+  const [logFilter, setLogFilter] = useState<"all" | "ok" | "fail" | "skip">("all");
   const logRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -107,6 +111,16 @@ export function ValidatorPage() {
       logRef.current.scrollTop = logRef.current.scrollHeight;
     }
   }, [logs]);
+
+  const reenable = async (name: string) => {
+    try {
+      await endpoints.validator.reenable(name);
+      toast(`已恢复 ${name}`, "success");
+      void load();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "恢复失败", "error");
+    }
+  };
 
   const run = async () => {
     try {
@@ -277,15 +291,20 @@ export function ValidatorPage() {
             ) : (
               <div className="space-y-2">
                 {(sourceStats.length ? sourceStats : fails.map((f) => ({ name: f.name, ok: 0, fail: f.fails, success_rate: 0, avg_latency_ms: 0, auto_disabled: false }))).map((item) => (
-                  <div key={item.name} className="flex items-center justify-between rounded-2xl border border-white/50 px-3 py-2 text-sm dark:border-white/10">
+                  <div key={item.name} className="flex items-center justify-between gap-2 rounded-2xl border border-white/50 px-3 py-2 text-sm dark:border-white/10">
                     <span className="font-mono text-xs">
                       {item.name}
                       {item.auto_disabled ? <span className="ml-2 text-rose-500">已自动停用</span> : null}
                     </span>
-                    <span className="tabular-nums text-muted-foreground">
-                      {item.ok}/{item.fail}
-                      {item.success_rate ? ` · ${(item.success_rate * 100).toFixed(0)}%` : ""}
-                      {item.avg_latency_ms ? ` · ${Math.round(item.avg_latency_ms)}ms` : ""}
+                    <span className="flex items-center gap-2 tabular-nums text-muted-foreground">
+                      近 {item.recent_ok ?? 0}/{item.recent_fail ?? 0}
+                      {typeof item.recent_rate === "number" ? ` · ${(item.recent_rate * 100).toFixed(0)}%` : ""}
+                      <span className="text-white/40">终身 {item.ok}/{item.fail}</span>
+                      {item.auto_disabled ? (
+                        <Button size="sm" variant="secondary" onClick={() => void reenable(item.name)}>
+                          恢复
+                        </Button>
+                      ) : null}
                     </span>
                   </div>
                 ))}
@@ -299,9 +318,9 @@ export function ValidatorPage() {
         <CardHeader className="flex flex-wrap items-center justify-between gap-3">
           <CardTitle>校验日志 · {visibleLogs.length} 条</CardTitle>
           <div className="flex gap-1">
-            {(["all", "ok", "fail"] as const).map((k) => (
+            {(["all", "ok", "fail", "skip"] as const).map((k) => (
               <Button key={k} size="sm" variant={logFilter === k ? "primary" : "ghost"} onClick={() => setLogFilter(k)}>
-                {k === "all" ? "全部" : k === "ok" ? "通过" : "失败"}
+                {k === "all" ? "全部" : k === "ok" ? "通过" : k === "skip" ? "跳过" : "失败"}
               </Button>
             ))}
           </div>

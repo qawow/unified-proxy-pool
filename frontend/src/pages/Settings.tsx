@@ -349,6 +349,54 @@ export function SettingsPage() {
 
           <Card>
             <CardHeader>
+              <CardTitle>国家过滤</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                默认永久去掉中国大陆节点（ISO CN）。采集源声明、主机 GeoIP、经代理探测到的真实出口，任一命中即丢弃。香港/台湾/澳门默认保留。保存后立即清除池里已有的匹配项。
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={settings.feature?.country_filter_enabled !== false}
+                    onChange={(e) => {
+                      const next = { ...(settings.feature || {}), country_filter_enabled: e.target.checked };
+                      setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
+                    }}
+                  />
+                  启用国家屏蔽
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={settings.feature?.check_exit_country !== false}
+                    onChange={(e) => {
+                      const next = { ...(settings.feature || {}), check_exit_country: e.target.checked };
+                      setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
+                    }}
+                  />
+                  检查真实出口国家（经代理访问 ip-api）
+                </label>
+                <Field label="屏蔽国家代码（逗号分隔，默认 CN）">
+                  <Input
+                    value={Array.isArray(settings.feature?.blocked_countries)
+                      ? (settings.feature?.blocked_countries as string[]).join(",")
+                      : "CN"}
+                    onChange={(e) => {
+                      const codes = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
+                      const next = { ...(settings.feature || {}), blocked_countries: codes };
+                      setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
+                    }}
+                    placeholder="CN"
+                  />
+                </Field>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
               <CardTitle>高级功能（F3–F6）</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">

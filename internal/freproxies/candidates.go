@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"unified-proxy-pool/internal/geoip"
 	"unified-proxy-pool/internal/models"
 )
 
@@ -96,7 +97,11 @@ func (s *Service) AllRuntimeNodes(ctx context.Context, limit int) ([]models.Runt
 		}
 	}
 	out := make([]models.RuntimeNode, 0, len(result.Items))
+	f := geoip.Active()
 	for _, p := range result.Items {
+		if f.Blocks(p.Region) || f.BlockedNode(p.Host, "") {
+			continue
+		}
 		out = append(out, toRuntimeNode(p))
 	}
 	return out, nil
@@ -315,8 +320,12 @@ func (s *Service) gatherCandidates(ctx context.Context, opt PickOptions, banned 
 // of them.
 func (s *Service) filterCandidates(items []Proxy, opt PickOptions, banned map[string]time.Time) []Proxy {
 	out := make([]Proxy, 0, len(items))
+	country := geoip.Active()
 	for _, p := range items {
 		if s.blocked != nil && s.blocked(p.Addr) {
+			continue
+		}
+		if country.Blocks(p.Region) || country.BlockedNode(p.Host, "") {
 			continue
 		}
 		if s.sourceDisabled != nil && s.sourceDisabled(p.Source) {

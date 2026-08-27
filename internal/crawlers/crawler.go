@@ -21,6 +21,9 @@ type Proxy struct {
 	Host     string
 	Port     int
 	Protocol string
+	// Region is a source-declared country (geonode "CN", sunny9577 "Bangladesh").
+	// Empty when the source did not publish one.
+	Region string
 }
 
 type Crawler interface {

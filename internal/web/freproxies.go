@@ -633,6 +633,9 @@ func (a *App) handleScraperList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	for i := range items {
+		items[i].AutoDisabled = sourcestats.Default.IsDisabled(items[i].Name)
+	}
 	writeList(w, items)
 }
 
@@ -761,18 +764,42 @@ func (a *App) handleValidatorQueues(w http.ResponseWriter, r *http.Request) {
 	stats := sourcestats.Default.List()
 	snaps := make([]freproxies.SourceStatSnap, 0, len(stats))
 	for _, st := range stats {
-		snaps = append(snaps, freproxies.SourceStatSnap{
+		snap := freproxies.SourceStatSnap{
 			Name: st.Name, OK: st.OK, Fail: st.Fail,
 			SuccessRate: st.SuccessRate, AvgLatencyMS: st.AvgLatencyMS,
+			RecentOK: st.RecentOK, RecentFail: st.RecentFail, RecentRate: st.RecentRate,
 			AutoDisabled: st.AutoDisabled,
-		})
+		}
+		if !st.DisabledUntil.IsZero() {
+			t := st.DisabledUntil
+			snap.DisabledUntil = &t
+		}
+		snaps = append(snaps, snap)
 	}
-	sort.Slice(snaps, func(i, j int) bool { return snaps[i].Fail+snaps[i].OK > snaps[j].Fail+snaps[j].OK })
-	if len(snaps) > 15 {
-		snaps = snaps[:15]
+	sort.Slice(snaps, func(i, j int) bool {
+		if snaps[i].AutoDisabled != snaps[j].AutoDisabled {
+			return snaps[i].AutoDisabled
+		}
+		if snaps[i].RecentRate != snaps[j].RecentRate {
+			return snaps[i].RecentRate < snaps[j].RecentRate
+		}
+		return snaps[i].Fail+snaps[i].OK > snaps[j].Fail+snaps[j].OK
+	})
+	if len(snaps) > 30 {
+		snaps = snaps[:30]
 	}
 	item.SourceStats = snaps
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: item})
+}
+
+func (a *App) handleValidatorSourceReenable(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(chi.URLParam(r, "name"))
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "name required"})
+		return
+	}
+	sourcestats.Default.Reenable(name)
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"name": name, "reenabled": true}})
 }
 
 func (a *App) handleValidatorRun(w http.ResponseWriter, r *http.Request) {

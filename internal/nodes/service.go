@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
 	"unified-proxy-pool/internal/db"
 	"unified-proxy-pool/internal/events"
+	"unified-proxy-pool/internal/geoip"
 	"unified-proxy-pool/internal/models"
 )
 
@@ -71,6 +73,10 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) ([]models.Manua
 	now := time.Now().UTC()
 	var created []models.ManualNode
 	for _, item := range parsed {
+		if geoip.Active().BlockedNode(item.Server, item.DisplayName) {
+			parseErrs = append(parseErrs, fmt.Errorf("%s: blocked country", item.DisplayName))
+			continue
+		}
 		res, err := tx.ExecContext(ctx, `INSERT INTO manual_nodes (
 			display_name, protocol, server, port, raw_payload, normalized_json, enabled, last_status, created_at, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, 1, 'unknown', ?, ?)`,
@@ -93,6 +99,9 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) ([]models.Manua
 			CreatedAt:      now,
 			UpdatedAt:      now,
 		})
+	}
+	if len(created) == 0 {
+		return nil, parseErrs, errors.New("no nodes created")
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, parseErrs, err
@@ -274,4 +283,26 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+// DisableBlocked permanently deletes manual nodes the country filter rejects.
+func (s *Service) DisableBlocked(ctx context.Context) (int, error) {
+	if s == nil || s.store == nil {
+		return 0, nil
+	}
+	items, err := s.List(ctx)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, item := range items {
+		if !geoip.Active().BlockedNode(item.Server, item.DisplayName) {
+			continue
+		}
+		if _, err := s.store.DB.ExecContext(ctx, `DELETE FROM manual_nodes WHERE id = ?`, item.ID); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }

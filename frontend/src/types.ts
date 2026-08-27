@@ -46,6 +46,9 @@ export type Settings = {
     traffic_retain_hours?: number;
     chain?: ChainOptions;
     channels?: ChannelPolicyConfig;
+    country_filter_enabled?: boolean;
+    check_exit_country?: boolean;
+    blocked_countries?: string[];
     [key: string]: unknown;
   };
 };
@@ -228,6 +231,7 @@ export type Scraper = {
   builtin?: boolean;
   format?: string;
   urls?: string[];
+  auto_disabled?: boolean;
 };
 
 export type ValidatorQueues = {
@@ -246,7 +250,11 @@ export type ValidatorQueues = {
     fail: number;
     success_rate: number;
     avg_latency_ms: number;
+    recent_ok?: number;
+    recent_fail?: number;
+    recent_rate?: number;
     auto_disabled: boolean;
+    disabled_until?: string | null;
   }[];
   last_batch_ok?: number;
   last_batch_fail?: number;

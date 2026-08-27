@@ -2,20 +2,18 @@ package geoip
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
-
-	"unified-proxy-pool/internal/netutil"
 )
 
 type Result struct {
 	Country     string `json:"country"`
 	CountryCode string `json:"country_code"`
+	Query       string `json:"query,omitempty"`
 }
 
 type Cache interface {
@@ -55,9 +53,16 @@ func (c *memoryCache) SetGeo(_ context.Context, ip string, r Result) error {
 }
 
 type Service struct {
-	cache  Cache
-	client *http.Client
-	sem    chan struct{}
+	cache    Cache
+	client   *http.Client
+	sem      chan struct{}
+	hostURLs []string
+	selfURLs []string
+}
+
+var defaultHostURLs = []string{
+	"http://ip-api.com/json/%s?fields=status,country,countryCode,query,message",
+	"http://ipwho.is/%s?fields=success,country,country_code,ip",
 }
 
 func New(cache Cache) *Service {
@@ -69,7 +74,9 @@ func New(cache Cache) *Service {
 		client: &http.Client{
 			Timeout: 4 * time.Second,
 		},
-		sem: make(chan struct{}, 2), // max 2 concurrent lookups
+		sem:      make(chan struct{}, 2), // max 2 concurrent lookups
+		hostURLs: append([]string{}, defaultHostURLs...),
+		selfURLs: append([]string{}, defaultSelfURLs...),
 	}
 }
 
@@ -87,42 +94,70 @@ func (s *Service) Lookup(ctx context.Context, ip string) (Result, error) {
 	case <-ctx.Done():
 		return Result{}, ctx.Err()
 	}
-	// re-check cache after waiting
 	if r, ok := s.cache.GetGeo(ctx, ip); ok {
 		return r, nil
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("http://ip-api.com/json/%s?fields=status,country,countryCode,message", ip), nil)
-	if err != nil {
-		return Result{}, err
+	urls := s.hostURLs
+	if len(urls) == 0 {
+		urls = defaultHostURLs
 	}
-	netutil.ApplyDefaultHeaders(req.Header)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return Result{}, err
+	var last error
+	for _, tmpl := range urls {
+		raw := tmpl
+		if strings.Contains(tmpl, "%s") {
+			raw = fmt.Sprintf(tmpl, ip)
+		}
+		r, err := fetchGeo(ctx, s.client, raw)
+		if err != nil {
+			last = err
+			continue
+		}
+		if r.CountryCode == "" {
+			r.CountryCode = Normalize(r.Country)
+		} else {
+			r.CountryCode = Normalize(r.CountryCode)
+		}
+		if r.CountryCode == "" {
+			last = fmt.Errorf("geoip: empty country")
+			continue
+		}
+		_ = s.cache.SetGeo(ctx, ip, r)
+		return r, nil
 	}
-	defer resp.Body.Close()
-	var body struct {
-		Status      string `json:"status"`
-		Country     string `json:"country"`
-		CountryCode string `json:"countryCode"`
-		Message     string `json:"message"`
+	if last == nil {
+		last = fmt.Errorf("geoip: no provider answered")
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return Result{}, err
-	}
-	if body.Status != "success" {
-		return Result{}, fmt.Errorf("geoip: %s", body.Message)
-	}
-	r := Result{Country: body.Country, CountryCode: body.CountryCode}
-	_ = s.cache.SetGeo(ctx, ip, r)
-	return r, nil
+	return Result{}, last
 }
 
-// FormatRegion returns a compact region label like "US" or "中国".
-func FormatRegion(r Result) string {
-	if r.CountryCode != "" {
-		return r.CountryCode
+// LookupHost accepts an IP or a hostname (subscription servers are often names).
+func (s *Service) LookupHost(ctx context.Context, host string) (Result, error) {
+	host = strings.TrimSpace(host)
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	if ip := net.ParseIP(host); ip != nil {
+		return s.Lookup(ctx, ip.String())
 	}
-	return r.Country
+	if host == "" {
+		return Result{}, fmt.Errorf("empty host")
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(addrs) == 0 {
+		if err == nil {
+			err = fmt.Errorf("no addresses")
+		}
+		return Result{}, err
+	}
+	return s.Lookup(ctx, addrs[0].IP.String())
+}
+
+// FormatRegion returns a compact ISO code when we have one.
+func FormatRegion(r Result) string {
+	if code := Normalize(r.CountryCode); code != "" {
+		return code
+	}
+	if code := Normalize(r.Country); code != "" {
+		return code
+	}
+	return r.CountryCode
 }
