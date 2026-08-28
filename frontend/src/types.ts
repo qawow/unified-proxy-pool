@@ -269,6 +269,8 @@ export type ValidatorQueues = {
   lifetime_ok?: number;
   lifetime_fail?: number;
   lifetime_batches?: number;
+  raw_unchecked?: number;
+  raw_scan_left?: number;
   history?: {
     ok: number;
     fail: number;

@@ -54,6 +54,8 @@ type Store interface {
 	Count(ctx context.Context) (total, validated, raw int64, err error)
 	MarkValidated(ctx context.Context, addr string, latencyMS int64, ok bool) error
 	ListRaw(ctx context.Context, limit int64) ([]Proxy, error)
+	// PickRaw is ListRaw plus scan stats: total raw and how many have never been checked.
+	PickRaw(ctx context.Context, limit int64) (items []Proxy, total, unchecked int, err error)
 	ListValidated(ctx context.Context, limit int64) ([]Proxy, error)
 	Trim(ctx context.Context) error
 	SaveScraperStat(ctx context.Context, stat ScraperStat) error
@@ -247,39 +249,23 @@ func (s *redisStore) Delete(ctx context.Context, addr string) error {
 }
 
 func (s *redisStore) ListRaw(ctx context.Context, limit int64) ([]Proxy, error) {
+	items, _, _, err := s.PickRaw(ctx, limit)
+	return items, err
+}
+
+func (s *redisStore) PickRaw(ctx context.Context, limit int64) ([]Proxy, int, int, error) {
 	if limit <= 0 {
 		limit = 200
 	}
-	card, err := s.rdb.ZCard(ctx, keyRaw).Result()
+	members, err := s.rdb.ZRange(ctx, keyRaw, 0, -1).Result()
 	if err != nil {
-		return nil, err
+		return nil, 0, 0, err
 	}
-	if card == 0 {
-		return nil, nil
+	if len(members) == 0 {
+		return nil, 0, 0, nil
 	}
-	// Pull a window several times the batch, from a random offset, then
-	// drop recently-checked addresses. ZRange(0, limit-1) always returned
-	// the same lowest-score (then lexicographic) slice, so a failed batch
-	// of ~140 sat at the front until FailCount hit 3.
-	fetch := limit * 8
-	if fetch < 400 {
-		fetch = 400
-	}
-	if fetch > 1600 {
-		fetch = 1600
-	}
-	if fetch > card {
-		fetch = card
-	}
-	start := int64(0)
-	if card > fetch {
-		start = rand.Int63n(card - fetch + 1)
-	}
-	members, err := s.rdb.ZRange(ctx, keyRaw, start, start+fetch-1).Result()
-	if err != nil {
-		return nil, err
-	}
-	return selectValidateRaw(s.mgetProxies(ctx, members), limit, time.Now(), rawValidateCooldown), nil
+	batch, total, unchecked := pickRawScan(s.mgetProxies(ctx, members), limit, time.Now(), rawValidateCooldown)
+	return batch, total, unchecked, nil
 }
 
 func (s *redisStore) ListValidated(ctx context.Context, limit int64) ([]Proxy, error) {
@@ -1029,16 +1015,22 @@ func (s *memoryStore) Delete(ctx context.Context, addr string) error {
 }
 
 func (s *memoryStore) ListRaw(ctx context.Context, limit int64) ([]Proxy, error) {
+	items, _, _, err := s.PickRaw(ctx, limit)
+	return items, err
+}
+
+func (s *memoryStore) PickRaw(ctx context.Context, limit int64) ([]Proxy, int, int, error) {
 	s.mu.RLock()
-	items := make([]Proxy, 0, len(s.raw))
+	all := make([]Proxy, 0, len(s.raw))
 	for addr := range s.raw {
-		items = append(items, s.proxies[addr])
+		all = append(all, s.proxies[addr])
 	}
 	s.mu.RUnlock()
 	if limit <= 0 {
 		limit = 200
 	}
-	return selectValidateRaw(items, limit, time.Now(), rawValidateCooldown), nil
+	batch, total, unchecked := pickRawScan(all, limit, time.Now(), rawValidateCooldown)
+	return batch, total, unchecked, nil
 }
 
 func (s *memoryStore) ListValidated(ctx context.Context, limit int64) ([]Proxy, error) {

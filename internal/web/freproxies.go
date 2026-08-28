@@ -755,6 +755,14 @@ func (a *App) handleValidatorQueues(w http.ResponseWriter, r *http.Request) {
 	item.LifetimeOK = p.LifetimeOK
 	item.LifetimeFail = p.LifetimeFail
 	item.LifetimeBatches = p.LifetimeBatches
+	item.RawUnchecked = p.RawUnchecked
+	if p.RawUnchecked > 0 {
+		bs := p.Size
+		if bs <= 0 {
+			bs = 400
+		}
+		item.RawScanLeft = (p.RawUnchecked + bs - 1) / bs
+	}
 	for _, h := range p.History {
 		item.History = append(item.History, freproxies.BatchHistory{
 			OK: h.OK, Fail: h.Fail, Raw: h.Raw, Recheck: h.Recheck,

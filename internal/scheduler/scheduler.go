@@ -18,8 +18,9 @@ type Scheduler struct {
 	cfg       config.App
 	free      *freproxies.Service
 	validator *validator.Service
-	mu        sync.Mutex
-	scraping  bool
+	mu         sync.Mutex
+	scraping   bool
+	validating bool
 
 	intervals IntervalProvider
 	// last run unix for dynamic interval
@@ -128,10 +129,37 @@ func (s *Scheduler) validateOnce(ctx context.Context) {
 	if s.validator == nil {
 		return
 	}
+	s.mu.Lock()
+	if s.validating {
+		s.mu.Unlock()
+		return
+	}
+	s.validating = true
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.validating = false
+		s.mu.Unlock()
+	}()
+
 	runCtx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer cancel()
-	s.validator.ValidateBatch(runCtx, 400)
-	s.lastValidateUnix.Store(time.Now().Unix())
+	deadline := time.Now().Add(7 * time.Minute)
+	left := 0
+	for {
+		left = s.validator.ValidateBatch(runCtx, 400)
+		if left <= 0 || runCtx.Err() != nil || time.Now().After(deadline) {
+			break
+		}
+		// Next slice of the same pass, without waiting for validate_interval.
+	}
+	if left > 0 {
+		// Pass not finished: next 30s tick should resume instead of waiting
+		// the full validate_interval (default 120s).
+		s.lastValidateUnix.Store(time.Now().Unix() - int64(s.validateEvery().Seconds()) + 20)
+	} else {
+		s.lastValidateUnix.Store(time.Now().Unix())
+	}
 	if s.free != nil {
 		s.free.RecordValidateYield(runCtx, s.validator.LastSourceBatch())
 		n := s.validateRounds.Add(1)

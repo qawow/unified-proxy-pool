@@ -258,6 +258,8 @@ type ValidatorQueues struct {
 	LifetimeOK       int64            `json:"lifetime_ok"`
 	LifetimeFail     int64            `json:"lifetime_fail"`
 	LifetimeBatches  int64            `json:"lifetime_batches"`
+	RawUnchecked     int              `json:"raw_unchecked"`
+	RawScanLeft      int              `json:"raw_scan_left"`
 	History          []BatchHistory   `json:"history,omitempty"`
 }
 

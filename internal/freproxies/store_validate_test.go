@@ -16,7 +16,7 @@ func TestSelectValidateRawSkipsRecentlyChecked(t *testing.T) {
 		}
 		items = append(items, p)
 	}
-	got := selectValidateRaw(items, 50, now, 10*time.Minute)
+	got := selectValidateRaw(items, 50, now, 90*time.Second)
 	if len(got) != 50 {
 		t.Fatalf("len=%d want 50", len(got))
 	}
@@ -49,7 +49,7 @@ func TestSelectValidateRawTwoDrawsDiverge(t *testing.T) {
 	for i := 0; i < 400; i++ {
 		items = append(items, Proxy{Addr: fmt.Sprintf("10.1.%d.%d:1", i/256, i%256)})
 	}
-	first := selectValidateRaw(items, 40, now, 10*time.Minute)
+	first := selectValidateRaw(items, 40, now, 90*time.Second)
 	seen := map[string]struct{}{}
 	for _, p := range first {
 		seen[p.Addr] = struct{}{}
@@ -59,7 +59,7 @@ func TestSelectValidateRawTwoDrawsDiverge(t *testing.T) {
 			}
 		}
 	}
-	second := selectValidateRaw(items, 40, now, 10*time.Minute)
+	second := selectValidateRaw(items, 40, now, 90*time.Second)
 	overlap := 0
 	for _, p := range second {
 		if _, ok := seen[p.Addr]; ok {
@@ -68,5 +68,48 @@ func TestSelectValidateRawTwoDrawsDiverge(t *testing.T) {
 	}
 	if overlap != 0 {
 		t.Fatalf("second draw reused %d/%d just-checked addrs", overlap, len(second))
+	}
+}
+
+func TestSelectValidateRawWalksAll(t *testing.T) {
+	now := time.Now()
+	const n, batch = 100, 10
+	items := make([]Proxy, 0, n)
+	for i := 0; i < n; i++ {
+		items = append(items, Proxy{Addr: fmt.Sprintf("10.2.0.%d:1", i)})
+	}
+	seen := map[string]struct{}{}
+	for round := 0; round < n/batch; round++ {
+		got := selectValidateRaw(items, batch, now.Add(time.Duration(round)*time.Second), 90*time.Second)
+		if len(got) != batch {
+			t.Fatalf("round %d: len=%d", round, len(got))
+		}
+		for _, p := range got {
+			if _, ok := seen[p.Addr]; ok {
+				t.Fatalf("round %d reused %s", round, p.Addr)
+			}
+			seen[p.Addr] = struct{}{}
+			for i := range items {
+				if items[i].Addr == p.Addr {
+					items[i].LastCheck = now.Add(time.Duration(round) * time.Second)
+				}
+			}
+		}
+	}
+	if len(seen) != n {
+		t.Fatalf("covered %d/%d", len(seen), n)
+	}
+}
+
+func TestCountUnchecked(t *testing.T) {
+	now := time.Now()
+	items := []Proxy{
+		{Addr: "a:1"},
+		{Addr: "b:1", LastCheck: now},
+		{Addr: "c:1"},
+		{Addr: ""},
+	}
+	if n := countUnchecked(items); n != 2 {
+		t.Fatalf("unchecked=%d want 2", n)
 	}
 }

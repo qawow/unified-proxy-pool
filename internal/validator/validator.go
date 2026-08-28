@@ -32,6 +32,8 @@ type Progress struct {
 	LifetimeOK       int64
 	LifetimeFail     int64
 	LifetimeBatches  int64
+	RawTotal         int
+	RawUnchecked     int
 	Last             BatchSummary
 	History          []BatchSummary
 }
@@ -51,8 +53,10 @@ type Service struct {
 	lifeOK    int64
 	lifeFail  int64
 	lifeN      int64
-	history    []BatchSummary
-	sourceBatch map[string][2]int
+	history      []BatchSummary
+	sourceBatch  map[string][2]int
+	rawTotal     int
+	rawUnchecked int
 }
 
 var liveMu sync.RWMutex
@@ -152,6 +156,7 @@ func (s *Service) Snapshot() Progress {
 		Running: DefaultLogs.Running(),
 		Size: s.batchSize, OK: s.batchOK, Fail: s.batchFail,
 		LifetimeOK: s.lifeOK, LifetimeFail: s.lifeFail, LifetimeBatches: s.lifeN,
+		RawTotal: s.rawTotal, RawUnchecked: s.rawUnchecked,
 		Last: s.lastBatch, History: hist,
 	}
 }
@@ -226,18 +231,26 @@ func (s *Service) validateURLs() []string {
 	return out
 }
 
-func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
+// ValidateBatch tests one slice of the raw queue (never-checked first).
+// It returns how many raw addresses still have no LastCheck, so the scheduler
+// can keep issuing batches until a pass completes.
+func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 	if s == nil || s.free == nil {
-		return
+		return 0
+	}
+	if DefaultLogs.Running() {
+		s.mu.RLock()
+		n := s.rawUnchecked
+		s.mu.RUnlock()
+		return n
 	}
 	if limit <= 0 {
 		limit = 400
 	}
 	store := s.free.Store()
 
-	// Recheck at most 30% of the batch. If the scored pool is tiny (the
-	// usual case while raw is 4000 and validated is 2), give leftover
-	// slots to raw so a click is not stuck at ~140 forever.
+	// Recheck at most 30% of the batch. Leftover slots go to raw so a
+	// first pass over thousands of unchecked addresses actually finishes.
 	reLimit := limit * 3 / 10
 	var scored []freproxies.Proxy
 	if reLimit > 0 {
@@ -248,17 +261,31 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 		rawNeed = limit
 	}
 
-	raw, err := store.ListRaw(ctx, rawNeed)
+	raw, rawTotal, rawUnchecked, err := store.PickRaw(ctx, rawNeed)
 	if err != nil {
 		log.Printf("validator list raw: %v", err)
 		DefaultLogs.Add("fail", "", "list raw failed: "+err.Error(), "", 0)
-		return
+		return rawUnchecked
 	}
+	s.mu.Lock()
+	s.rawTotal = rawTotal
+	s.rawUnchecked = rawUnchecked
+	s.mu.Unlock()
 
 	batch := append(raw, scored...)
 	if len(batch) == 0 {
 		DefaultLogs.Add("info", "", "校验批次跳过：无待验代理", "", 0)
-		return
+		return 0
+	}
+	neverInBatch := 0
+	for _, p := range raw {
+		if p.LastCheck.IsZero() {
+			neverInBatch++
+		}
+	}
+	remaining := rawUnchecked - neverInBatch
+	if remaining < 0 {
+		remaining = 0
 	}
 
 	s.mu.RLock()
@@ -286,6 +313,7 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 	DefaultLogs.SetRunning(true)
 	DefaultLogs.Add("info", "", "开始校验 batch="+strconv.Itoa(len(batch))+
 		" raw="+strconv.Itoa(len(raw))+" recheck="+strconv.Itoa(len(scored))+
+		" unchecked="+strconv.Itoa(rawUnchecked)+"/"+strconv.Itoa(rawTotal)+
 		" urls="+strconv.Itoa(len(urls)), "", 0)
 	defer DefaultLogs.SetRunning(false)
 
@@ -361,6 +389,7 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 	s.lifeOK += int64(okCount)
 	s.lifeFail += int64(failCount)
 	s.lifeN++
+	s.rawUnchecked = remaining
 	s.sourceBatch = sourceBatch
 	s.history = append([]BatchSummary{finished}, s.history...)
 	if len(s.history) > 20 {
@@ -373,12 +402,14 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 	sourcestats.Default.Flush()
 	summary := "validate batch done ok=" + strconv.Itoa(okCount) + " fail=" + strconv.Itoa(failCount) +
 		" raw=" + strconv.Itoa(len(raw)) + " recheck=" + strconv.Itoa(len(scored)) +
+		" left=" + strconv.Itoa(remaining) + "/" + strconv.Itoa(rawTotal) +
 		" dur=" + elapsed.Truncate(time.Millisecond).String()
 	_ = store.PushEvent(ctx, summary)
 	DefaultLogs.Add("info", "", summary, "", 0)
 	s.free.NotifyValidateBatch(okCount, failCount)
-	log.Printf("validate batch: ok=%d fail=%d (raw=%d recheck=%d dur=%s)", okCount, failCount, len(raw), len(scored), elapsed.Truncate(time.Millisecond))
+	log.Printf("validate batch: ok=%d fail=%d (raw=%d recheck=%d left=%d/%d dur=%s)", okCount, failCount, len(raw), len(scored), remaining, rawTotal, elapsed.Truncate(time.Millisecond).String())
 	if okCount == 0 && failCount > 0 {
 		webhook.Default.Notify("validate_all_fail", map[string]any{"fail": failCount})
 	}
+	return remaining
 }

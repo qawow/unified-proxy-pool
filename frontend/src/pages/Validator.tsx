@@ -41,6 +41,8 @@ type Queues = {
   lifetime_ok?: number;
   lifetime_fail?: number;
   lifetime_batches?: number;
+  raw_unchecked?: number;
+  raw_scan_left?: number;
   history?: {
     ok: number;
     fail: number;
@@ -165,6 +167,15 @@ export function ValidatorPage() {
   const batchSize = data?.batch_size ?? 0;
   const batchDone = data?.batch_done ?? lastTotal;
   const history = data?.history || [];
+  const unchecked = data?.raw_unchecked ?? 0;
+  const scanLeft = data?.raw_scan_left ?? 0;
+  const scanned = Math.max(0, raw - unchecked);
+  const scanHint =
+    raw <= 0
+      ? "没有待校验节点"
+      : unchecked <= 0
+        ? "本轮未测节点已扫完，之后按最久未测复检"
+        : `未测 ${unchecked}/${raw} · 约 ${scanLeft || "?"} 批`;
 
   const visibleLogs = useMemo(() => {
     if (logFilter === "all") return logs;
@@ -221,19 +232,20 @@ export function ValidatorPage() {
     <div>
       <PageHeader
         title="校验统计"
-        description="累计通过/失败不会在一轮结束后清零。本批数字跑完会冻结，直到下一轮开始。"
+        description="调度器自动分批扫完所有未测节点（从未测过的优先）。累计通过/失败不会在一轮结束后清零。"
         actions={
           <div className="flex gap-2">
             {running ? <span className="soft-pill self-center">校验中…</span> : null}
             <Button variant="secondary" onClick={() => void clearLogs()}>
               清空日志
             </Button>
-            <Button onClick={run}>立即校验一批</Button>
+            <Button onClick={run}>立即校验（自动分批扫完）</Button>
           </div>
         }
       />
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard title="待校验" value={raw} hint="还没验过或需要复验" tone="amber" />
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <StatCard title="待校验" value={raw} hint="还没验过或失败未满 3 次" tone="amber" />
+        <StatCard title="全量进度" value={raw > 0 ? `${scanned}/${raw}` : "—"} hint={scanHint} tone="mint" />
         <StatCard title="已验证" value={ok} hint={`池内健康率 ${health} · 均延迟 ${avgLat}`} tone="mint" />
         <StatCard title="累计通过" value={lifeOK} hint={`共 ${lifeN} 轮 · 失败 ${lifeFail}`} tone="mint" />
         <StatCard
