@@ -21,6 +21,7 @@ import (
 const (
 	keyScored     = "upp:proxies:scored"
 	keyRaw        = "upp:proxies:raw"
+	keyRetry      = "upp:proxies:retry"
 	keyAll        = "upp:proxies:all"
 	keyMetaPrefix = "upp:proxies:meta:"
 	keyScraper    = "upp:scrapers:stats"
@@ -35,10 +36,13 @@ const (
 )
 
 const (
-	// MaxRawProxies caps unvalidated proxies to protect memory/redis.
+	// MaxRawProxies caps *untested* proxies so other sources can keep filling
+	// in. Tested failures leave raw immediately (retry set / delete).
 	MaxRawProxies = 4000
-	// MaxValidatedProxies soft cap for scored set size during trim.
+	// MaxValidatedProxies soft cap for the maintenance (scored) set.
 	MaxValidatedProxies = 2000
+	// MaxRetryProxies caps one/two-strike failures waiting to be retested.
+	MaxRetryProxies = 1500
 )
 
 type Store interface {
@@ -56,6 +60,7 @@ type Store interface {
 	ListRaw(ctx context.Context, limit int64) ([]Proxy, error)
 	// PickRaw is ListRaw plus scan stats: total raw and how many have never been checked.
 	PickRaw(ctx context.Context, limit int64) (items []Proxy, total, unchecked int, err error)
+	PickRetry(ctx context.Context, limit int64) (items []Proxy, waiting int, err error)
 	ListValidated(ctx context.Context, limit int64) ([]Proxy, error)
 	Trim(ctx context.Context) error
 	SaveScraperStat(ctx context.Context, stat ScraperStat) error
@@ -242,6 +247,7 @@ func (s *redisStore) Delete(ctx context.Context, addr string) error {
 	pipe := s.rdb.Pipeline()
 	pipe.SRem(ctx, keyAll, addr)
 	pipe.ZRem(ctx, keyRaw, addr)
+	pipe.ZRem(ctx, keyRetry, addr)
 	pipe.ZRem(ctx, keyScored, addr)
 	pipe.Del(ctx, s.metaKey(addr))
 	_, err := pipe.Exec(ctx)
@@ -302,6 +308,7 @@ func (s *redisStore) MarkValidated(ctx context.Context, addr string, latencyMS i
 		p.FailCount = 0
 		pipe := s.rdb.Pipeline()
 		pipe.ZRem(ctx, keyRaw, addr)
+		pipe.ZRem(ctx, keyRetry, addr)
 		pipe.ZAdd(ctx, keyScored, redis.Z{Score: p.Score, Member: addr})
 		if err := s.saveMeta(ctx, p); err != nil {
 			return err
@@ -314,20 +321,40 @@ func (s *redisStore) MarkValidated(ctx context.Context, addr string, latencyMS i
 	if p.Score < ScoreMin {
 		p.Score = ScoreMin
 	}
-	if p.Score <= 0 || p.FailCount >= 3 {
+	if p.Score <= 0 || p.FailCount >= failDeleteAfter {
 		return s.Delete(ctx, addr)
 	}
 	pipe := s.rdb.Pipeline()
 	if p.Validated {
 		pipe.ZAdd(ctx, keyScored, redis.Z{Score: p.Score, Member: addr})
 	} else {
-		pipe.ZAdd(ctx, keyRaw, redis.Z{Score: p.Score, Member: addr})
+		// Leave raw immediately so other sources can fill the 4000 cap.
+		pipe.ZRem(ctx, keyRaw, addr)
+		pipe.ZAdd(ctx, keyRetry, redis.Z{Score: retryDueUnix(p.FailCount, now), Member: addr})
 	}
 	if err := s.saveMeta(ctx, p); err != nil {
 		return err
 	}
 	_, err = pipe.Exec(ctx)
 	return err
+}
+
+func (s *redisStore) PickRetry(ctx context.Context, limit int64) ([]Proxy, int, error) {
+	if limit <= 0 {
+		limit = 80
+	}
+	waiting, err := s.rdb.ZCard(ctx, keyRetry).Result()
+	if err != nil {
+		return nil, 0, err
+	}
+	now := strconv.FormatInt(time.Now().Unix(), 10)
+	members, err := s.rdb.ZRangeByScore(ctx, keyRetry, &redis.ZRangeBy{
+		Min: "-inf", Max: now, Offset: 0, Count: limit,
+	}).Result()
+	if err != nil {
+		return nil, int(waiting), err
+	}
+	return s.mgetProxies(ctx, members), int(waiting), nil
 }
 
 func (s *redisStore) Random(ctx context.Context, protocol string) (Proxy, error) {
@@ -435,6 +462,21 @@ func (s *redisStore) Trim(ctx context.Context) error {
 	if scoredCount > MaxValidatedProxies {
 		drop := scoredCount - MaxValidatedProxies
 		addrs, err := s.rdb.ZRange(ctx, keyScored, 0, drop-1).Result()
+		if err != nil {
+			return err
+		}
+		for _, addr := range addrs {
+			_ = s.Delete(ctx, addr)
+		}
+	}
+	retryCount, err := s.rdb.ZCard(ctx, keyRetry).Result()
+	if err != nil {
+		return err
+	}
+	if retryCount > MaxRetryProxies {
+		drop := retryCount - MaxRetryProxies
+		// Highest score = due latest; drop those waiting farthest out.
+		addrs, err := s.rdb.ZRevRange(ctx, keyRetry, 0, drop-1).Result()
 		if err != nil {
 			return err
 		}
@@ -719,6 +761,7 @@ func (s *redisStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 	pipe := s.rdb.Pipeline()
 	rawCmd := pipe.ZCard(ctx, keyRaw)
 	validatedCmd := pipe.ZCard(ctx, keyScored)
+	retryCmd := pipe.ZCard(ctx, keyRetry)
 	bucketRanges := []struct {
 		label    string
 		min, max string
@@ -745,6 +788,10 @@ func (s *redisStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 	if err != nil {
 		return ValidatorQueues{}, err
 	}
+	retryN, err := retryCmd.Result()
+	if err != nil {
+		return ValidatorQueues{}, err
+	}
 	buckets := make(map[string]int64, len(bucketRanges))
 	for i, br := range bucketRanges {
 		n, err := bucketCmds[i].Result()
@@ -762,6 +809,7 @@ func (s *redisStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 	return ValidatorQueues{
 		RawCount:       raw,
 		ValidatedCount: validated,
+		RetryCount:     retryN,
 		ScoreBuckets:   buckets,
 		ProtocolCounts: meta.protocols,
 		FamilyCounts:   meta.families,
@@ -888,6 +936,7 @@ type memoryStore struct {
 	mu       sync.RWMutex
 	proxies  map[string]Proxy
 	raw      map[string]struct{}
+	retry    map[string]time.Time
 	scored   map[string]struct{}
 	stats    map[string]ScraperStat
 	disabled map[string]struct{}
@@ -911,6 +960,7 @@ func NewMemoryStore() Store {
 	return &memoryStore{
 		proxies:  map[string]Proxy{},
 		raw:      map[string]struct{}{},
+		retry:    map[string]time.Time{},
 		scored:   map[string]struct{}{},
 		stats:    map[string]ScraperStat{},
 		disabled: map[string]struct{}{},
@@ -1009,6 +1059,7 @@ func (s *memoryStore) Delete(ctx context.Context, addr string) error {
 	defer s.mu.Unlock()
 	delete(s.proxies, addr)
 	delete(s.raw, addr)
+	delete(s.retry, addr)
 	delete(s.scored, addr)
 	s.markDirty()
 	return nil
@@ -1068,6 +1119,7 @@ func (s *memoryStore) MarkValidated(ctx context.Context, addr string, latencyMS 
 		p.Score = ScoreMax
 		p.FailCount = 0
 		delete(s.raw, addr)
+		delete(s.retry, addr)
 		s.scored[addr] = struct{}{}
 		s.proxies[addr] = p
 		s.markDirty()
@@ -1075,16 +1127,41 @@ func (s *memoryStore) MarkValidated(ctx context.Context, addr string, latencyMS 
 	}
 	p.FailCount++
 	p.Score--
-	if p.Score <= 0 || p.FailCount >= 3 {
+	if p.Score <= 0 || p.FailCount >= failDeleteAfter {
 		delete(s.proxies, addr)
 		delete(s.raw, addr)
+		delete(s.retry, addr)
 		delete(s.scored, addr)
 		s.markDirty()
 		return nil
 	}
+	if !p.Validated {
+		delete(s.raw, addr)
+		s.retry[addr] = time.Unix(int64(retryDueUnix(p.FailCount, now)), 0)
+	}
 	s.proxies[addr] = p
 	s.markDirty()
 	return nil
+}
+
+func (s *memoryStore) PickRetry(ctx context.Context, limit int64) ([]Proxy, int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 {
+		limit = 80
+	}
+	now := time.Now()
+	due := make([]Proxy, 0)
+	for addr, when := range s.retry {
+		if !when.After(now) {
+			due = append(due, s.proxies[addr])
+		}
+	}
+	sort.Slice(due, func(i, j int) bool { return due[i].LastCheck.Before(due[j].LastCheck) })
+	if int64(len(due)) > limit {
+		due = due[:limit]
+	}
+	return due, len(s.retry), nil
 }
 
 func (s *memoryStore) Random(ctx context.Context, protocol string) (Proxy, error) {
@@ -1173,6 +1250,7 @@ func (s *memoryStore) Trim(ctx context.Context) error {
 			addr := addrs[i]
 			delete(s.proxies, addr)
 			delete(s.raw, addr)
+			delete(s.retry, addr)
 			delete(s.scored, addr)
 		}
 	}
@@ -1189,6 +1267,24 @@ func (s *memoryStore) Trim(ctx context.Context) error {
 			addr := addrs[i]
 			delete(s.proxies, addr)
 			delete(s.raw, addr)
+			delete(s.retry, addr)
+			delete(s.scored, addr)
+		}
+	}
+	if len(s.retry) > MaxRetryProxies {
+		addrs := make([]string, 0, len(s.retry))
+		for addr := range s.retry {
+			addrs = append(addrs, addr)
+		}
+		sort.Slice(addrs, func(i, j int) bool {
+			return s.retry[addrs[i]].After(s.retry[addrs[j]])
+		})
+		drop := len(s.retry) - MaxRetryProxies
+		for i := 0; i < drop && i < len(addrs); i++ {
+			addr := addrs[i]
+			delete(s.proxies, addr)
+			delete(s.raw, addr)
+			delete(s.retry, addr)
 			delete(s.scored, addr)
 		}
 	}
@@ -1345,6 +1441,7 @@ func (s *memoryStore) Queues(ctx context.Context) (ValidatorQueues, error) {
 	return ValidatorQueues{
 		RawCount:       int64(len(s.raw)),
 		ValidatedCount: int64(len(s.scored)),
+		RetryCount:     int64(len(s.retry)),
 		ScoreBuckets:   buckets,
 		ProtocolCounts: meta.protocols,
 		FamilyCounts:   meta.families,

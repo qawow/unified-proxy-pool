@@ -11,6 +11,7 @@ type FreeProxyRow struct {
 	JSON     string
 	InRaw    bool
 	InScored bool
+	InRetry  bool
 }
 
 func (s *Store) ReplaceFreeProxySnapshot(ctx context.Context, rows []FreeProxyRow, toggles map[string]bool) error {

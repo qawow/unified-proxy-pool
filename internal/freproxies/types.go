@@ -238,6 +238,7 @@ func BuiltinGroups() []ProxyGroup {
 type ValidatorQueues struct {
 	RawCount         int64            `json:"raw_count"`
 	ValidatedCount   int64            `json:"validated_count"`
+	RetryCount       int64            `json:"retry_count"`
 	ScoreBuckets     map[string]int64 `json:"score_buckets"`
 	ProtocolCounts   map[string]int64 `json:"protocol_counts"`
 	FamilyCounts     map[string]int64 `json:"family_counts"`

@@ -5,6 +5,16 @@ import (
 	"time"
 )
 
+const failDeleteAfter = 3
+
+func retryDueUnix(failCount int, now time.Time) float64 {
+	d := 5 * time.Minute
+	if failCount >= 2 {
+		d = 20 * time.Minute
+	}
+	return float64(now.Add(d).Unix())
+}
+
 // rawValidateCooldown skips a just-tested address so the next batch of a
 // scan picks never-checked / older ones instead of the same slice.
 // Never-checked (LastCheck zero) always sort first, so a 4000-raw pool is

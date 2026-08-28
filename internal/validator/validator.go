@@ -249,16 +249,18 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 	}
 	store := s.free.Store()
 
-	// Recheck at most 30% of the batch. Leftover slots go to raw so a
-	// first pass over thousands of unchecked addresses actually finishes.
-	reLimit := limit * 3 / 10
+	// Untested raw first (so other sources can keep filling the 4000 cap),
+	// then due retries, then a little maintenance recheck of already-live ones.
+	reLimit := limit * 2 / 10
+	retryLimit := limit * 2 / 10
 	var scored []freproxies.Proxy
 	if reLimit > 0 {
 		scored, _ = store.ListValidated(ctx, reLimit)
 	}
-	rawNeed := limit - int64(len(scored))
-	if rawNeed < 1 {
-		rawNeed = limit
+	retries, retryWaiting, _ := store.PickRetry(ctx, retryLimit)
+	rawNeed := limit - int64(len(scored)+len(retries))
+	if rawNeed < limit/2 {
+		rawNeed = limit / 2
 	}
 
 	raw, rawTotal, rawUnchecked, err := store.PickRaw(ctx, rawNeed)
@@ -272,7 +274,7 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 	s.rawUnchecked = rawUnchecked
 	s.mu.Unlock()
 
-	batch := append(raw, scored...)
+	batch := append(append(raw, retries...), scored...)
 	if len(batch) == 0 {
 		DefaultLogs.Add("info", "", "校验批次跳过：无待验代理", "", 0)
 		return 0
@@ -312,8 +314,10 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 	s.mu.Unlock()
 	DefaultLogs.SetRunning(true)
 	DefaultLogs.Add("info", "", "开始校验 batch="+strconv.Itoa(len(batch))+
-		" raw="+strconv.Itoa(len(raw))+" recheck="+strconv.Itoa(len(scored))+
+		" raw="+strconv.Itoa(len(raw))+" retry="+strconv.Itoa(len(retries))+
+		" recheck="+strconv.Itoa(len(scored))+
 		" unchecked="+strconv.Itoa(rawUnchecked)+"/"+strconv.Itoa(rawTotal)+
+		" retry_wait="+strconv.Itoa(retryWaiting)+
 		" urls="+strconv.Itoa(len(urls)), "", 0)
 	defer DefaultLogs.SetRunning(false)
 

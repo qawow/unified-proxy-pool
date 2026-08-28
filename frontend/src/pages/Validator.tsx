@@ -43,6 +43,7 @@ type Queues = {
   lifetime_batches?: number;
   raw_unchecked?: number;
   raw_scan_left?: number;
+  retry_count?: number;
   history?: {
     ok: number;
     fail: number;
@@ -244,7 +245,7 @@ export function ValidatorPage() {
         }
       />
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-        <StatCard title="待校验" value={raw} hint="还没验过或失败未满 3 次" tone="amber" />
+        <StatCard title="待校验" value={raw} hint={data?.retry_count ? `未测队列 · 重试 ${data.retry_count}` : "未测队列（测完即腾位）"} tone="amber" />
         <StatCard title="全量进度" value={raw > 0 ? `${scanned}/${raw}` : "—"} hint={scanHint} tone="mint" />
         <StatCard title="已验证" value={ok} hint={`池内健康率 ${health} · 均延迟 ${avgLat}`} tone="mint" />
         <StatCard title="累计通过" value={lifeOK} hint={`共 ${lifeN} 轮 · 失败 ${lifeFail}`} tone="mint" />

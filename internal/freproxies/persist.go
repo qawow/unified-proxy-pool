@@ -61,7 +61,8 @@ func (s *memoryStore) flushSnapshot() {
 		}
 		_, raw := s.raw[addr]
 		_, scored := s.scored[addr]
-		rows = append(rows, db.FreeProxyRow{Addr: addr, JSON: string(body), InRaw: raw, InScored: scored})
+		_, retrying := s.retry[addr]
+		rows = append(rows, db.FreeProxyRow{Addr: addr, JSON: string(body), InRaw: raw, InScored: scored, InRetry: retrying})
 	}
 	toggles := map[string]bool{}
 	for name := range s.enabled {
@@ -100,6 +101,9 @@ func (s *memoryStore) loadSnapshot(ctx context.Context) error {
 		}
 		if row.InScored {
 			s.scored[row.Addr] = struct{}{}
+		}
+		if row.InRetry || (!row.InRaw && !row.InScored && p.FailCount > 0 && !p.Validated) {
+			s.retry[row.Addr] = time.Now()
 		}
 	}
 	for name, on := range toggles {
