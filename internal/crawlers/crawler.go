@@ -2,14 +2,16 @@ package crawlers
 
 import (
 	"context"
-	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -154,26 +156,7 @@ type HTTPClient struct {
 }
 
 func NewHTTPClient(timeout time.Duration) *HTTPClient {
-	if timeout <= 0 {
-		timeout = 15 * time.Second
-	}
-	return &HTTPClient{
-		client: &http.Client{
-			Timeout: timeout,
-			Transport: &http.Transport{
-				Proxy: http.ProxyFromEnvironment,
-				DialContext: (&net.Dialer{
-					Timeout: 4 * time.Second,
-				}).DialContext,
-				TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-				MaxIdleConns:          32,
-				IdleConnTimeout:       30 * time.Second,
-				TLSHandshakeTimeout:   5 * time.Second,
-				ResponseHeaderTimeout: 6 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-			},
-		},
-	}
+	return NewHTTPClientWithProxy(timeout, "")
 }
 
 func (h *HTTPClient) Get(ctx context.Context, rawURL string) ([]byte, error) {
@@ -197,21 +180,61 @@ func (h *HTTPClient) Get(ctx context.Context, rawURL string) ([]byte, error) {
 	return body, nil
 }
 
+// jsdelivrBlocked is set the first time a jsDelivr/Cloudflare fetch times out
+// in this process. Later sources skip those URLs instead of burning 8s each.
+var jsdelivrBlocked atomic.Bool
+
+func isJsdelivrURL(raw string) bool {
+	return strings.Contains(strings.ToLower(raw), "jsdelivr.net")
+}
+
+func isTimeoutish(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "timeout") || strings.Contains(s, "Timeout")
+}
+
+func mirrorLabel(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		if len(raw) > 64 {
+			return raw[:64]
+		}
+		return raw
+	}
+	return u.Host
+}
+
 func FetchAll(ctx context.Context, client *HTTPClient, c Crawler) ([]Proxy, error) {
 	seen := map[string]struct{}{}
 	out := make([]Proxy, 0, 64)
-	var lastErr error
+	var errs []string
+	skipJS := jsdelivrBlocked.Load()
 	for _, u := range c.URLs() {
-		uCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		if isJsdelivrURL(u) && skipJS {
+			errs = append(errs, mirrorLabel(u)+": skipped (cloudflare/jsdelivr blocked)")
+			continue
+		}
+		wait := 8 * time.Second
+		if isJsdelivrURL(u) {
+			wait = 2 * time.Second
+		}
+		uCtx, cancel := context.WithTimeout(ctx, wait)
 		body, err := client.Get(uCtx, u)
 		cancel()
 		if err != nil {
-			lastErr = err
+			if isJsdelivrURL(u) && isTimeoutish(err) {
+				jsdelivrBlocked.Store(true)
+				skipJS = true
+			}
+			errs = append(errs, mirrorLabel(u)+": "+err.Error())
 			continue
 		}
 		items, err := c.Parse(body, u)
 		if err != nil {
-			lastErr = err
+			errs = append(errs, mirrorLabel(u)+": "+err.Error())
 			continue
 		}
 		got := 0
@@ -228,13 +251,14 @@ func FetchAll(ctx context.Context, client *HTTPClient, c Crawler) ([]Proxy, erro
 			got++
 		}
 		// Fallback URLs are mirrors of the same list: stop after the first
-		// that actually yields proxies so a dead ghproxy does not block jsDelivr.
+		// that actually yields proxies so a dead ghproxy does not block the rest.
 		if got > 0 {
 			return out, nil
 		}
+		errs = append(errs, mirrorLabel(u)+": 0 proxies")
 	}
-	if len(out) == 0 && lastErr != nil {
-		return nil, lastErr
+	if len(out) == 0 && len(errs) > 0 {
+		return nil, errors.New(strings.Join(errs, " | "))
 	}
 	return out, nil
 }

@@ -49,6 +49,7 @@ export type Settings = {
     country_filter_enabled?: boolean;
     check_exit_country?: boolean;
     blocked_countries?: string[];
+    scrape_proxy?: string;
     [key: string]: unknown;
   };
 };

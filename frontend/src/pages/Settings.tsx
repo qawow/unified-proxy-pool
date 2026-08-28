@@ -297,8 +297,20 @@ export function SettingsPage() {
                     onChange={(e) => setSettings({ ...settings, free_validate_concurrency: Number(e.target.value) })}
                   />
                 </Field>
+                <Field label="采集出网代理">
+                  <Input
+                    value={typeof settings.feature?.scrape_proxy === "string" ? settings.feature.scrape_proxy : ""}
+                    onChange={(e) => {
+                      const next = { ...(settings.feature || {}), scrape_proxy: e.target.value };
+                      setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
+                    }}
+                    placeholder="空=直连；chain / 7893 / socks5://127.0.0.1:7890"
+                  />
+                </Field>
               </div>
-              <p className="text-xs text-muted-foreground">采集≥60s，校验≥30s；保存后调度器下一轮生效。</p>
+              <p className="text-xs text-muted-foreground">
+                采集≥60s，校验≥30s；保存后调度器下一轮生效。软路由 Docker 直连 WAN 时 GitHub/Cloudflare 常被墙，采集可走 chain（7893）或本机 clash 混合端口。
+              </p>
             </CardContent>
           </Card>
 

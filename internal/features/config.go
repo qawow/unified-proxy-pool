@@ -44,6 +44,11 @@ type Config struct {
 	// Per-channel temporary bans + selection strategy
 	Channels ChannelPolicyConfig `json:"channels,omitempty"`
 
+	// ScrapeProxy is how crawlers reach GitHub/list hosts. Empty = env
+	// HTTP(S)_PROXY. "none" disables that. "direct"/"7892" and "chain"/"7893"
+	// go through this process's own exits. Otherwise an http:// or socks5:// URL.
+	ScrapeProxy string `json:"scrape_proxy,omitempty"`
+
 	// CountryFilterEnabled nil = default on. false turns the deny list off.
 	CountryFilterEnabled *bool `json:"country_filter_enabled,omitempty"`
 	// CheckExitCountry nil = default on: geolocate through the proxy, not the host.

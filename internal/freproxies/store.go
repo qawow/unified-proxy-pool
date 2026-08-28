@@ -250,11 +250,36 @@ func (s *redisStore) ListRaw(ctx context.Context, limit int64) ([]Proxy, error) 
 	if limit <= 0 {
 		limit = 200
 	}
-	members, err := s.rdb.ZRange(ctx, keyRaw, 0, limit-1).Result()
+	card, err := s.rdb.ZCard(ctx, keyRaw).Result()
 	if err != nil {
 		return nil, err
 	}
-	return s.mgetProxies(ctx, members), nil
+	if card == 0 {
+		return nil, nil
+	}
+	// Pull a window several times the batch, from a random offset, then
+	// drop recently-checked addresses. ZRange(0, limit-1) always returned
+	// the same lowest-score (then lexicographic) slice, so a failed batch
+	// of ~140 sat at the front until FailCount hit 3.
+	fetch := limit * 8
+	if fetch < 400 {
+		fetch = 400
+	}
+	if fetch > 1600 {
+		fetch = 1600
+	}
+	if fetch > card {
+		fetch = card
+	}
+	start := int64(0)
+	if card > fetch {
+		start = rand.Int63n(card - fetch + 1)
+	}
+	members, err := s.rdb.ZRange(ctx, keyRaw, start, start+fetch-1).Result()
+	if err != nil {
+		return nil, err
+	}
+	return selectValidateRaw(s.mgetProxies(ctx, members), limit, time.Now(), rawValidateCooldown), nil
 }
 
 func (s *redisStore) ListValidated(ctx context.Context, limit int64) ([]Proxy, error) {
@@ -1005,15 +1030,15 @@ func (s *memoryStore) Delete(ctx context.Context, addr string) error {
 
 func (s *memoryStore) ListRaw(ctx context.Context, limit int64) ([]Proxy, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]Proxy, 0, len(s.raw))
+	items := make([]Proxy, 0, len(s.raw))
 	for addr := range s.raw {
-		out = append(out, s.proxies[addr])
-		if int64(len(out)) >= limit {
-			break
-		}
+		items = append(items, s.proxies[addr])
 	}
-	return out, nil
+	s.mu.RUnlock()
+	if limit <= 0 {
+		limit = 200
+	}
+	return selectValidateRaw(items, limit, time.Now(), rawValidateCooldown), nil
 }
 
 func (s *memoryStore) ListValidated(ctx context.Context, limit int64) ([]Proxy, error) {

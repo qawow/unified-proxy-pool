@@ -130,7 +130,7 @@ func (s *Scheduler) validateOnce(ctx context.Context) {
 	}
 	runCtx, cancel := context.WithTimeout(ctx, 8*time.Minute)
 	defer cancel()
-	s.validator.ValidateBatch(runCtx, 200)
+	s.validator.ValidateBatch(runCtx, 400)
 	s.lastValidateUnix.Store(time.Now().Unix())
 	if s.free != nil {
 		s.free.RecordValidateYield(runCtx, s.validator.LastSourceBatch())

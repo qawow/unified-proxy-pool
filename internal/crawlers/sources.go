@@ -2,19 +2,18 @@ package crawlers
 
 import "strings"
 
-// githubRawMirrors returns the same GitHub file via several CDNs. FetchAll
-// stops at the first URL that yields proxies, so a dead ghproxy does not
-// take the whole source down.
+// githubRawMirrors returns the same GitHub file via a China-reachable proxy
+// first, then GitHub raw. jsDelivr/Cloudflare is omitted: from CN WAN it
+// blackholes 104.17.x:443 for ~8s and FetchAll used to surface only that last
+// timeout, hiding the real ghproxy/GitHub failures.
 //
 // path is "owner/repo/branch/file..." as on raw.githubusercontent.com.
 func githubRawMirrors(path string) []string {
 	path = strings.TrimPrefix(path, "/")
 	raw := "https://raw.githubusercontent.com/" + path
-	js := jsdelivrFromGitHubPath(path)
 	return []string{
 		"https://ghproxy.net/https://raw.githubusercontent.com/" + path,
 		raw,
-		js,
 	}
 }
 

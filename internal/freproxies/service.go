@@ -70,6 +70,15 @@ func (s *Service) SetGeoLookup(fn func(ctx context.Context, ip string) (string, 
 	s.geoLookup = fn
 }
 
+// SetScrapeProxy rebuilds the crawler client. raw is already resolved
+// (http://127.0.0.1:7893, socks5://…, "none", or empty for env proxy).
+func (s *Service) SetScrapeProxy(raw string) {
+	if s == nil {
+		return
+	}
+	s.client = crawlers.NewHTTPClientWithProxy(15*time.Second, raw)
+}
+
 func (s *Service) SetGeoService(g *geoip.Service) {
 	s.geoSvc = g
 }

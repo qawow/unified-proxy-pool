@@ -21,6 +21,7 @@ import (
 	"unified-proxy-pool/internal/blacklist"
 	"unified-proxy-pool/internal/chanpolicy"
 	"unified-proxy-pool/internal/config"
+	"unified-proxy-pool/internal/crawlers"
 	"unified-proxy-pool/internal/directproxy"
 	"unified-proxy-pool/internal/events"
 	"unified-proxy-pool/internal/features"
@@ -878,6 +879,13 @@ func (a *App) applyFeatureHot(raw string) {
 	}
 	if a.free != nil {
 		a.free.SetPickDefaults(fc.Channels.PickStrategy, fc.Channels.CooldownDuration())
+		directListen, chainListen := "", ""
+		if a.direct != nil {
+			st := a.direct.Status()
+			directListen = st.ListenAddr
+			chainListen = st.ChainListenAddr
+		}
+		a.free.SetScrapeProxy(crawlers.ResolveScrapeProxy(fc.ScrapeProxy, directListen, chainListen))
 		go func() {
 			n, err := a.free.PurgeBlocked(context.Background())
 			if err != nil {

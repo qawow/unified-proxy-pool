@@ -231,28 +231,28 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) {
 		return
 	}
 	if limit <= 0 {
-		limit = 200
+		limit = 400
 	}
 	store := s.free.Store()
 
-	rawLimit := limit * 7 / 10
-	if rawLimit < 1 {
-		rawLimit = limit
+	// Recheck at most 30% of the batch. If the scored pool is tiny (the
+	// usual case while raw is 4000 and validated is 2), give leftover
+	// slots to raw so a click is not stuck at ~140 forever.
+	reLimit := limit * 3 / 10
+	var scored []freproxies.Proxy
+	if reLimit > 0 {
+		scored, _ = store.ListValidated(ctx, reLimit)
 	}
-	reLimit := limit - rawLimit
-	if reLimit < 0 {
-		reLimit = 0
+	rawNeed := limit - int64(len(scored))
+	if rawNeed < 1 {
+		rawNeed = limit
 	}
 
-	raw, err := store.ListRaw(ctx, rawLimit)
+	raw, err := store.ListRaw(ctx, rawNeed)
 	if err != nil {
 		log.Printf("validator list raw: %v", err)
 		DefaultLogs.Add("fail", "", "list raw failed: "+err.Error(), "", 0)
 		return
-	}
-	var scored []freproxies.Proxy
-	if reLimit > 0 {
-		scored, _ = store.ListValidated(ctx, reLimit)
 	}
 
 	batch := append(raw, scored...)

@@ -152,13 +152,28 @@ func TestDefaultSourceURLsMatchProtocol(t *testing.T) {
 
 func TestGithubRawMirrorsOrder(t *testing.T) {
 	got := githubRawMirrors("TheSpeedX/SOCKS-List/master/http.txt")
-	if len(got) < 3 {
-		t.Fatalf("want at least 3 mirrors, got %v", got)
+	if len(got) != 2 {
+		t.Fatalf("want ghproxy + github raw, got %v", got)
 	}
 	if !strings.Contains(got[0], "ghproxy.net/") {
 		t.Fatalf("first mirror should be ghproxy, got %s", got[0])
 	}
 	if !strings.Contains(got[1], "raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt") {
 		t.Fatalf("raw GitHub missing: %v", got)
+	}
+	for _, u := range got {
+		if strings.Contains(u, "jsdelivr.net") {
+			t.Fatalf("jsdelivr must not be a default mirror (Cloudflare blackhole in CN): %s", u)
+		}
+	}
+}
+
+func TestDefaultSourcesAvoidJsdelivr(t *testing.T) {
+	for _, c := range DefaultSources() {
+		for _, u := range c.URLs() {
+			if strings.Contains(strings.ToLower(u), "jsdelivr.net") {
+				t.Errorf("%s still fetches jsdelivr: %s", c.Name(), u)
+			}
+		}
 	}
 }
