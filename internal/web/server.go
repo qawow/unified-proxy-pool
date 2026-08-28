@@ -886,10 +886,15 @@ func (a *App) applyFeatureHot(raw string) {
 			chainListen = st.ChainListenAddr
 		}
 		resolved := crawlers.ResolveScrapeProxy(fc.ScrapeProxy, directListen, chainListen)
-		if resolved == "" {
-			resolved = a.autoMihomoScrapeProxy()
+		if resolved != "" {
+			a.free.SetScrapeProxy(resolved)
+			a.free.SetScrapeFallback("")
+		} else {
+			// Direct first so CN CDNs (jsdmirror) are not forced through a
+			// possibly-dead pool; GitHub/ghproxy TLS failures retry via mihomo.
+			a.free.SetScrapeProxy("")
+			a.free.SetScrapeFallback(a.autoMihomoScrapeProxy())
 		}
-		a.free.SetScrapeProxy(resolved)
 		go func() {
 			n, err := a.free.PurgeBlocked(context.Background())
 			if err != nil {
@@ -970,8 +975,8 @@ func (a *App) applyFeatureHot(raw string) {
 	}
 }
 
-// autoMihomoScrapeProxy uses the first enabled, published pool's in-container
-// mixed port so crawlers can reach GitHub when Docker WAN blackholes TLS.
+// autoMihomoScrapeProxy is the fallback scrape hop: first enabled, published
+// pool's in-container mixed port. Used only after direct fetch fails.
 func (a *App) autoMihomoScrapeProxy() string {
 	if a == nil || a.pools == nil {
 		return ""

@@ -89,6 +89,33 @@ func TestJsdelivrTimeoutMarksBlocked(t *testing.T) {
 	}
 }
 
+func TestFetchAllWithFallbackRetriesNetworkError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "9.9.9.9:1080")
+	}))
+	defer ts.Close()
+
+	primary := NewHTTPClientWithProxy(2*time.Second, "socks5://127.0.0.1:1")
+	fallback := NewHTTPClient(5 * time.Second)
+	c := PlainText("t", []string{ts.URL}, "socks5", false, true)
+	items, err := FetchAllWithFallback(context.Background(), primary, fallback, c)
+	if err != nil {
+		t.Fatalf("FetchAllWithFallback: %v", err)
+	}
+	if len(items) != 1 || items[0].Host != "9.9.9.9" {
+		t.Fatalf("items = %+v", items)
+	}
+}
+
+func TestShouldRetryViaProxy(t *testing.T) {
+	if shouldRetryViaProxy(fmt.Errorf("http 404")) {
+		t.Fatal("404 must not retry via proxy")
+	}
+	if !shouldRetryViaProxy(fmt.Errorf("net/http: TLS handshake timeout")) {
+		t.Fatal("TLS timeout should retry")
+	}
+}
+
 func TestResolveScrapeProxy(t *testing.T) {
 	if got := ResolveScrapeProxy("7892", "0.0.0.0:7892", "0.0.0.0:7893"); got != "http://127.0.0.1:7892" {
 		t.Fatalf("direct shortcut = %q", got)

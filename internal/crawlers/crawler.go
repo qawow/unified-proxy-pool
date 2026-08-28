@@ -208,6 +208,37 @@ func mirrorLabel(raw string) string {
 }
 
 func FetchAll(ctx context.Context, client *HTTPClient, c Crawler) ([]Proxy, error) {
+	return FetchAllWithFallback(ctx, client, nil, c)
+}
+
+func shouldRetryViaProxy(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	if strings.HasPrefix(s, "http 404") || strings.HasPrefix(s, "http 403") {
+		return false
+	}
+	return true
+}
+
+func getWithFallback(ctx context.Context, client, fallback *HTTPClient, rawURL string, wait time.Duration) ([]byte, error) {
+	uCtx, cancel := context.WithTimeout(ctx, wait)
+	body, err := client.Get(uCtx, rawURL)
+	cancel()
+	if err == nil || fallback == nil || fallback == client || !shouldRetryViaProxy(err) {
+		return body, err
+	}
+	uCtx2, cancel2 := context.WithTimeout(ctx, wait)
+	body2, err2 := fallback.Get(uCtx2, rawURL)
+	cancel2()
+	if err2 == nil {
+		return body2, nil
+	}
+	return nil, fmt.Errorf("%w ; via-proxy: %v", err, err2)
+}
+
+func FetchAllWithFallback(ctx context.Context, client, fallback *HTTPClient, c Crawler) ([]Proxy, error) {
 	seen := map[string]struct{}{}
 	out := make([]Proxy, 0, 64)
 	var errs []string
@@ -217,13 +248,11 @@ func FetchAll(ctx context.Context, client *HTTPClient, c Crawler) ([]Proxy, erro
 			errs = append(errs, mirrorLabel(u)+": skipped (cloudflare/jsdelivr blocked)")
 			continue
 		}
-		wait := 8 * time.Second
+		wait := 15 * time.Second
 		if isJsdelivrURL(u) {
 			wait = 2 * time.Second
 		}
-		uCtx, cancel := context.WithTimeout(ctx, wait)
-		body, err := client.Get(uCtx, u)
-		cancel()
+		body, err := getWithFallback(ctx, client, fallback, u, wait)
 		if err != nil {
 			if isJsdelivrURL(u) && isTimeoutish(err) {
 				jsdelivrBlocked.Store(true)

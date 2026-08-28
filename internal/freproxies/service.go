@@ -19,7 +19,9 @@ import (
 type Service struct {
 	store     Store
 	registry  *crawlers.Registry
+	clientMu  sync.RWMutex
 	client    *crawlers.HTTPClient
+	fallback  *crawlers.HTTPClient
 	events    *events.Broker
 	redisOK   bool
 	geoLookup func(ctx context.Context, ip string) (string, error)
@@ -70,13 +72,40 @@ func (s *Service) SetGeoLookup(fn func(ctx context.Context, ip string) (string, 
 	s.geoLookup = fn
 }
 
-// SetScrapeProxy rebuilds the crawler client. raw is already resolved
-// (http://127.0.0.1:7893, socks5://…, "none", or empty for env proxy).
+// SetScrapeProxy rebuilds the primary crawler client. raw is already resolved
+// (http://127.0.0.1:7893, socks5://…, "none", or empty for env/direct).
 func (s *Service) SetScrapeProxy(raw string) {
 	if s == nil {
 		return
 	}
-	s.client = crawlers.NewHTTPClientWithProxy(15*time.Second, raw)
+	s.clientMu.Lock()
+	s.client = crawlers.NewHTTPClientWithProxy(20*time.Second, raw)
+	s.clientMu.Unlock()
+}
+
+// SetScrapeFallback is used when scrape_proxy is empty: try direct first
+// (jsdmirror works on CN WAN), and only on network errors retry via this
+// proxy (usually the published mihomo mixed port).
+func (s *Service) SetScrapeFallback(raw string) {
+	if s == nil {
+		return
+	}
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+	if strings.TrimSpace(raw) == "" {
+		s.fallback = nil
+		return
+	}
+	s.fallback = crawlers.NewHTTPClientWithProxy(20*time.Second, raw)
+}
+
+func (s *Service) scrapeClients() (primary, fallback *crawlers.HTTPClient) {
+	if s == nil {
+		return nil, nil
+	}
+	s.clientMu.RLock()
+	defer s.clientMu.RUnlock()
+	return s.client, s.fallback
 }
 
 func (s *Service) SetGeoService(g *geoip.Service) {
@@ -501,7 +530,8 @@ func (s *Service) RunAllEnabled(ctx context.Context) {
 
 func (s *Service) runOne(ctx context.Context, c crawlers.Crawler) (ScraperStat, error) {
 	start := time.Now().UTC()
-	items, err := crawlers.FetchAll(ctx, s.client, c)
+	primary, fallback := s.scrapeClients()
+	items, err := crawlers.FetchAllWithFallback(ctx, primary, fallback, c)
 	stat := ScraperStat{
 		Name:      c.Name(),
 		Protocol:  c.Protocol(),

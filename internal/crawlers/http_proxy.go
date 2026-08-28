@@ -19,7 +19,7 @@ import (
 //	socks5://…    — SOCKS5 (used for clash mixed-port / VPS)
 func NewHTTPClientWithProxy(timeout time.Duration, proxyRaw string) *HTTPClient {
 	if timeout <= 0 {
-		timeout = 15 * time.Second
+		timeout = 20 * time.Second
 	}
 	transport := &http.Transport{
 		ForceAttemptHTTP2: false,
@@ -29,7 +29,7 @@ func NewHTTPClientWithProxy(timeout time.Duration, proxyRaw string) *HTTPClient 
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 		MaxIdleConns:          32,
 		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
+		TLSHandshakeTimeout:   8 * time.Second,
 		ResponseHeaderTimeout: 6 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
