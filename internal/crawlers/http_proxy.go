@@ -24,12 +24,12 @@ func NewHTTPClientWithProxy(timeout time.Duration, proxyRaw string) *HTTPClient 
 	transport := &http.Transport{
 		ForceAttemptHTTP2: false,
 		DialContext: (&net.Dialer{
-			Timeout: 4 * time.Second,
+			Timeout: 6 * time.Second,
 		}).DialContext,
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 		MaxIdleConns:          32,
 		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   5 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 6 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 	}

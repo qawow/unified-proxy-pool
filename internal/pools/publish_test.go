@@ -7,6 +7,14 @@ import (
 	"unified-proxy-pool/internal/models"
 )
 
+func TestScrapeProxyURL(t *testing.T) {
+	got := ScrapeProxyURL(models.ProxyPool{ID: 4, AuthUsername: "wsl", AuthPasswordSecret: "123456"})
+	want := "socks5://wsl:123456@127.0.0.1:30004"
+	if got != want {
+		t.Fatalf("got %s want %s", got, want)
+	}
+}
+
 func TestBuildPublishBundle(t *testing.T) {
 	poolList := []models.ProxyPool{
 		{

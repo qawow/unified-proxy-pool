@@ -1,10 +1,11 @@
 ## Unreleased — 2026-08-07
 
 ### 采集源出网
-- GitHub 列表不再走 jsDelivr/Cloudflare（`104.17.x:443` 在国内 WAN/Docker 桥上黑洞，一条 `i/o timeout` 会显示成整个源挂了）。默认镜子：ghproxy.net → GitHub raw。
+- GitHub 列表不再走 jsDelivr/Cloudflare（`104.17.x:443` 在国内 WAN/Docker 桥上黑洞）。默认镜子：`cdn.jsdmirror.com`（国内 IP）→ ghproxy.net → GitHub raw。
 - 采集失败会把**每一面镜子**的错误拼进 `last_error`，不再只留最后一条。
 - 进程内一旦 jsDelivr 超时，后续源直接跳过，不再每个源空等 8 秒。
-- 设置「采集出网代理」：`chain`/`7893`、`direct`/`7892`、`socks5://…`，给软路由容器一条能出墙的路。
+- 设置「采集出网代理」：空=自动走已发布 mihomo 池的 `127.0.0.1:3000x`；`none` 直连；也可填 `chain`/`7893`/`socks5://…`。Docker 里 GitHub/ghproxy TLS handshake timeout 时靠这个出网。
+- 采集 TLS 握手超时从 5s 放到 10s。
 
 ### 校验批次
 - 每轮不再固定抽 Redis 分数最低的同一批 ~140：raw 队列按随机窗口 + 10 分钟冷却跳过刚测过的，点第二次会换一批。

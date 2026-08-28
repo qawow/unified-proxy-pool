@@ -2,27 +2,32 @@ package crawlers
 
 import "strings"
 
-// githubRawMirrors returns the same GitHub file via a China-reachable proxy
-// first, then GitHub raw. jsDelivr/Cloudflare is omitted: from CN WAN it
-// blackholes 104.17.x:443 for ~8s and FetchAll used to surface only that last
-// timeout, hiding the real ghproxy/GitHub failures.
+// githubRawMirrors returns the same GitHub file via a China-reachable CDN
+// first. jsDelivr/Cloudflare (104.17.x) and often GitHub/ghproxy TLS are
+// blackholed from a soft-router Docker bridge; cdn.jsdmirror.com resolves
+// to 111/36.x in CN and returns the list in <100ms on that path.
 //
 // path is "owner/repo/branch/file..." as on raw.githubusercontent.com.
 func githubRawMirrors(path string) []string {
 	path = strings.TrimPrefix(path, "/")
 	raw := "https://raw.githubusercontent.com/" + path
 	return []string{
+		ghCDN("cdn.jsdmirror.com", path),
 		"https://ghproxy.net/https://raw.githubusercontent.com/" + path,
 		raw,
 	}
 }
 
-func jsdelivrFromGitHubPath(path string) string {
+func ghCDN(host, path string) string {
 	parts := strings.SplitN(path, "/", 4)
 	if len(parts) < 4 {
-		return "https://cdn.jsdelivr.net/gh/" + path
+		return "https://" + host + "/gh/" + path
 	}
-	return "https://cdn.jsdelivr.net/gh/" + parts[0] + "/" + parts[1] + "@" + parts[2] + "/" + parts[3]
+	return "https://" + host + "/gh/" + parts[0] + "/" + parts[1] + "@" + parts[2] + "/" + parts[3]
+}
+
+func jsdelivrFromGitHubPath(path string) string {
+	return ghCDN("cdn.jsdelivr.net", path)
 }
 
 // DefaultSources returns the unified, de-duplicated crawler set ported from

@@ -885,7 +885,11 @@ func (a *App) applyFeatureHot(raw string) {
 			directListen = st.ListenAddr
 			chainListen = st.ChainListenAddr
 		}
-		a.free.SetScrapeProxy(crawlers.ResolveScrapeProxy(fc.ScrapeProxy, directListen, chainListen))
+		resolved := crawlers.ResolveScrapeProxy(fc.ScrapeProxy, directListen, chainListen)
+		if resolved == "" {
+			resolved = a.autoMihomoScrapeProxy()
+		}
+		a.free.SetScrapeProxy(resolved)
 		go func() {
 			n, err := a.free.PurgeBlocked(context.Background())
 			if err != nil {
@@ -964,6 +968,30 @@ func (a *App) applyFeatureHot(raw string) {
 		a.direct.SetChainOptions(opts)
 		a.direct.SetChainHops(opts.Hops)
 	}
+}
+
+// autoMihomoScrapeProxy uses the first enabled, published pool's in-container
+// mixed port so crawlers can reach GitHub when Docker WAN blackholes TLS.
+func (a *App) autoMihomoScrapeProxy() string {
+	if a == nil || a.pools == nil {
+		return ""
+	}
+	items, err := a.pools.List(context.Background())
+	if err != nil {
+		return ""
+	}
+	for _, p := range items {
+		if !p.Enabled || p.LastPublishStatus != "published" {
+			continue
+		}
+		if p.CurrentHealthyCount <= 0 && p.CurrentMemberCount <= 0 {
+			continue
+		}
+		if u := pools.ScrapeProxyURL(p); u != "" {
+			return u
+		}
+	}
+	return ""
 }
 
 // ApplyFeatureHot is used at startup.

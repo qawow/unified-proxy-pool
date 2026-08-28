@@ -304,12 +304,12 @@ export function SettingsPage() {
                       const next = { ...(settings.feature || {}), scrape_proxy: e.target.value };
                       setSettings({ ...settings, feature: next, feature_json: JSON.stringify(next) });
                     }}
-                    placeholder="空=直连；chain / 7893 / socks5://127.0.0.1:7890"
+                    placeholder="空=自动走已发布的 mihomo 池；none=直连；chain / socks5://…"
                   />
                 </Field>
               </div>
               <p className="text-xs text-muted-foreground">
-                采集≥60s，校验≥30s；保存后调度器下一轮生效。软路由 Docker 直连 WAN 时 GitHub/Cloudflare 常被墙，采集可走 chain（7893）或本机 clash 混合端口。
+                采集≥60s，校验≥30s；保存后调度器下一轮生效。空着时自动用已发布出口池的 127.0.0.1 混合端口拉 GitHub（Docker 直连 WAN 会 TLS 超时）。填 none 则强制直连。
               </p>
             </CardContent>
           </Card>

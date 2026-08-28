@@ -3,7 +3,10 @@ package pools
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"log"
@@ -141,6 +144,23 @@ func InternalPort(poolID int64) (int, error) {
 		return 0, fmt.Errorf("pool ID %d maps to invalid port %d", poolID, port)
 	}
 	return port, nil
+}
+
+// ScrapeProxyURL is the in-container mixed-port URL crawlers can use to
+// reach GitHub when the Docker bridge's WAN path blackholes TLS.
+func ScrapeProxyURL(p models.ProxyPool) string {
+	port, err := InternalPort(p.ID)
+	if err != nil {
+		return ""
+	}
+	u := url.URL{
+		Scheme: "socks5",
+		Host:   net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+	}
+	if p.AuthUsername != "" {
+		u.User = url.UserPassword(p.AuthUsername, p.AuthPasswordSecret)
+	}
+	return u.String()
 }
 
 func buildProbeConfig(secret, controller string, probeMixedPort int, logLevel string, inventory []models.RuntimeNode) ([]byte, error) {
