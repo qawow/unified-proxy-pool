@@ -187,6 +187,9 @@ func (a *App) Router() (http.Handler, error) {
 			api.Get("/mihomo/release", a.handleMihomoRelease)
 			api.Post("/mihomo/install", a.handleMihomoInstall)
 			api.Post("/system/restart", a.handleRestart)
+			api.Get("/system/version", a.handleSystemVersion)
+			api.Get("/system/update", a.handleUpdateCheck)
+			api.Post("/system/update", a.handleUpdateApply)
 
 			api.Get("/overview", a.handleOverview)
 			api.Get("/proxies", a.handleFreeProxyList)

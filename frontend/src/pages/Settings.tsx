@@ -49,6 +49,16 @@ export function SettingsPage() {
   const [passwordForm, setPasswordForm] = useState({ old_password: "", new_password: "" });
   const [restartOpen, setRestartOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [ver, setVer] = useState<{ commit?: string; short?: string; time?: string } | null>(null);
+  const [upd, setUpd] = useState<{
+    local_short?: string;
+    remote_short?: string;
+    newer?: boolean;
+    local_commit?: string;
+    remote_commit?: string;
+  } | null>(null);
+  const [updBusy, setUpdBusy] = useState(false);
+  const [updOpen, setUpdOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -60,6 +70,7 @@ export function SettingsPage() {
       setSettings(s);
       setMihomo(status);
       setDirect(dp);
+      endpoints.system.version().then(setVer).catch(() => setVer(null));
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", "error");
     } finally {
@@ -863,6 +874,54 @@ export function SettingsPage() {
 
           <Card>
             <CardHeader>
+              <CardTitle>热更新</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <div>
+                当前版本：<span className="font-mono">{ver?.short || ver?.commit || "dev"}</span>
+                {ver?.time ? <span className="ml-2 text-muted-foreground">{ver.time}</span> : null}
+              </div>
+              {upd ? (
+                <div>
+                  远程 nightly：<span className="font-mono">{upd.remote_short || "-"}</span>
+                  {upd.newer ? (
+                    <span className="ml-2 text-amber-600">有新版本</span>
+                  ) : (
+                    <span className="ml-2 text-muted-foreground">已是最新</span>
+                  )}
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={async () => {
+                    setUpdBusy(true);
+                    try {
+                      const st = await endpoints.system.updateCheck();
+                      setUpd(st);
+                      toast(st.newer ? `发现 ${st.remote_short}` : "已是最新", st.newer ? "success" : "success");
+                    } catch (e) {
+                      toast(e instanceof Error ? e.message : "检查失败", "error");
+                    } finally {
+                      setUpdBusy(false);
+                    }
+                  }}
+                >
+                  {updBusy ? "检查中…" : "检查更新"}
+                </Button>
+                <Button type="button" onClick={() => setUpdOpen(true)} disabled={updBusy}>
+                  立即热更新
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                从 GitHub nightly 下载 linux/amd64 二进制并替换当前进程，无需在软路由上 docker build。下载期间面板会短暂中断，刷新即可。
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
               <CardTitle>运行时只读</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm text-muted-foreground">
@@ -953,6 +1012,31 @@ export function SettingsPage() {
           </Card>
         </div>
       </form>
+
+      <ConfirmDialog
+        open={updOpen}
+        title="热更新"
+        description="将下载 GitHub nightly 二进制并替换当前进程。进行中的连接会中断，约几十秒后刷新面板即可。"
+        confirmText="下载并切换"
+        cancelText="取消"
+        loading={updBusy}
+        onCancel={() => {
+          if (!updBusy) setUpdOpen(false);
+        }}
+        onConfirm={async () => {
+          setUpdBusy(true);
+          try {
+            await endpoints.system.updateApply();
+            toast("已切换，正在等待新进程…", "success");
+            setUpdOpen(false);
+            window.setTimeout(() => window.location.reload(), 4000);
+          } catch (e) {
+            toast(e instanceof Error ? e.message : "热更新失败", "error");
+          } finally {
+            setUpdBusy(false);
+          }
+        }}
+      />
 
       <ConfirmDialog
         open={restartOpen}

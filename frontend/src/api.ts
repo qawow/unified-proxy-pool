@@ -290,6 +290,20 @@ export const endpoints = {
   },
   system: {
     restart: () => api("/api/system/restart", { method: "POST" }),
+    version: () => api<{ commit: string; short: string; time: string }>("/api/system/version"),
+    updateCheck: () =>
+      api<{
+        local_commit: string;
+        local_short: string;
+        local_time: string;
+        remote_commit: string;
+        remote_short: string;
+        newer: boolean;
+        goos: string;
+        goarch: string;
+      }>("/api/system/update"),
+    updateApply: () =>
+      api("/api/system/update", { method: "POST" }),
   },
   aiProxy: {
     submit: (input: string, source: string) =>

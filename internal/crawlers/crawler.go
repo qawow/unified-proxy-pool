@@ -155,6 +155,13 @@ type HTTPClient struct {
 	client *http.Client
 }
 
+func (h *HTTPClient) Unwrap() *http.Client {
+	if h == nil {
+		return nil
+	}
+	return h.client
+}
+
 func NewHTTPClient(timeout time.Duration) *HTTPClient {
 	return NewHTTPClientWithProxy(timeout, "")
 }

@@ -20,6 +20,8 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG TARGETVARIANT=""
 ARG GOPROXY=https://proxy.golang.org,direct
+ARG GIT_SHA=dev
+ARG GIT_TIME=""
 ENV GOPROXY=${GOPROXY}
 WORKDIR /src
 
@@ -31,7 +33,9 @@ COPY --from=frontend /src/web/dist ./web/dist
 RUN set -eux; \
     export CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}"; \
     if [ "${TARGETARCH}" = "arm" ] && [ -n "${TARGETVARIANT}" ]; then export GOARM="${TARGETVARIANT#v}"; fi; \
-    go build -buildvcs=false -trimpath -ldflags="-s -w" -o /out/unified-proxy-pool ./cmd/app
+    go build -buildvcs=false -trimpath \
+      -ldflags="-s -w -X unified-proxy-pool/internal/version.Commit=${GIT_SHA} -X unified-proxy-pool/internal/version.Time=${GIT_TIME}" \
+      -o /out/unified-proxy-pool ./cmd/app
 
 FROM debian:bookworm-slim
 ARG TARGETOS=linux

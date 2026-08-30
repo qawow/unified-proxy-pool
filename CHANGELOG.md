@@ -1,5 +1,10 @@
 ## Unreleased — 2026-08-07
 
+### 热更新
+- 设置页可检查 / 一键热更新：CI 每次 main 推送把 linux/amd64 二进制挂到 GitHub Release `nightly`，运行中的进程下载后 `exec` 替换自己（Docker 里也不用 rebuild）。
+- `/api/public/debug` 带 `version.commit`，能看出软路由跑的是哪一版。
+- `GET/POST /api/system/update`，`GET /api/system/version`。下载失败会试 ghproxy 和已发布 mihomo 池。
+
 ### 采集源出网
 - GitHub 列表不再走 jsDelivr/Cloudflare（`104.17.x:443` 在国内 WAN/Docker 桥上黑洞）。默认镜子：`cdn.jsdmirror.com`（国内 IP）→ ghproxy.net → GitHub raw。
 - 采集失败会把**每一面镜子**的错误拼进 `last_error`，不再只留最后一条。
