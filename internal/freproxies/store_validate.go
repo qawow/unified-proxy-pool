@@ -5,12 +5,12 @@ import (
 	"time"
 )
 
-const failDeleteAfter = 3
+const failDeleteAfter = 2
 
 func retryDueUnix(failCount int, now time.Time) float64 {
 	d := 5 * time.Minute
 	if failCount >= 2 {
-		d = 20 * time.Minute
+		d = 15 * time.Minute
 	}
 	return float64(now.Add(d).Unix())
 }

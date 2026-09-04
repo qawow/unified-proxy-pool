@@ -34,13 +34,6 @@ func (s *Service) ListPoolCandidates(ctx context.Context, limit int) ([]models.P
 	if err != nil {
 		return nil, err
 	}
-	if len(result.Items) == 0 {
-		// include raw proxies so they can be selected into pools before validation finishes
-		result, err = s.store.List(ctx, ListFilter{Page: 1, Size: limit})
-		if err != nil {
-			return nil, err
-		}
-	}
 	out := make([]models.PoolMemberView, 0, len(result.Items))
 	for _, p := range result.Items {
 		lat := p.LatencyMS
@@ -89,12 +82,6 @@ func (s *Service) AllRuntimeNodes(ctx context.Context, limit int) ([]models.Runt
 	result, err := s.store.List(ctx, ListFilter{Page: 1, Size: limit, OnlyOK: true})
 	if err != nil {
 		return nil, err
-	}
-	if len(result.Items) == 0 {
-		result, err = s.store.List(ctx, ListFilter{Page: 1, Size: limit})
-		if err != nil {
-			return nil, err
-		}
 	}
 	out := make([]models.RuntimeNode, 0, len(result.Items))
 	f := geoip.Active()
@@ -273,7 +260,6 @@ func (s *Service) gatherCandidates(ctx context.Context, opt PickOptions, banned 
 	ladder := []ListFilter{
 		{Page: 1, Size: size, OnlyOK: true, Protocol: protocol, Region: region, Family: family},
 		{Page: 1, Size: size, OnlyOK: true, Family: family},
-		{Page: 1, Size: size, Family: family},
 	}
 	var lastErr error
 	served := false

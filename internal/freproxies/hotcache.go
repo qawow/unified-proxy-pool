@@ -61,12 +61,8 @@ func (h *HotCache) refresh(ctx context.Context) {
 		return
 	}
 	items, err := h.store.ListValidated(ctx, int64(h.size))
-	if err != nil || len(items) == 0 {
-		// fallback RandomN window
-		items, err = h.store.RandomN(ctx, "", h.size)
-		if err != nil {
-			return
-		}
+	if err != nil {
+		return
 	}
 	cp := make([]Proxy, len(items))
 	copy(cp, items)

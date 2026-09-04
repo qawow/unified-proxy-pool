@@ -45,6 +45,9 @@ func TestRandomFilterFallsBackWhenSamplerErrors(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddRaw: %v", err)
 	}
+	if err := svc.store.MarkValidated(ctx, normalizeAddr("10.0.0.1", 8080), 20, true); err != nil {
+		t.Fatalf("MarkValidated: %v", err)
+	}
 	// Simulate a sampler that cannot serve this request at all.
 	rs.randomErr = fmt.Errorf("no proxy available")
 
@@ -85,6 +88,11 @@ func TestRandomFilterDoesNotSpinSamplerForFamily(t *testing.T) {
 	if _, err := svc.store.AddRaw(ctx, seed); err != nil {
 		t.Fatalf("AddRaw: %v", err)
 	}
+	for _, p := range seed {
+		if err := svc.store.MarkValidated(ctx, normalizeAddr(p.Host, p.Port), 20, true); err != nil {
+			t.Fatalf("MarkValidated %s: %v", p.Host, err)
+		}
+	}
 
 	got, err := svc.RandomFamilyFilter(ctx, "", "", FamilyIPv6)
 	if err != nil {
@@ -108,6 +116,14 @@ func TestRandomFilterSkipsBlacklisted(t *testing.T) {
 		{Host: "10.0.0.2", Port: 8081, Protocol: "http"},
 	}); err != nil {
 		t.Fatalf("AddRaw: %v", err)
+	}
+	for _, p := range []struct {
+		h string
+		n int
+	}{{"10.0.0.1", 8080}, {"10.0.0.2", 8081}} {
+		if err := svc.store.MarkValidated(ctx, normalizeAddr(p.h, p.n), 20, true); err != nil {
+			t.Fatalf("MarkValidated: %v", err)
+		}
 	}
 	blockedAddr := normalizeAddr("10.0.0.1", 8080)
 	svc.SetBlockedFn(func(addr string) bool { return addr == blockedAddr })

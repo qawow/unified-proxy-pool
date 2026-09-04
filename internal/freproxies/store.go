@@ -61,6 +61,7 @@ type Store interface {
 	// PickRaw is ListRaw plus scan stats: total raw and how many have never been checked.
 	PickRaw(ctx context.Context, limit int64) (items []Proxy, total, unchecked int, err error)
 	PickRetry(ctx context.Context, limit int64) (items []Proxy, waiting int, err error)
+	PurgeRetry(ctx context.Context) (int, error)
 	ListValidated(ctx context.Context, limit int64) ([]Proxy, error)
 	Trim(ctx context.Context) error
 	SaveScraperStat(ctx context.Context, stat ScraperStat) error
@@ -316,27 +317,39 @@ func (s *redisStore) MarkValidated(ctx context.Context, addr string, latencyMS i
 		_, err = pipe.Exec(ctx)
 		return err
 	}
+	wasLive := p.Validated
 	p.FailCount++
 	p.Score = p.Score - 1
 	if p.Score < ScoreMin {
 		p.Score = ScoreMin
 	}
-	if p.Score <= 0 || p.FailCount >= failDeleteAfter {
+	p.Validated = false
+	// Untested / retry failures are one-shot: free lists are 99% dead and
+	// parking them in retry (thousands) makes every outbound pick look like
+	// a live pool. Previously-validated get one more chance.
+	if !wasLive || p.FailCount >= failDeleteAfter || p.Score <= 0 {
 		return s.Delete(ctx, addr)
 	}
 	pipe := s.rdb.Pipeline()
-	if p.Validated {
-		pipe.ZAdd(ctx, keyScored, redis.Z{Score: p.Score, Member: addr})
-	} else {
-		// Leave raw immediately so other sources can fill the 4000 cap.
-		pipe.ZRem(ctx, keyRaw, addr)
-		pipe.ZAdd(ctx, keyRetry, redis.Z{Score: retryDueUnix(p.FailCount, now), Member: addr})
-	}
+	pipe.ZRem(ctx, keyRaw, addr)
+	pipe.ZRem(ctx, keyScored, addr)
+	pipe.ZAdd(ctx, keyRetry, redis.Z{Score: retryDueUnix(p.FailCount, now), Member: addr})
 	if err := s.saveMeta(ctx, p); err != nil {
 		return err
 	}
 	_, err = pipe.Exec(ctx)
 	return err
+}
+
+func (s *redisStore) PurgeRetry(ctx context.Context) (int, error) {
+	members, err := s.rdb.ZRange(ctx, keyRetry, 0, -1).Result()
+	if err != nil {
+		return 0, err
+	}
+	for _, addr := range members {
+		_ = s.Delete(ctx, addr)
+	}
+	return len(members), nil
 }
 
 func (s *redisStore) PickRetry(ctx context.Context, limit int64) ([]Proxy, int, error) {
@@ -391,23 +404,13 @@ func (s *redisStore) RandomN(ctx context.Context, protocol string, n int) ([]Pro
 			if protocol != "" && !strings.EqualFold(p.Protocol, protocol) {
 				continue
 			}
-			if p.Validated || p.Score >= ScoreInit {
+			if p.Validated {
 				out = append(out, p)
 			}
 		}
 		return out
 	}
 	candidates := pick(members)
-	if len(candidates) == 0 {
-		// Fall back to the raw pool, matching memoryStore. Without this a freshly
-		// scraped pool reports "no proxy available" until the first validation
-		// round finishes, even though keyRaw holds thousands of addresses — and
-		// Service.RandomFamilyFilter surfaces that error straight to the caller.
-		rawMembers, rawErr := s.rdb.ZRevRange(ctx, keyRaw, 0, fetch-1).Result()
-		if rawErr == nil {
-			candidates = pick(rawMembers)
-		}
-	}
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no proxy available")
 	}
@@ -1125,9 +1128,14 @@ func (s *memoryStore) MarkValidated(ctx context.Context, addr string, latencyMS 
 		s.markDirty()
 		return nil
 	}
+	wasLive := p.Validated
 	p.FailCount++
 	p.Score--
-	if p.Score <= 0 || p.FailCount >= failDeleteAfter {
+	if p.Score <= 0 {
+		p.Score = 0
+	}
+	p.Validated = false
+	if !wasLive || p.FailCount >= failDeleteAfter || p.Score <= 0 {
 		delete(s.proxies, addr)
 		delete(s.raw, addr)
 		delete(s.retry, addr)
@@ -1135,13 +1143,28 @@ func (s *memoryStore) MarkValidated(ctx context.Context, addr string, latencyMS 
 		s.markDirty()
 		return nil
 	}
-	if !p.Validated {
-		delete(s.raw, addr)
-		s.retry[addr] = time.Unix(int64(retryDueUnix(p.FailCount, now)), 0)
-	}
+	delete(s.raw, addr)
+	delete(s.scored, addr)
+	s.retry[addr] = time.Unix(int64(retryDueUnix(p.FailCount, now)), 0)
 	s.proxies[addr] = p
 	s.markDirty()
 	return nil
+}
+
+func (s *memoryStore) PurgeRetry(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.retry)
+	for addr := range s.retry {
+		delete(s.proxies, addr)
+		delete(s.raw, addr)
+		delete(s.retry, addr)
+		delete(s.scored, addr)
+	}
+	if n > 0 {
+		s.markDirty()
+	}
+	return n, nil
 }
 
 func (s *memoryStore) PickRetry(ctx context.Context, limit int64) ([]Proxy, int, error) {
@@ -1188,19 +1211,6 @@ func (s *memoryStore) RandomN(ctx context.Context, protocol string, n int) ([]Pr
 			continue
 		}
 		candidates = append(candidates, p)
-	}
-	if len(candidates) == 0 {
-		// best-effort: raw pool sample
-		for addr := range s.raw {
-			p := s.proxies[addr]
-			if protocol != "" && !strings.EqualFold(p.Protocol, protocol) {
-				continue
-			}
-			candidates = append(candidates, p)
-			if len(candidates) >= 200 {
-				break
-			}
-		}
 	}
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("no proxy available")

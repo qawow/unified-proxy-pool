@@ -17,10 +17,8 @@ func bothStores(t *testing.T, fn func(t *testing.T, s Store)) {
 	})
 }
 
-// RandomN on a pool that has been scraped but not yet validated must behave the
-// same on both backends. redisStore reads only the scored ZSET while memoryStore
-// samples the raw pool as a fallback, so the two used to disagree: on Redis a
-// fresh pool reported "no proxy available", on memory it served a raw proxy.
+// RandomN on a raw-only pool must refuse on both backends. Serving untested
+// addresses is how the public get/7892 endpoints filled with dead proxies.
 func TestRandomNParityOnUnvalidatedPool(t *testing.T) {
 	ctx := context.Background()
 	bothStores(t, func(t *testing.T, s Store) {
@@ -31,17 +29,9 @@ func TestRandomNParityOnUnvalidatedPool(t *testing.T) {
 			t.Fatalf("AddRaw: %v", err)
 		}
 
-		got, err := s.RandomN(ctx, "", 2)
-		if err != nil {
-			t.Fatalf("RandomN on a raw-only pool: %v", err)
-		}
-		if len(got) == 0 {
-			t.Fatal("raw-only pool served nothing; a freshly scraped pool must still be usable")
-		}
-		for _, p := range got {
-			if p.Validated {
-				t.Errorf("proxy reported as validated when it never was: %+v", p)
-			}
+		_, err := s.RandomN(ctx, "", 2)
+		if err == nil {
+			t.Fatal("raw-only pool must not be served as available; validate first")
 		}
 	})
 }
@@ -57,14 +47,9 @@ func TestRandomNParityRespectsProtocolOnRawPool(t *testing.T) {
 			t.Fatalf("AddRaw: %v", err)
 		}
 
-		got, err := s.RandomN(ctx, "socks5", 4)
-		if err != nil {
-			t.Fatalf("RandomN(socks5): %v", err)
-		}
-		for _, p := range got {
-			if p.Protocol != "socks5" {
-				t.Errorf("protocol filter leaked %s into a socks5-only request", p.Protocol)
-			}
+		_, err := s.RandomN(ctx, "socks5", 4)
+		if err == nil {
+			t.Fatal("unvalidated socks5 raw must not be served")
 		}
 	})
 }
@@ -78,11 +63,8 @@ func TestRandomNParityOnExhaustedPool(t *testing.T) {
 		if _, err := s.AddRaw(ctx, []Proxy{{Host: "10.0.0.1", Port: 8080, Protocol: "http"}}); err != nil {
 			t.Fatalf("AddRaw: %v", err)
 		}
-		// Three failures is the deletion threshold in both stores.
-		for i := 0; i < 3; i++ {
-			if err := s.MarkValidated(ctx, addr, 0, false); err != nil {
-				t.Fatalf("MarkValidated(fail #%d): %v", i+1, err)
-			}
+		if err := s.MarkValidated(ctx, addr, 0, false); err != nil {
+			t.Fatalf("MarkValidated: %v", err)
 		}
 		if _, err := s.RandomN(ctx, "", 1); err == nil {
 			t.Error("expected an error once every proxy has been evicted")

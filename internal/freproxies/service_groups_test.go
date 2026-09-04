@@ -180,6 +180,14 @@ func TestServicePickValidatedNFamily(t *testing.T) {
 	ctx := context.Background()
 	s := newTestService()
 	seedProxies(t, s)
+	for _, p := range []struct {
+		h string
+		n int
+	}{{"2001:db8::1", 3}, {"2001:db8::2", 4}} {
+		if err := s.store.MarkValidated(ctx, normalizeAddr(p.h, p.n), 20, true); err != nil {
+			t.Fatalf("MarkValidated: %v", err)
+		}
+	}
 
 	items, err := s.PickValidatedNFamily(ctx, "", FamilyIPv6, 2)
 	if err != nil {

@@ -106,12 +106,40 @@ func (a *App) handleProxyPurge(w http.ResponseWriter, r *http.Request) {
 		MinScore     float64 `json:"min_score"`
 		MaxFail      int     `json:"max_fail"`
 		OnlyInvalid  bool    `json:"only_invalid"`
+		Dead         bool    `json:"dead"`
 		Region       string  `json:"region"`
 		Source       string  `json:"source"`
 		OlderThanSec int     `json:"older_than_sec"`
 		DryRun       bool    `json:"dry_run"`
 	}
 	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Dead {
+		if body.DryRun {
+			q, err := a.free.Queues(r.Context())
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+				"matched": int(q.RetryCount), "deleted": 0, "dry_run": true, "sample": []string{},
+			}})
+			return
+		}
+		n, err := a.free.PurgeDead(r.Context())
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if a.audit != nil {
+			a.audit.Log(r.Context(), "admin", "proxies.purge", clientIP(r), map[string]any{
+				"dead": true, "deleted": n,
+			})
+		}
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+			"matched": n, "deleted": n, "dry_run": false, "sample": []string{},
+		}})
 		return
 	}
 	list, err := a.free.ListProxies(r.Context(), freproxies.ListFilter{Page: 1, Size: 5000, Region: body.Region, Source: body.Source})

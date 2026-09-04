@@ -240,6 +240,22 @@ export function ValidatorPage() {
             <Button variant="secondary" onClick={() => void clearLogs()}>
               清空日志
             </Button>
+            <Button
+              variant="secondary"
+              onClick={async () => {
+                try {
+                  const r = await endpoints.proxies.purge({ dead: true, dry_run: true });
+                  if (!window.confirm(`将删除重试队列里 ${r.matched} 条已测死代理，确认？`)) return;
+                  const r2 = await endpoints.proxies.purge({ dead: true, dry_run: false });
+                  toast(`已清掉 ${r2.deleted} 条死代理`, "success");
+                  void load();
+                } catch (e) {
+                  toast(e instanceof Error ? e.message : "清理失败", "error");
+                }
+              }}
+            >
+              清空死代理
+            </Button>
             <Button onClick={run}>立即校验（自动分批扫完）</Button>
           </div>
         }

@@ -75,20 +75,84 @@ func TestSuccessGoesToMaintenanceList(t *testing.T) {
 	})
 }
 
-func TestThreeFailsDeletes(t *testing.T) {
+func TestUntestedFailDeletesImmediately(t *testing.T) {
 	ctx := context.Background()
 	bothStores(t, func(t *testing.T, s Store) {
 		addr := normalizeAddr("10.2.0.1", 9)
 		if _, err := s.AddRaw(ctx, []Proxy{{Host: "10.2.0.1", Port: 9, Protocol: "http"}}); err != nil {
 			t.Fatalf("AddRaw: %v", err)
 		}
-		for i := 0; i < failDeleteAfter; i++ {
-			if err := s.MarkValidated(ctx, addr, 0, false); err != nil {
-				t.Fatalf("fail #%d: %v", i+1, err)
-			}
+		if err := s.MarkValidated(ctx, addr, 0, false); err != nil {
+			t.Fatalf("fail: %v", err)
 		}
 		if _, err := s.Get(ctx, addr); err == nil {
-			t.Fatal("expected deletion after 3 failures")
+			t.Fatal("untested fail must delete, not park in retry")
+		}
+		if _, _, err := s.PickRetry(ctx, 10); err != nil {
+			t.Fatalf("PickRetry: %v", err)
+		}
+	})
+}
+
+func TestLiveFailRetriesOnceThenDeletes(t *testing.T) {
+	ctx := context.Background()
+	bothStores(t, func(t *testing.T, s Store) {
+		addr := normalizeAddr("10.3.0.1", 9)
+		if _, err := s.AddRaw(ctx, []Proxy{{Host: "10.3.0.1", Port: 9, Protocol: "http"}}); err != nil {
+			t.Fatalf("AddRaw: %v", err)
+		}
+		if err := s.MarkValidated(ctx, addr, 20, true); err != nil {
+			t.Fatalf("ok: %v", err)
+		}
+		if err := s.MarkValidated(ctx, addr, 0, false); err != nil {
+			t.Fatalf("fail 1: %v", err)
+		}
+		if _, err := s.Get(ctx, addr); err != nil {
+			t.Fatalf("first fail of a live proxy should retry, got %v", err)
+		}
+		if err := s.MarkValidated(ctx, addr, 0, false); err != nil {
+			t.Fatalf("fail 2: %v", err)
+		}
+		if _, err := s.Get(ctx, addr); err == nil {
+			t.Fatal("second fail of a live proxy must delete")
+		}
+	})
+}
+
+func TestRandomNDoesNotServeRaw(t *testing.T) {
+	ctx := context.Background()
+	bothStores(t, func(t *testing.T, s Store) {
+		if _, err := s.AddRaw(ctx, []Proxy{{Host: "10.4.0.1", Port: 1, Protocol: "http"}}); err != nil {
+			t.Fatalf("AddRaw: %v", err)
+		}
+		if _, err := s.RandomN(ctx, "", 1); err == nil {
+			t.Fatal("unvalidated raw must not be handed to callers")
+		}
+	})
+}
+
+func TestPurgeRetryClearsZombies(t *testing.T) {
+	ctx := context.Background()
+	bothStores(t, func(t *testing.T, s Store) {
+		addr := normalizeAddr("10.5.0.1", 1)
+		if _, err := s.AddRaw(ctx, []Proxy{{Host: "10.5.0.1", Port: 1, Protocol: "http"}}); err != nil {
+			t.Fatalf("AddRaw: %v", err)
+		}
+		if err := s.MarkValidated(ctx, addr, 10, true); err != nil {
+			t.Fatalf("ok: %v", err)
+		}
+		if err := s.MarkValidated(ctx, addr, 0, false); err != nil {
+			t.Fatalf("fail: %v", err)
+		}
+		n, err := s.PurgeRetry(ctx)
+		if err != nil {
+			t.Fatalf("PurgeRetry: %v", err)
+		}
+		if n < 1 {
+			t.Fatalf("purged %d, want >=1", n)
+		}
+		if _, err := s.Get(ctx, addr); err == nil {
+			t.Fatal("retry zombie still present")
 		}
 	})
 }

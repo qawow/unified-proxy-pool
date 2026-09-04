@@ -666,6 +666,20 @@ func (s *Service) Queues(ctx context.Context) (ValidatorQueues, error) {
 	return s.store.Queues(ctx)
 }
 
+// PurgeDead deletes every proxy sitting in the retry set (tested-dead, waiting
+// to be tried again). Untested raw is left so the scanner can keep filling.
+func (s *Service) PurgeDead(ctx context.Context) (int, error) {
+	n, err := s.store.PurgeRetry(ctx)
+	if err != nil {
+		return n, err
+	}
+	if n > 0 {
+		_ = s.store.PushEvent(ctx, fmt.Sprintf("purged %d dead retry proxies", n))
+		s.publish("proxies.purged", map[string]any{"reason": "retry_dead", "count": n})
+	}
+	return n, nil
+}
+
 func (s *Service) publish(typ string, data map[string]any) {
 	if s.events == nil {
 		return

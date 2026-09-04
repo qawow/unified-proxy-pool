@@ -196,6 +196,9 @@ func TestPickDescendsWhenPageIsFullyFilteredOut(t *testing.T) {
 	if err := svc.store.MarkValidated(ctx, blockedAddr, 10, true); err != nil {
 		t.Fatalf("MarkValidated: %v", err)
 	}
+	if err := svc.store.MarkValidated(ctx, normalizeAddr("2001:db8::2", 2), 10, true); err != nil {
+		t.Fatalf("MarkValidated fallback: %v", err)
+	}
 	svc.SetBlockedFn(func(addr string) bool { return addr == blockedAddr })
 
 	out, err := svc.PickValidatedNFilter(ctx, "socks5", "US", FamilyIPv6, 1)
