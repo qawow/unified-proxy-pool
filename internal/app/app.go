@@ -14,6 +14,7 @@ import (
 	"unified-proxy-pool/internal/audit"
 	"unified-proxy-pool/internal/auth"
 	"unified-proxy-pool/internal/blacklist"
+	"unified-proxy-pool/internal/cfscan"
 	"unified-proxy-pool/internal/chanpolicy"
 	"unified-proxy-pool/internal/config"
 	"unified-proxy-pool/internal/crawlers"
@@ -259,6 +260,7 @@ func Run() {
 		Tokens:      tokenStore,
 		TrafficHist: trafficHistStore,
 		Channels:    channels,
+		CFScan:      cfscan.New(store, broker),
 	})
 	if err != nil {
 		log.Fatalf("build web app: %v", err)

@@ -15,6 +15,7 @@ import { SubscriptionDetailPage } from "@/pages/SubscriptionDetail";
 import { SubscriptionsPage } from "@/pages/Subscriptions";
 import { ValidatorPage } from "@/pages/Validator";
 import { AIProxyPage } from "@/pages/AIProxy";
+import { CFScanPage } from "@/pages/CFScan";
 import { Button } from "@/components/ui/button";
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -78,6 +79,7 @@ export default function App() {
         <Route path="manual-nodes" element={<Navigate to="/nodes" replace />} />
         <Route path="pools" element={<PoolsPage />} />
         <Route path="ai-proxy" element={<AIProxyPage />} />
+        <Route path="cfscan" element={<CFScanPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

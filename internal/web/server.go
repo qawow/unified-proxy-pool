@@ -20,6 +20,7 @@ import (
 	"unified-proxy-pool/internal/auth"
 	"unified-proxy-pool/internal/blacklist"
 	"unified-proxy-pool/internal/chanpolicy"
+	"unified-proxy-pool/internal/cfscan"
 	"unified-proxy-pool/internal/config"
 	"unified-proxy-pool/internal/crawlers"
 	"unified-proxy-pool/internal/directproxy"
@@ -64,6 +65,7 @@ type App struct {
 	channels      *chanpolicy.Registry
 	prompts       *aisvc.PromptStore
 	getSticky     *sticky.Store
+	cfscan        *cfscan.Service
 	shutdown      func()
 	frontend      fs.FS
 	indexHTML     []byte
@@ -75,6 +77,7 @@ type FeatureDeps struct {
 	Tokens      *apitoken.Store
 	TrafficHist *traffichist.Store
 	Channels    *chanpolicy.Registry
+	CFScan      *cfscan.Service
 }
 
 type apiResponse struct {
@@ -118,6 +121,7 @@ func New(authSvc *auth.Service, settingsSvc *settings.Service, nodeSvc *nodes.Se
 		tokens:        deps.Tokens,
 		trafficHist:   deps.TrafficHist,
 		channels:      deps.Channels,
+		cfscan:        deps.CFScan,
 		prompts:       aisvc.NewPromptStore(),
 		getSticky:     sticky.New(10 * time.Minute),
 		shutdown:      shutdown,
@@ -190,6 +194,14 @@ func (a *App) Router() (http.Handler, error) {
 			api.Get("/system/version", a.handleSystemVersion)
 			api.Get("/system/update", a.handleUpdateCheck)
 			api.Post("/system/update", a.handleUpdateApply)
+
+			api.Get("/cfscan/status", a.handleCFScanStatus)
+			api.Get("/cfscan/hits", a.handleCFScanHits)
+			api.Get("/cfscan/export", a.handleCFScanExport)
+			api.Post("/cfscan/run", a.handleCFScanRun)
+			api.Post("/cfscan/stop", a.handleCFScanStop)
+			api.Post("/cfscan/clear", a.handleCFScanClear)
+			api.Post("/cfscan/apply", a.handleCFScanApply)
 
 			api.Get("/overview", a.handleOverview)
 			api.Get("/proxies", a.handleFreeProxyList)

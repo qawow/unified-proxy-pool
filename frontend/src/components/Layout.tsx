@@ -11,6 +11,7 @@ import {
   Moon,
   Network,
   Radar,
+  ScanSearch,
   Settings,
   ShieldBan,
   Sun,
@@ -41,6 +42,7 @@ const navGroups = [
       { to: "/nodes", label: "手动节点", icon: Network },
       { to: "/pools", label: "出口池", icon: Boxes },
       { to: "/ai-proxy", label: "AI 爬取", icon: Bot },
+      { to: "/cfscan", label: "CF 优选", icon: ScanSearch },
     ],
   },
   {

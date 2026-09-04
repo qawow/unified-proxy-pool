@@ -288,6 +288,16 @@ export const endpoints = {
     install: (asset_name?: string) =>
       api("/api/mihomo/install", { method: "POST", body: JSON.stringify({ asset_name: asset_name || "" }) }),
   },
+  cfscan: {
+    status: () => api("/api/cfscan/status"),
+    hits: () => api("/api/cfscan/hits"),
+    run: (body: { targets: string; tcp_conc?: number; tls_conc?: number }) =>
+      api("/api/cfscan/run", { method: "POST", body: JSON.stringify(body) }),
+    stop: () => api("/api/cfscan/stop", { method: "POST" }),
+    clear: () => api("/api/cfscan/clear", { method: "POST" }),
+    apply: (body: { node_id: number; ips?: string[] }) =>
+      api<{ created: number }>("/api/cfscan/apply", { method: "POST", body: JSON.stringify(body) }),
+  },
   system: {
     restart: () => api("/api/system/restart", { method: "POST" }),
     version: () => api<{ commit: string; short: string; time: string }>("/api/system/version"),

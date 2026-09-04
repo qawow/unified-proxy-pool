@@ -3,6 +3,7 @@ package nodes
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -108,6 +109,56 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) ([]models.Manua
 	}
 	s.events.Publish("manual_nodes.created", created)
 	return created, parseErrs, nil
+}
+
+// CloneWithServers copies a TLS/proxy node, swapping only the server IP.
+// Used to apply Cloudflare 优选 IPs onto an existing vless/trojan/vmess template.
+func (s *Service) CloneWithServers(ctx context.Context, srcID int64, servers []string) (int, error) {
+	src, err := s.Get(ctx, srcID)
+	if err != nil {
+		return 0, err
+	}
+	var payload map[string]any
+	if src.NormalizedJSON != "" {
+		_ = json.Unmarshal([]byte(src.NormalizedJSON), &payload)
+	}
+	if payload == nil {
+		payload = map[string]any{"type": src.Protocol, "port": src.Port}
+	}
+	now := time.Now().UTC()
+	n := 0
+	for _, ip := range servers {
+		ip = strings.TrimSpace(ip)
+		if ip == "" || ip == src.Server {
+			continue
+		}
+		cp := map[string]any{}
+		for k, v := range payload {
+			cp[k] = v
+		}
+		cp["server"] = ip
+		name := src.DisplayName + "-" + ip
+		if len(name) > 80 {
+			name = name[:80]
+		}
+		cp["name"] = name
+		body := NormalizeJSON(cp)
+		var exists int
+		_ = s.store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM manual_nodes WHERE protocol = ? AND server = ? AND port = ?`,
+			src.Protocol, ip, src.Port).Scan(&exists)
+		if exists > 0 {
+			continue
+		}
+		_, err := s.store.DB.ExecContext(ctx, `INSERT INTO manual_nodes (
+			display_name, protocol, server, port, raw_payload, normalized_json, enabled, last_status, created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, 1, 'unknown', ?, ?)`,
+			name, src.Protocol, ip, src.Port, body, body, now, now)
+		if err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 func (s *Service) Update(ctx context.Context, id int64, req UpdateRequest) (models.ManualNode, error) {

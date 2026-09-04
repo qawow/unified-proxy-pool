@@ -246,6 +246,15 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	// F2–F6 tables
 	extra := []string{
+		`CREATE TABLE IF NOT EXISTS cf_scan_hits (
+			ip TEXT PRIMARY KEY,
+			colo TEXT NOT NULL DEFAULT '',
+			fl TEXT NOT NULL DEFAULT '',
+			sni TEXT NOT NULL DEFAULT '',
+			latency_ms INTEGER NOT NULL DEFAULT 0,
+			open_443 INTEGER NOT NULL DEFAULT 1,
+			last_seen TIMESTAMP NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS proxy_blacklist (
 			host TEXT PRIMARY KEY,
 			reason TEXT NOT NULL DEFAULT '',
