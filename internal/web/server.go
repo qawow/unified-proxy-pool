@@ -195,6 +195,7 @@ func (a *App) Router() (http.Handler, error) {
 			api.Get("/system/update", a.handleUpdateCheck)
 			api.Post("/system/update", a.handleUpdateApply)
 
+			api.Get("/cfscan/preset", a.handleCFScanPreset)
 			api.Get("/cfscan/status", a.handleCFScanStatus)
 			api.Get("/cfscan/hits", a.handleCFScanHits)
 			api.Get("/cfscan/export", a.handleCFScanExport)

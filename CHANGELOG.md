@@ -4,6 +4,7 @@
 - 面板「CF 优选」：粘贴 IPv4/CIDR（上限 2 万），先扫 443 再 TLS 探 `/cdn-cgi/trace`（SNI `speed.cloudflare.com`）。
 - 命中存 SQLite，可导出 `cf_proxy_ips.txt`，或套到已有 vless/trojan/vmess 手动节点（只改 server）。
 - **不会**写入 7892 免费 HTTP/SOCKS 池。
+- 「填入官方 /24 抽样」：从 Cloudflare 公布的 IPv4 段里抽 32 个 /24（约 8k IP）做边缘优选，不必自己找段。
 
 ### 热更新
 - 设置页可检查 / 一键热更新：CI 每次 main 推送把 linux/amd64 二进制挂到 GitHub Release `nightly`，运行中的进程下载后 `exec` 替换自己（Docker 里也不用 rebuild）。

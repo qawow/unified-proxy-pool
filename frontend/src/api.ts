@@ -289,6 +289,8 @@ export const endpoints = {
       api("/api/mihomo/install", { method: "POST", body: JSON.stringify({ asset_name: asset_name || "" }) }),
   },
   cfscan: {
+    preset: (kind?: string) =>
+      api<{ kind?: string; targets: string }>(`/api/cfscan/preset${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`),
     status: () => api("/api/cfscan/status"),
     hits: () => api("/api/cfscan/hits"),
     run: (body: { targets: string; tcp_conc?: number; tls_conc?: number }) =>

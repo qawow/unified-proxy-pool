@@ -132,12 +132,28 @@ export function CFScanPage() {
             <p className="text-xs text-muted-foreground">
               原理：对开放 443 的 IP 用 speed.cloudflare.com SNI 握手并 GET /cdn-cgi/trace，出现 colo=/fl= 即视为可当 CF 优选 IP。请自备 IP/CIDR，不要扫整个公网。
             </p>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button onClick={() => void run()} disabled={busy || st.running}>
                 {st.running ? "扫描中…" : "开始扫描"}
               </Button>
               <Button variant="secondary" onClick={() => void endpoints.cfscan.stop().then(() => load())} disabled={!st.running}>
                 停止
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={busy || st.running}
+                onClick={async () => {
+                  try {
+                    const p = await endpoints.cfscan.preset();
+                    setTargets(p.targets);
+                    toast("已填入 Cloudflare 官方 /24 抽样", "success");
+                  } catch (e) {
+                    toast(e instanceof Error ? e.message : "加载失败", "error");
+                  }
+                }}
+              >
+                填入官方 /24 抽样
               </Button>
             </div>
           </CardContent>

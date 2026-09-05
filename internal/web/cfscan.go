@@ -7,6 +7,18 @@ import (
 	"unified-proxy-pool/internal/cfscan"
 )
 
+func (a *App) handleCFScanPreset(w http.ResponseWriter, r *http.Request) {
+	kind := r.URL.Query().Get("kind")
+	text := cfscan.SampleSlash24s(cfscan.DefaultSampleSlash24)
+	if kind == "cidrs" {
+		text = cfscan.OfficialCIDRText()
+	}
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+		"kind":    kind,
+		"targets": text,
+	}})
+}
+
 func (a *App) handleCFScanStatus(w http.ResponseWriter, r *http.Request) {
 	if a.cfscan == nil {
 		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: cfscan.Status{}})

@@ -1,6 +1,9 @@
 package cfscan
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseTargetsIPv4AndCIDR(t *testing.T) {
 	got, err := ParseTargets("1.2.3.4\n# skip\n10.0.0.0/30\n1.2.3.4\n")
@@ -42,5 +45,19 @@ func TestIsCFTrace(t *testing.T) {
 	}
 	if traceField(body, "colo") != "SJC" {
 		t.Fatalf("colo=%s", traceField(body, "colo"))
+	}
+}
+
+func TestSampleSlash24sFitsCap(t *testing.T) {
+	text := SampleSlash24s(16)
+	ips, err := ParseTargets(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips) == 0 || len(ips) > MaxTargets {
+		t.Fatalf("sample size %d", len(ips))
+	}
+	if !strings.Contains(text, "/24") {
+		t.Fatal("expected /24 lines")
 	}
 }
