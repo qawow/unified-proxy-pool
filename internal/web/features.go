@@ -1,8 +1,10 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -441,9 +443,23 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(b.String()))
 }
 
+// reportRecheckSlots bounds the re-validations an unauthenticated caller can
+// have in flight, so the endpoint cannot be turned into an outbound-connection
+// amplifier.
+var reportRecheckSlots = make(chan struct{}, 8)
+
+// handlePublicReport takes a *hint* that an address changed state. The caller's
+// verdict is deliberately not persisted: this endpoint needs no credentials, so
+// honouring `ok:true` would let anyone on the LAN promote an address they
+// control into the validated pool (and `ok:false` evict good ones). Instead we
+// schedule our own probe and let that decide.
 func (a *App) handlePublicReport(w http.ResponseWriter, r *http.Request) {
 	if a.free == nil {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "disabled"})
+		return
+	}
+	if !allowPublicReport(publicClientIP(r)) {
+		writeJSON(w, http.StatusTooManyRequests, apiResponse{Success: false, Message: "rate limited"})
 		return
 	}
 	var body struct {
@@ -451,12 +467,33 @@ func (a *App) handlePublicReport(w http.ResponseWriter, r *http.Request) {
 		OK        bool   `json:"ok"`
 		LatencyMS int64  `json:"latency_ms"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Addr == "" {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil || body.Addr == "" {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "addr required"})
 		return
 	}
-	_ = a.free.Store().MarkValidated(r.Context(), body.Addr, body.LatencyMS, body.OK)
-	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]bool{"accepted": true}})
+	addr := strings.TrimSpace(body.Addr)
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "addr must be host:port"})
+		return
+	}
+	queued := false
+	select {
+	case reportRecheckSlots <- struct{}{}:
+		queued = true
+		go func() {
+			defer func() { <-reportRecheckSlots }()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, _ = a.free.TestProxy(ctx, addr, a.freeCfg.FreeValidateURL,
+				time.Duration(a.freeCfg.FreeValidateTimeoutMS)*time.Millisecond)
+		}()
+	default:
+	}
+	writeJSON(w, http.StatusAccepted, apiResponse{
+		Success: true,
+		Data:    map[string]bool{"accepted": true, "recheck_queued": queued},
+		Message: "report accepted; the pool re-validates the address itself",
+	})
 }
 
 func (a *App) enhancedHealth(w http.ResponseWriter, r *http.Request) {
@@ -483,15 +520,12 @@ func (a *App) enhancedHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: data})
 }
 
+// clientIP is what audit entries and sticky keys are attributed to. It must not
+// read forwarded headers directly: any client could then forge audit-log
+// entries or hijack another client's sticky proxy. strictRealIP has already
+// applied the trusted-proxy policy to RemoteAddr.
 func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Real-IP"); xff != "" {
-		return xff
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return publicClientIP(r)
 }
 
 // ensure types referenced

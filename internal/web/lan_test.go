@@ -96,6 +96,43 @@ func TestPublicClientIPIgnoresXFFFromWAN(t *testing.T) {
 	}
 }
 
+// A loopback reverse proxy that was never declared trusted must not be able to
+// launder an internet client into the LAN gate via forwarded headers.
+func TestForwardedHeadersIgnoredWithoutTrustedProxy(t *testing.T) {
+	app := newTestApp(t)
+	h := mustRouter(t, app)
+	for _, hdr := range []struct{ name, value string }{
+		{"X-Real-IP", "192.168.1.2"},
+		{"X-Forwarded-For", "192.168.1.2"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/public/health", nil)
+		req.RemoteAddr = "8.8.8.8:1234"
+		req.Header.Set(hdr.name, hdr.value)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: status = %d, want 403", hdr.name, rec.Code)
+		}
+	}
+}
+
+// With a trusted front proxy, the rightmost untrusted XFF entry wins: nginx
+// appends the real peer, so the leftmost entries are client-supplied.
+func TestForwardedClientIPTakesRightmostUntrusted(t *testing.T) {
+	trusted := parseCIDRs([]string{"127.0.0.1", "10.1.0.0/16"})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-For", "192.168.1.2, 203.0.113.7, 10.1.0.9")
+	if got := forwardedClientIP(req, trusted); got != "203.0.113.7" {
+		t.Fatalf("forwardedClientIP = %q, want 203.0.113.7", got)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	req2.Header.Set("X-Real-IP", "not-an-ip")
+	if got := forwardedClientIP(req2, trusted); got != "" {
+		t.Fatalf("malformed X-Real-IP accepted: %q", got)
+	}
+}
+
 func TestRequireLANMessage(t *testing.T) {
 	app := newTestApp(t)
 	h := mustRouter(t, app)

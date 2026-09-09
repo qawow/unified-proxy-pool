@@ -42,7 +42,7 @@ func (s *Store) Create(ctx context.Context, name, scopes string) (Token, error) 
 		name = "token"
 	}
 	if scopes == "" {
-		scopes = "proxies:read"
+		scopes = DefaultScopes
 	}
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {

@@ -20,7 +20,11 @@ import (
 func tunnelThrough(conn net.Conn, hop freproxies.Proxy, nextAddr string) (net.Conn, error) {
 	proto := strings.ToLower(strings.TrimSpace(hop.Protocol))
 	switch proto {
-	case "socks5", "socks", "socks4":
+	case "socks4", "socks4a":
+		// SOCKS4 is a different handshake; speaking SOCKS5 to it fails on the
+		// greeting, so these hops could never carry traffic.
+		return socks4ConnectOver(conn, nextAddr)
+	case "socks5", "socks":
 		if _, ok := conn.(*socksAuthed); !ok {
 			if err := socks5Handshake(conn, hop.Username, hop.Password); err != nil {
 				conn.Close()
@@ -33,8 +37,60 @@ func tunnelThrough(conn net.Conn, hop freproxies.Proxy, nextAddr string) (net.Co
 	}
 }
 
+// socks4ConnectOver issues a SOCKS4/4a CONNECT on an already-open hop.
+func socks4ConnectOver(conn net.Conn, target string) (net.Conn, error) {
+	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
+	host, portText, err := net.SplitHostPort(target)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		conn.Close()
+		return nil, fmt.Errorf("socks4: bad port in %q", target)
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		conn.Close()
+		return nil, fmt.Errorf("socks4: IPv6 target not supported")
+	}
+	req := []byte{0x04, 0x01, byte(port >> 8), byte(port)}
+	var hostname string
+	if ip := net.ParseIP(host); ip != nil {
+		req = append(req, ip.To4()...)
+	} else {
+		req = append(req, 0, 0, 0, 1) // SOCKS4a: hostname follows
+		hostname = host
+	}
+	req = append(req, 0)
+	if hostname != "" {
+		req = append(req, hostname...)
+		req = append(req, 0)
+	}
+	if _, err := conn.Write(req); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	resp := make([]byte, 8)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if resp[0] != 0x00 || resp[1] != 0x5a {
+		conn.Close()
+		return nil, fmt.Errorf("socks4 connect status %#x", resp[1])
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return conn, nil
+}
+
 func httpConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error) {
 	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
+	if !validHostname(hostOnly(target)) {
+		conn.Close()
+		return nil, fmt.Errorf("invalid CONNECT target")
+	}
 	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Connection: Keep-Alive\r\n", target, target)
 	if user != "" {
 		token := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
@@ -102,14 +158,6 @@ func socks5Handshake(conn net.Conn, user, pass string) error {
 	return nil
 }
 
-func socks5ConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error) {
-	if err := socks5Handshake(conn, user, pass); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	return socks5ConnectCmd(conn, target)
-}
-
 func socks5ConnectCmd(conn net.Conn, target string) (net.Conn, error) {
 	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
 	host, portStr, err := net.SplitHostPort(target)
@@ -161,9 +209,6 @@ func socks5ConnectCmd(conn net.Conn, target string) (net.Conn, error) {
 
 // dialProxyChain connects: client path TCP→hop0→hop1→...→target
 // hops must be non-empty; length 1 is single-hop.
-func dialProxyChain(ctx context.Context, hops []freproxies.Proxy, target string) (net.Conn, error) {
-	return dialProxyChainPool(ctx, hops, target, nil)
-}
 
 func dialProxyChainPool(ctx context.Context, hops []freproxies.Proxy, target string, pool *viaPool) (net.Conn, error) {
 	if len(hops) == 0 {
@@ -211,4 +256,12 @@ func uniqueHops(candidates []freproxies.Proxy, n int) []freproxies.Proxy {
 		}
 	}
 	return out
+}
+
+// hostOnly strips the port from a "host:port" target for validation.
+func hostOnly(target string) string {
+	if h, _, err := net.SplitHostPort(target); err == nil {
+		return h
+	}
+	return target
 }

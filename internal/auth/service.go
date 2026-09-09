@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -100,6 +101,18 @@ func (s *Service) purgeExpired() {
 	}
 }
 
+// MinPasswordLen is enforced server-side: the panel's own form controls are
+// not a constraint (a misclick could previously set an empty password, and this
+// login guards a proxy that can reach the whole LAN).
+const MinPasswordLen = 6
+
+func ValidatePassword(password string) error {
+	if len(strings.TrimSpace(password)) < MinPasswordLen {
+		return fmt.Errorf("password must be at least %d characters", MinPasswordLen)
+	}
+	return nil
+}
+
 func HashPassword(password string) (string, error) {
 	data, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	return string(data), err
@@ -150,6 +163,9 @@ func (s *Service) ChangePassword(ctx context.Context, oldPassword, newPassword s
 	}
 	if !VerifyPassword(current.PasswordHash, oldPassword) {
 		return errors.New("old password incorrect")
+	}
+	if err := ValidatePassword(newPassword); err != nil {
+		return err
 	}
 	hash, err := HashPassword(newPassword)
 	if err != nil {
@@ -228,10 +244,11 @@ func (s *Service) RequireAuth(next http.Handler) http.Handler {
 // It is used on endpoints that scripts call — scripts cannot maintain a session
 // cookie, so token auth is the only viable alternative to open access.
 //
-// Scopes are not checked here; callers can inspect the context value if they
-// need scope-level control. The token is validated and its last_used timestamp
-// is updated by the tokenValidator, keeping audit trails current.
-func (s *Service) RequireAuthOrToken(tokenValidator TokenValidator) func(http.Handler) http.Handler {
+// A session cookie is an admin login and passes unconditionally. A token must
+// carry the scope the route requires: scopes used to be recorded and shown in
+// the UI but never enforced, so a token labelled "proxies:read" could push
+// proxies into the pool and drive the outbound AI call.
+func (s *Service) RequireAuthOrToken(tokenValidator TokenValidator, scope string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if s.IsAuthenticated(r) {
@@ -240,10 +257,16 @@ func (s *Service) RequireAuthOrToken(tokenValidator TokenValidator) func(http.Ha
 			}
 			// Try Bearer token: Authorization: Bearer upp_…
 			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-				plain := strings.TrimPrefix(auth, "Bearer ")
-				if tokenValidator != nil && tokenValidator.ValidateToken(r.Context(), plain) {
-					next.ServeHTTP(w, r)
-					return
+				plain := strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+				if tokenValidator != nil {
+					if scopes, ok := tokenValidator.TokenScopes(r.Context(), plain); ok {
+						if scope == "" || HasScope(scopes, scope) {
+							next.ServeHTTP(w, r.WithContext(withTokenScopes(r.Context(), scopes)))
+							return
+						}
+						writeForbiddenJSON(w, scope)
+						return
+					}
 				}
 			}
 			writeUnauthorizedJSON(w)
@@ -256,6 +279,26 @@ func (s *Service) RequireAuthOrToken(tokenValidator TokenValidator) func(http.Ha
 // The concrete implementation is *apitoken.Store.
 type TokenValidator interface {
 	ValidateToken(ctx context.Context, plain string) bool
+	// TokenScopes returns the token's scope string when the token is valid.
+	TokenScopes(ctx context.Context, plain string) (string, bool)
+}
+
+// HasScope is set by the apitoken package at init so the auth middleware can
+// evaluate scopes without importing it (apitoken imports nothing from auth,
+// but keeping the rule in one place avoids two divergent implementations).
+var HasScope = func(scopes, want string) bool { return true }
+
+type tokenScopeKey struct{}
+
+func withTokenScopes(ctx context.Context, scopes string) context.Context {
+	return context.WithValue(ctx, tokenScopeKey{}, scopes)
+}
+
+// TokenScopesFrom returns the scopes of the API token that authorised this
+// request, or "" for a session login.
+func TokenScopesFrom(ctx context.Context) string {
+	s, _ := ctx.Value(tokenScopeKey{}).(string)
+	return s
 }
 
 func (s *Service) SetSessionCookie(w http.ResponseWriter, token string) {
@@ -289,6 +332,12 @@ func randomToken(size int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf), nil
+}
+
+func writeForbiddenJSON(w http.ResponseWriter, scope string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	_, _ = w.Write([]byte(`{"success":false,"message":"token is missing the ` + scope + ` scope"}`))
 }
 
 func writeUnauthorizedJSON(w http.ResponseWriter) {

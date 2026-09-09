@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"unified-proxy-pool/internal/chanpolicy"
 	"unified-proxy-pool/internal/freproxies"
@@ -44,6 +45,10 @@ func testProxy(host string, port int) freproxies.Proxy {
 	}
 }
 
+// testRemoteIP is the client address every request in this file arrives from;
+// the public rate limiters bucket by exactly this key.
+const testRemoteIP = "192.168.2.10"
+
 func doJSON(t *testing.T, app *App, cookie *http.Cookie, method, path, body string) (*http.Response, string) {
 	t.Helper()
 	var rdr *bytes.Reader
@@ -53,7 +58,7 @@ func doJSON(t *testing.T, app *App, cookie *http.Cookie, method, path, body stri
 		rdr = bytes.NewReader([]byte(body))
 	}
 	req := httptest.NewRequest(method, path, rdr)
-	req.RemoteAddr = "192.168.2.10:1234"
+	req.RemoteAddr = testRemoteIP + ":1234"
 	req.Header.Set("Content-Type", "application/json")
 	if cookie != nil {
 		req.AddCookie(cookie)
@@ -272,23 +277,35 @@ func TestChannelEndpointsDisabledWithoutRegistry(t *testing.T) {
 
 func TestPublicReportRateLimited(t *testing.T) {
 	app, _, _ := newChannelApp(t, testProxy("10.0.0.1", 8080))
-	publicReportLimiter.mu.Lock()
-	publicReportLimiter.m = map[string]ipWindow{}
-	publicReportLimiter.mu.Unlock()
 
-	hitLimit := false
-	for i := 0; i < publicReportLimit+5; i++ {
-		resp, _ := doJSON(t, app, nil, http.MethodPost, "/api/public/channels/report",
-			`{"channel":"rate.com","addr":"10.0.0.1:8080","ok":true}`)
-		if resp.StatusCode == http.StatusTooManyRequests {
-			hitLimit = true
-			resp.Body.Close()
-			break
+	// The limiter counts per wall-clock second. Firing publicReportLimit+5 real
+	// requests and hoping they all land inside the same second is a race against
+	// the machine -- under -race the window rolls over first and nothing is ever
+	// rejected. Seed a full bucket instead; what matters is that the public path
+	// consults the limiter, and that a fresh window lets traffic through again.
+	seedReportLimiter := func(count int) {
+		publicReportLimiter.mu.Lock()
+		defer publicReportLimiter.mu.Unlock()
+		publicReportLimiter.m = map[string]ipWindow{}
+		if count > 0 {
+			publicReportLimiter.m[testRemoteIP] = ipWindow{second: time.Now().Unix(), count: count}
 		}
-		resp.Body.Close()
 	}
-	if !hitLimit {
-		t.Fatal("public report path never returned 429")
+
+	seedReportLimiter(publicReportLimit)
+	resp, body := doJSON(t, app, nil, http.MethodPost, "/api/public/channels/report",
+		`{"channel":"rate.com","addr":"10.0.0.1:8080","ok":true}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("full bucket: status = %d body = %s, want 429", resp.StatusCode, body)
+	}
+
+	seedReportLimiter(0)
+	resp, body = doJSON(t, app, nil, http.MethodPost, "/api/public/channels/report",
+		`{"channel":"rate.com","addr":"10.0.0.1:8080","ok":true}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("fresh window: status = %d body = %s, want 200", resp.StatusCode, body)
 	}
 }
 

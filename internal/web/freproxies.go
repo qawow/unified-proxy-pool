@@ -20,8 +20,8 @@ import (
 	"unified-proxy-pool/internal/freproxies"
 	"unified-proxy-pool/internal/scrapers"
 	"unified-proxy-pool/internal/sourcestats"
-	"unified-proxy-pool/internal/validator"
 	"unified-proxy-pool/internal/traffic"
+	"unified-proxy-pool/internal/validator"
 )
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {

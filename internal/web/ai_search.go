@@ -90,11 +90,20 @@ func (a *App) handleAISearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// inline prompt overrides template
+	// Precedence: inline prompt > the (possibly edited) stored template >
+	// built-in default. The stored template used to be skipped entirely.
 	system := strings.TrimSpace(req.Prompt)
 	userMsg := strings.TrimSpace(req.Content)
+	key := firstNonEmpty(req.PromptKey, "proxy_extract")
 	if system == "" {
-		system = aisvc.DefaultSystem(firstNonEmpty(req.PromptKey, "proxy_extract"))
+		if a.prompts != nil {
+			if p, ok := a.prompts.Get(key); ok {
+				system = strings.TrimSpace(p.System)
+			}
+		}
+		if system == "" {
+			system = aisvc.DefaultSystem(key)
+		}
 		if userMsg == "" {
 			userMsg = "请从下面的内容中提取代理地址：\n" + strings.TrimSpace(req.Content)
 		}
@@ -110,7 +119,8 @@ func (a *App) handleAISearch(w http.ResponseWriter, r *http.Request) {
 		APIKey:    req.APIKey,
 		Model:     req.Model,
 		Effort:    resolveEffort(req.Effort, req.Level),
-		PromptKey: req.PromptKey,
+		PromptKey: key,
+		System:    system,
 		UserMsg:   userMsg,
 		Timeout:   90 * time.Second,
 	})

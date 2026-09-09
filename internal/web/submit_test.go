@@ -690,3 +690,25 @@ func TestParseAIProxyBody(t *testing.T) {
 		})
 	}
 }
+
+// Scopes are enforced, not decorative: the UI's default "proxies:read" token
+// must not be able to push addresses into the pool.
+func TestHandleProxySubmitRejectsReadOnlyToken(t *testing.T) {
+	app, _ := newAuthApp(t)
+	ctx := context.Background()
+	tok, err := app.tokens.Create(ctx, "readonly-script", "proxies:read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mustRouter(t, app)
+	req := httptest.NewRequest(http.MethodPost, "/api/proxies/submit",
+		strings.NewReader(`{"proxies":["1.2.3.4:8080"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+tok.Plain)
+	req.RemoteAddr = "127.0.0.1:5000"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a read-only token; body=%s", rec.Code, rec.Body.String())
+	}
+}

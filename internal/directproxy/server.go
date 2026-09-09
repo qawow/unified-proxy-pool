@@ -3,6 +3,7 @@ package directproxy
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -59,6 +60,7 @@ type Server struct {
 	sticky        stickyStore
 	forceAuth     bool
 	allowedNets   []*net.IPNet
+	chainNets     []*net.IPNet
 	rateLimitBps  int64
 
 	chainOpts ChainOptions
@@ -262,6 +264,7 @@ func (s *Server) SetChainOptions(opts ChainOptions) {
 	s.mu.Lock()
 	s.chainOpts = opts
 	s.chainHops = opts.Hops
+	s.chainNets = parseCIDRList(opts.AllowedCIDRs)
 	if opts.ListenAddr != "" {
 		s.cfg.ChainAddr = opts.ListenAddr
 	}
@@ -316,7 +319,26 @@ func (s *Server) SetRateLimit(bps int64) {
 	s.mu.Unlock()
 }
 
+// throttleFor builds the per-connection token bucket for one listener. The
+// chain listener may set its own cap; otherwise the global one applies.
+func (s *Server) throttleFor(chain bool) *throttle {
+	s.mu.RLock()
+	bps := s.rateLimitBps
+	if chain && s.chainOpts.RateLimitBPS > 0 {
+		bps = s.chainOpts.RateLimitBPS
+	}
+	s.mu.RUnlock()
+	return newThrottle(bps)
+}
+
 func (s *Server) SetAllowedCIDRs(cidrs []string) {
+	nets := parseCIDRList(cidrs)
+	s.mu.Lock()
+	s.allowedNets = nets
+	s.mu.Unlock()
+}
+
+func parseCIDRList(cidrs []string) []*net.IPNet {
 	var nets []*net.IPNet
 	for _, c := range cidrs {
 		c = strings.TrimSpace(c)
@@ -324,24 +346,50 @@ func (s *Server) SetAllowedCIDRs(cidrs []string) {
 			continue
 		}
 		if !strings.Contains(c, "/") {
-			c = c + "/32"
+			if strings.Contains(c, ":") {
+				c += "/128"
+			} else {
+				c += "/32"
+			}
 		}
 		_, n, err := net.ParseCIDR(c)
 		if err == nil {
 			nets = append(nets, n)
 		}
 	}
-	s.mu.Lock()
-	s.allowedNets = nets
-	s.mu.Unlock()
+	return nets
 }
 
-func (s *Server) allowIP(ip net.IP) bool {
+// privateNets is the implicit allow list for an unauthenticated listener.
+// Both proxies bind 0.0.0.0 by default, so without this an unconfigured
+// deployment on a routable host is an open internet forwarding proxy.
+var privateNets = func() []*net.IPNet {
+	return parseCIDRList([]string{
+		"127.0.0.0/8", "::1/128",
+		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+		"169.254.0.0/16", "fc00::/7", "fe80::/10",
+	})
+}()
+
+// allowIP applies the allow list for the listener the connection arrived on.
+// The chain listener has its own list: an operator who restricts :7893 should
+// not have to also restrict :7892, and vice versa.
+//
+// With no explicit list the listener is limited to private ranges unless
+// credentials are configured — "no allow list" must not mean "open to the
+// internet".
+func (s *Server) allowIP(ip net.IP, chain bool) bool {
 	s.mu.RLock()
 	nets := s.allowedNets
+	if chain {
+		nets = s.chainNets
+	}
 	s.mu.RUnlock()
 	if len(nets) == 0 {
-		return true
+		if s.authRequired(chain) {
+			return true
+		}
+		nets = privateNets
 	}
 	for _, n := range nets {
 		if n.Contains(ip) {
@@ -352,11 +400,16 @@ func (s *Server) allowIP(ip net.IP) bool {
 }
 
 func (s *Server) Status() Status {
-	listen := s.cfg.ListenAddr
+	// SetChainOptions mutates cfg under s.mu, so Status must not read it raw:
+	// a settings update concurrent with a status poll is a data race.
+	s.mu.RLock()
+	cfg := s.cfg
+	s.mu.RUnlock()
+	listen := cfg.ListenAddr
 	if listen == "" {
 		listen = "0.0.0.0:7892"
 	}
-	chainListen := s.cfg.ChainAddr
+	chainListen := cfg.ChainAddr
 	if chainListen == "" {
 		chainListen = "0.0.0.0:7893"
 	}
@@ -378,14 +431,14 @@ func (s *Server) Status() Status {
 		"desc":   "流量路径: " + path,
 		"path":   path,
 	}
-	if s.cfg.Username != "" {
-		authURL := "http://" + s.cfg.Username + ":***@" + endpoints["host"]
+	if cfg.Username != "" {
+		authURL := "http://" + cfg.Username + ":***@" + endpoints["host"]
 		examples["curl_auth"] = "curl -x " + authURL + " https://httpbin.org/ip"
-		chainAuth := "http://" + s.cfg.Username + ":***@" + chainEP["host"]
+		chainAuth := "http://" + cfg.Username + ":***@" + chainEP["host"]
 		chainExamples["curl_auth"] = "curl -x " + chainAuth + " https://httpbin.org/ip"
 	}
 	return Status{
-		Enabled:        s.cfg.Enabled,
+		Enabled:        cfg.Enabled,
 		Running:        s.running.Load(),
 		ListenAddr:     listen,
 		LANIPs:         lanIPs,
@@ -393,12 +446,12 @@ func (s *Server) Status() Status {
 		ClientHTTP:     endpoints["http"],
 		ClientSOCKS5:   endpoints["socks5"],
 		ClientExamples: examples,
-		Username:       s.cfg.Username,
+		Username:       cfg.Username,
 		Requests:       s.requests.Load(),
 		Success:        s.success.Load(),
 		Failures:       s.failures.Load(),
 
-		ChainEnabled:    s.cfg.ChainEnabled,
+		ChainEnabled:    cfg.ChainEnabled,
 		ChainRunning:    s.chainRunning.Load(),
 		ChainListenAddr: chainListen,
 		ChainHops:       hops,
@@ -428,6 +481,28 @@ func ChainPathLabel(hops int) string {
 	return strings.Join(parts, " → ")
 }
 
+// warnIfOpen makes an unauthenticated wildcard bind visible in the log. The
+// connection filter already limits such a listener to private ranges, but an
+// operator who meant to expose it needs to know credentials are missing.
+func (s *Server) warnIfOpen(addr string, chain bool) {
+	if s.authRequired(chain) {
+		return
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
+	if host != "" && host != "0.0.0.0" && host != "::" {
+		return
+	}
+	name := "single-hop"
+	if chain {
+		name = "chain"
+	}
+	log.Printf("directproxy %s: %s has no credentials; access limited to LAN/private ranges. "+
+		"Set a username/password (or allowed_cidrs) before exposing it.", name, addr)
+}
+
 func (s *Server) Start(ctx context.Context) error {
 	if s == nil || s.free == nil {
 		return nil
@@ -435,11 +510,18 @@ func (s *Server) Start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 
-	if s.cfg.Enabled {
-		if s.cfg.ListenAddr == "" {
-			s.cfg.ListenAddr = "0.0.0.0:7892"
-		}
-		ln, err := net.Listen("tcp", s.cfg.ListenAddr)
+	s.mu.Lock()
+	if s.cfg.ListenAddr == "" {
+		s.cfg.ListenAddr = "0.0.0.0:7892"
+	}
+	if s.cfg.ChainAddr == "" {
+		s.cfg.ChainAddr = "0.0.0.0:7893"
+	}
+	cfg := s.cfg
+	s.mu.Unlock()
+
+	if cfg.Enabled {
+		ln, err := net.Listen("tcp", cfg.ListenAddr)
 		if err != nil {
 			cancel()
 			return err
@@ -448,14 +530,12 @@ func (s *Server) Start(ctx context.Context) error {
 		s.running.Store(true)
 		s.wg.Add(1)
 		go s.serveLoop(runCtx, ln, false)
-		log.Printf("directproxy single-hop listening on %s", s.cfg.ListenAddr)
+		log.Printf("directproxy single-hop listening on %s", cfg.ListenAddr)
+		s.warnIfOpen(cfg.ListenAddr, false)
 	}
 
-	if s.cfg.ChainEnabled {
-		if s.cfg.ChainAddr == "" {
-			s.cfg.ChainAddr = "0.0.0.0:7893"
-		}
-		cln, err := net.Listen("tcp", s.cfg.ChainAddr)
+	if cfg.ChainEnabled {
+		cln, err := net.Listen("tcp", cfg.ChainAddr)
 		if err != nil {
 			log.Printf("directproxy chain listen skipped: %v", err)
 		} else {
@@ -463,7 +543,8 @@ func (s *Server) Start(ctx context.Context) error {
 			s.chainRunning.Store(true)
 			s.wg.Add(1)
 			go s.serveLoop(runCtx, cln, true)
-			log.Printf("directproxy chain (%d-hop) listening on %s", s.ChainHops(), s.cfg.ChainAddr)
+			log.Printf("directproxy chain (%d-hop) listening on %s", s.ChainHops(), cfg.ChainAddr)
+			s.warnIfOpen(cfg.ChainAddr, true)
 		}
 	}
 
@@ -490,6 +571,7 @@ func (s *Server) serveLoop(ctx context.Context, ln net.Listener, chain bool) {
 	} else {
 		defer s.running.Store(false)
 	}
+	var acceptDelay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -497,14 +579,36 @@ func (s *Server) serveLoop(ctx context.Context, ln net.Listener, chain bool) {
 			case <-ctx.Done():
 				return
 			default:
-				if !errors.Is(err, net.ErrClosed) {
-					log.Printf("directproxy accept: %v", err)
-				}
+			}
+			if errors.Is(err, net.ErrClosed) {
 				return
 			}
+			// A transient error (EMFILE under load, ECONNABORTED) used to kill
+			// the listener for the rest of the process's life. Back off and keep
+			// serving, the way net/http.Server does.
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
+			if acceptDelay == 0 {
+				acceptDelay = 5 * time.Millisecond
+			} else {
+				acceptDelay *= 2
+			}
+			if acceptDelay > time.Second {
+				acceptDelay = time.Second
+			}
+			log.Printf("directproxy accept: %v (retry in %v)", err, acceptDelay)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(acceptDelay):
+			}
+			continue
 		}
+		acceptDelay = 0
 		// CIDR allow list
-		if ra, ok := conn.RemoteAddr().(*net.TCPAddr); ok && !s.allowIP(ra.IP) {
+		if ra, ok := conn.RemoteAddr().(*net.TCPAddr); ok && !s.allowIP(ra.IP, chain) {
 			_ = conn.Close()
 			continue
 		}
@@ -610,37 +714,46 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, chain bool) {
 	}
 }
 
-func (s *Server) authRequired() bool {
+// credsFor returns the credentials enforced on one listener. The chain listener
+// has its own AuthRequired/Username/Password in ChainOptions; those used to be
+// collected by the panel and then ignored, leaving :7893 wide open while the UI
+// claimed otherwise.
+func (s *Server) credsFor(chain bool) (required bool, user, pass string) {
 	s.mu.RLock()
-	force := s.forceAuth
-	s.mu.RUnlock()
-	if force {
-		return true
+	defer s.mu.RUnlock()
+	if chain {
+		o := s.chainOpts
+		if o.AuthRequired || o.Username != "" || o.Password != "" {
+			return true, o.Username, o.Password
+		}
 	}
-	return s.cfg.Username != "" || s.cfg.Password != ""
+	if s.forceAuth {
+		return true, s.cfg.Username, s.cfg.Password
+	}
+	if s.cfg.Username != "" || s.cfg.Password != "" {
+		return true, s.cfg.Username, s.cfg.Password
+	}
+	return false, "", ""
 }
 
-func (s *Server) checkUserPass(user, pass string) bool {
-	if !s.authRequired() {
+func (s *Server) authRequired(chain bool) bool {
+	required, _, _ := s.credsFor(chain)
+	return required
+}
+
+func (s *Server) checkUserPass(chain bool, user, pass string) bool {
+	required, wantUser, wantPass := s.credsFor(chain)
+	if !required {
 		return true
 	}
-	return user == s.cfg.Username && pass == s.cfg.Password
+	// Constant-time so the proxy password cannot be recovered by timing.
+	okUser := subtle.ConstantTimeCompare([]byte(user), []byte(wantUser)) == 1
+	okPass := subtle.ConstantTimeCompare([]byte(pass), []byte(wantPass)) == 1
+	return okUser && okPass
 }
 
 func (s *Server) pickUpstream(ctx context.Context) (freproxies.Proxy, error) {
 	return s.free.PickValidated(ctx, "")
-}
-
-func (s *Server) dialVia(ctx context.Context, upstream freproxies.Proxy, target string) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: 8 * time.Second}
-	proxyAddr := upstream.Addr
-	proto := strings.ToLower(upstream.Protocol)
-
-	if proto == "socks5" || proto == "socks4" || proto == "socks" {
-		return dialSOCKS5Via(ctx, dialer, proxyAddr, target)
-	}
-	// default HTTP CONNECT upstream
-	return dialHTTPConnectVia(ctx, dialer, proxyAddr, target)
 }
 
 // dialViaWithFailover tries several free proxies until one connects.
@@ -886,93 +999,6 @@ func (s *Server) openUpstream(ctx context.Context, target string, chain bool) (n
 	return conn, exit, err
 }
 
-func dialHTTPConnectVia(ctx context.Context, dialer *net.Dialer, proxyAddr, target string) (net.Conn, error) {
-	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
-	if err != nil {
-		return nil, err
-	}
-	req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\nProxy-Connection: Keep-Alive\r\n\r\n", target, target)
-	if _, err := io.WriteString(conn, req); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	br := bufio.NewReader(conn)
-	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		conn.Close()
-		return nil, fmt.Errorf("upstream CONNECT status %d", resp.StatusCode)
-	}
-	// if br buffered extra, wrap
-	if br.Buffered() > 0 {
-		return &prefixConn{Conn: conn, r: br}, nil
-	}
-	return conn, nil
-}
-
-func dialSOCKS5Via(ctx context.Context, dialer *net.Dialer, proxyAddr, target string) (net.Conn, error) {
-	conn, err := dialer.DialContext(ctx, "tcp", proxyAddr)
-	if err != nil {
-		return nil, err
-	}
-	// greeting: ver=5, nmethods=1, method=0 (no auth)
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	resp := make([]byte, 2)
-	if _, err := io.ReadFull(conn, resp); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	if resp[0] != 0x05 || resp[1] != 0x00 {
-		conn.Close()
-		return nil, fmt.Errorf("socks5 auth rejected")
-	}
-	host, port, err := net.SplitHostPort(target)
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-	var req []byte
-	req = append(req, 0x05, 0x01, 0x00, 0x03, byte(len(host)))
-	req = append(req, []byte(host)...)
-	var portNum int
-	fmt.Sscanf(port, "%d", &portNum)
-	req = append(req, byte(portNum>>8), byte(portNum))
-	if _, err := conn.Write(req); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	hdr := make([]byte, 4)
-	if _, err := io.ReadFull(conn, hdr); err != nil {
-		conn.Close()
-		return nil, err
-	}
-	if hdr[1] != 0x00 {
-		conn.Close()
-		return nil, fmt.Errorf("socks5 connect failed code=%d", hdr[1])
-	}
-	switch hdr[3] {
-	case 0x01:
-		_, _ = io.ReadFull(conn, make([]byte, 4+2))
-	case 0x03:
-		l := make([]byte, 1)
-		if _, err := io.ReadFull(conn, l); err != nil {
-			conn.Close()
-			return nil, err
-		}
-		_, _ = io.ReadFull(conn, make([]byte, int(l[0])+2))
-	case 0x04:
-		_, _ = io.ReadFull(conn, make([]byte, 16+2))
-	}
-	return conn, nil
-}
-
 type prefixConn struct {
 	net.Conn
 	r *bufio.Reader
@@ -987,9 +1013,9 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 	if err != nil {
 		return err
 	}
-	if s.authRequired() {
+	if s.authRequired(chain) {
 		user, pass, ok := parseBasicProxyAuth(req.Header.Get("Proxy-Authorization"))
-		if !ok || !s.checkUserPass(user, pass) {
+		if !ok || !s.checkUserPass(chain, user, pass) {
 			_, _ = io.WriteString(client, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"upp\"\r\nContent-Length: 0\r\n\r\n")
 			return fmt.Errorf("auth required")
 		}
@@ -1018,7 +1044,7 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 		// observable, so the dial result recorded during openUpstream is the only
 		// automatic signal for this request. Application-layer verdicts (403, 429,
 		// captcha) have to arrive through the report API.
-		return relayTraffic(client, up, ch, finished)
+		return relayTraffic(client, up, ch, finished, s.throttleFor(chain))
 	}
 
 	// absolute-form HTTP proxy request
@@ -1061,6 +1087,11 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 	outReq.URL.Host = ""
 	outReq.Header.Del("Proxy-Authorization")
 	outReq.Header.Del("Proxy-Connection")
+	// httpConnectOver cleared the upstream deadline; without one, a free proxy
+	// that answers CONNECT and then stalls pins this goroutine and both sockets
+	// forever.
+	hopTimeout := s.hopTimeout()
+	_ = upConn.SetDeadline(time.Now().Add(hopTimeout))
 	if err := outReq.Write(upConn); err != nil {
 		traffic.Default.EndConn(ch, false, 0, 0, true)
 		s.recordChannel(channel, exit.Addr, false, 0, errTag(err), 0)
@@ -1073,6 +1104,10 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 		return err
 	}
 	defer resp.Body.Close()
+	// Body streaming gets its own budget; the 30s connection-wide deadline set
+	// in handle would otherwise sever a legitimate slow or large download.
+	_ = upConn.SetDeadline(time.Now().Add(5 * time.Minute))
+	_ = client.SetDeadline(time.Now().Add(5 * time.Minute))
 	// 4xx/5xx counts as a failure for this destination even though the transport
 	// worked: a 403 means the site rejected this exit IP, which is exactly what a
 	// per-channel ban is for. The status is passed through so status-specific
@@ -1085,6 +1120,38 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 	}
 	traffic.Default.EndConn(ch, true, 0, 0, true)
 	return nil
+}
+
+// validHostname rejects anything that cannot appear in a hostname, most
+// importantly CR/LF and spaces.
+func validHostname(h string) bool {
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	for i := 0; i < len(h); i++ {
+		c := h[i]
+		if c <= 0x20 || c == 0x7f {
+			return false
+		}
+		switch c {
+		case '/', '\\', '@', '?', '#', '"', '\'', '<', '>':
+			return false
+		}
+	}
+	return true
+}
+
+// hopTimeout is the per-hop budget from ChainOptions, used for upstream
+// request/response exchanges on the plain-HTTP path too.
+func (s *Server) hopTimeout() time.Duration {
+	s.mu.RLock()
+	ms := s.chainOpts.HopTimeoutMS
+	s.mu.RUnlock()
+	if ms <= 0 {
+		ms = 5000
+	}
+	// Reading a full response can legitimately take longer than one hop dial.
+	return time.Duration(ms) * time.Millisecond * 4
 }
 
 func parseBasicProxyAuth(h string) (string, string, bool) {
@@ -1120,7 +1187,7 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn, br *bufio.Re
 	if _, err := io.ReadFull(br, methods); err != nil {
 		return err
 	}
-	useUserPass := s.authRequired()
+	useUserPass := s.authRequired(chain)
 	if useUserPass {
 		// method 0x02
 		if _, err := client.Write([]byte{0x05, 0x02}); err != nil {
@@ -1144,7 +1211,7 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn, br *bufio.Re
 		if _, err := io.ReadFull(br, pass); err != nil {
 			return err
 		}
-		if !s.checkUserPass(string(user), string(pass)) {
+		if !s.checkUserPass(chain, string(user), string(pass)) {
 			_, _ = client.Write([]byte{0x01, 0x01})
 			return fmt.Errorf("bad credentials")
 		}
@@ -1183,6 +1250,13 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn, br *bufio.Re
 			return err
 		}
 		host = string(name)
+		// The exit hop may be an HTTP proxy, where this lands verbatim in a
+		// "CONNECT host:port" line — a CR/LF here would smuggle extra request
+		// lines upstream and corrupt channel accounting.
+		if !validHostname(host) {
+			_, _ = client.Write([]byte{0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			return fmt.Errorf("invalid socks5 hostname")
+		}
 	case 0x04:
 		ip := make([]byte, 16)
 		if _, err := io.ReadFull(br, ip); err != nil {
@@ -1217,18 +1291,15 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn, br *bufio.Re
 	if chain {
 		ch = "chain"
 	}
-	return relayTraffic(client, up, ch, finished)
+	return relayTraffic(client, up, ch, finished, s.throttleFor(chain))
 }
 
-func relay(a, b net.Conn) error {
-	return relayTraffic(a, b, "single", nil)
-}
-
-func relayTraffic(client, upstream net.Conn, channel string, finished *bool) error {
+func relayTraffic(client, upstream net.Conn, channel string, finished *bool, t *throttle) error {
 	// 入站已在 handle 中 BeginInbound；此处记出站并在结束后成对释放
 	if finished != nil {
 		*finished = true
 	}
+	client = throttled(client, t)
 	traffic.Default.BeginOutbound(channel)
 	up, down, err := traffic.BidirectionalRelay(client, upstream)
 	ok := err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)

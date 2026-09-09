@@ -3,12 +3,14 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -19,8 +21,8 @@ import (
 	"unified-proxy-pool/internal/audit"
 	"unified-proxy-pool/internal/auth"
 	"unified-proxy-pool/internal/blacklist"
-	"unified-proxy-pool/internal/chanpolicy"
 	"unified-proxy-pool/internal/cfscan"
+	"unified-proxy-pool/internal/chanpolicy"
 	"unified-proxy-pool/internal/config"
 	"unified-proxy-pool/internal/crawlers"
 	"unified-proxy-pool/internal/directproxy"
@@ -39,6 +41,7 @@ import (
 	"unified-proxy-pool/internal/sticky"
 	"unified-proxy-pool/internal/subscriptions"
 	"unified-proxy-pool/internal/traffichist"
+	"unified-proxy-pool/internal/update"
 	"unified-proxy-pool/internal/webhook"
 	webassets "unified-proxy-pool/web"
 )
@@ -66,9 +69,13 @@ type App struct {
 	prompts       *aisvc.PromptStore
 	getSticky     *sticky.Store
 	cfscan        *cfscan.Service
-	shutdown      func()
-	frontend      fs.FS
-	indexHTML     []byte
+	updateSvc     *update.Service
+	// trustedNets caches feature.trusted_proxy_cidrs (*[]*net.IPNet) for the
+	// per-request middleware.
+	trustedNets atomic.Value
+	shutdown    func()
+	frontend    fs.FS
+	indexHTML   []byte
 }
 
 type FeatureDeps struct {
@@ -101,7 +108,7 @@ func New(authSvc *auth.Service, settingsSvc *settings.Service, nodeSvc *nodes.Se
 		return nil, fmt.Errorf("read index.html: %w", err)
 	}
 
-	return &App{
+	app := &App{
 		auth:          authSvc,
 		settings:      settingsSvc,
 		nodes:         nodeSvc,
@@ -127,13 +134,24 @@ func New(authSvc *auth.Service, settingsSvc *settings.Service, nodeSvc *nodes.Se
 		shutdown:      shutdown,
 		frontend:      frontendFS,
 		indexHTML:     indexHTML,
-	}, nil
+	}
+	// One Service for the process: its in-flight guard is what stops two
+	// concurrent applies from racing on the same temp file.
+	app.updateSvc = update.New("", "", &http.Client{Timeout: 5 * time.Minute}, app.updateFallbackClient)
+	app.setTrustedProxyCIDRs(nil)
+	if settingsSvc != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		app.setTrustedProxyCIDRs(settingsSvc.FeatureConfig(ctx).TrustedProxyCIDRs)
+		cancel()
+	}
+	return app, nil
 }
 
 func (a *App) Router() (http.Handler, error) {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(strictRealIP)
+	r.Use(a.strictRealIP)
+	r.Use(securityHeaders)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
 
@@ -278,18 +296,23 @@ func (a *App) Router() (http.Handler, error) {
 	// purpose: that group's RequireAuth rejects cookie-less requests before any
 	// inner middleware runs, so a Bearer token registered inside it never got a
 	// chance to authenticate. RequireAuthOrToken accepts either credential.
+	// Each route declares the token scope it needs; a session cookie (admin
+	// login) satisfies all of them.
+	writeProxies := a.auth.RequireAuthOrToken(a.tokens, apitoken.ScopeProxiesWrite)
+	aiWrite := a.auth.RequireAuthOrToken(a.tokens, apitoken.ScopeAIWrite)
 	r.Group(func(scriptAPI chi.Router) {
-		scriptAPI.Use(a.auth.RequireAuthOrToken(a.tokens))
-		scriptAPI.Post("/api/proxies/submit", a.handleProxySubmit)
-		scriptAPI.Post("/api/proxies/batch-test", a.handleProxyBatchTest)
-		scriptAPI.Post("/api/ai-proxy", a.handleAIProxy)
+		scriptAPI.With(writeProxies).Post("/api/proxies/submit", a.handleProxySubmit)
+		scriptAPI.With(writeProxies).Post("/api/proxies/batch-test", a.handleProxyBatchTest)
+		scriptAPI.With(writeProxies).Post("/api/ai-proxy", a.handleAIProxy)
 		// Outcome reporting is script-facing by nature: the caller that read the
 		// response is the only one who knows what the destination actually said.
-		scriptAPI.Post("/api/channels/report", a.handleChannelReport)
-		scriptAPI.Post("/api/ai-search", a.handleAISearch)
-		scriptAPI.Get("/api/ai-prompts", a.handleAIPromptsList)
-		scriptAPI.Put("/api/ai-prompts", a.handleAIPromptUpsert)
-		scriptAPI.Delete("/api/ai-prompts", a.handleAIPromptDelete)
+		scriptAPI.With(a.auth.RequireAuthOrToken(a.tokens, apitoken.ScopeChannelsWrite)).
+			Post("/api/channels/report", a.handleChannelReport)
+		scriptAPI.With(aiWrite).Post("/api/ai-search", a.handleAISearch)
+		scriptAPI.With(a.auth.RequireAuthOrToken(a.tokens, apitoken.ScopeProxiesRead)).
+			Get("/api/ai-prompts", a.handleAIPromptsList)
+		scriptAPI.With(aiWrite).Put("/api/ai-prompts", a.handleAIPromptUpsert)
+		scriptAPI.With(aiWrite).Delete("/api/ai-prompts", a.handleAIPromptDelete)
 	})
 
 	// Public free-proxy + LAN debug API. No login, but requireLAN blocks
@@ -338,11 +361,17 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	ip := clientIP(r)
+	if !allowLoginAttempt(ip) {
+		writeJSON(w, http.StatusTooManyRequests, apiResponse{Success: false, Message: "too many login attempts, try again later"})
+		return
+	}
 	token, err := a.auth.Login(r.Context(), req.Password)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, apiResponse{Success: false, Message: "invalid password"})
 		return
 	}
+	noteLoginSuccess(ip)
 	a.auth.SetSessionCookie(w, token)
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]bool{"authenticated": true}})
 }
@@ -888,6 +917,7 @@ func (a *App) publishRuntimeAsync() {
 
 func (a *App) applyFeatureHot(raw string) {
 	fc := features.Parse(raw)
+	a.setTrustedProxyCIDRs(fc.TrustedProxyCIDRs)
 	webhook.Default.Configure(fc.WebhookURL, fc.WebhookEvents)
 	geoip.SetFilter(fc.CountryFilter())
 	if a.channels != nil {
@@ -1053,9 +1083,19 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// maxJSONBody bounds request bodies. Without it a single request could make the
+// panel allocate until the OOM killer intervenes.
+const maxJSONBody = 8 << 20
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, target interface{}) bool {
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBody)
 	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSON(w, http.StatusRequestEntityTooLarge, apiResponse{Success: false, Message: "request body too large"})
+			return false
+		}
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "invalid json body"})
 		return false
 	}

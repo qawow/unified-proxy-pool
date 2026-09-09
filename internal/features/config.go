@@ -27,6 +27,10 @@ type Config struct {
 	// F5
 	DirectAuthRequired bool     `json:"direct_auth_required"`
 	AllowedCIDRs       []string `json:"allowed_cidrs,omitempty"`
+	// TrustedProxyCIDRs lists reverse proxies whose X-Forwarded-For / X-Real-IP
+	// may be believed. Empty (default) = trust no forwarded header, so a client
+	// cannot claim a LAN address to get past the /api/public gate.
+	TrustedProxyCIDRs []string `json:"trusted_proxy_cidrs,omitempty"`
 	// PublicOpen exposes /api/public to non-LAN clients. Default false: only
 	// RFC1918/loopback plus AllowedCIDRs. LAN debug stays usable without login.
 	PublicOpen bool `json:"public_open,omitempty"`
