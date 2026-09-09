@@ -1,3 +1,47 @@
+## Unreleased — 2026-09-10 · 链式失败归因与前置代理
+
+接着上一轮审计，把链式代理（`:7893`）与前置代理（`exit_via`）里三类会自己扩散的问题修掉。
+**行为有变化的地方标了「影响」。**
+
+### 安全
+- **`exit_via` 配坏时改为拒绝拨号（fail-closed）**：过去 `withVia` 解析失败就返回原始 hop 列表，
+  于是 `exit_via` 里一个拼写错误就让流量直接从免费代理出网，而面板照旧显示
+  「本机 → VPS → …」—— 相当于 VPN 隧道掉线却没有断网开关，用户拿不到任何信号。
+  现在解析失败或解析出空地址就返回错误，单跳与链式两条路径都不再拨号。
+  *影响：`exit_via` 写错不再静默降级为直连，而是整个出口不可用并报错；配置里的拼写错误会立刻暴露。*
+- **`https://` 不再被偷偷改写成 `http://`**：作为**代理协议**的 `https://` 意思是「到代理这一跳本身裹一层 TLS」，
+  和「HTTP 代理用 CONNECT 承载 https 流量」是两回事，本仓库没有任何代码实现前者
+  —— `dialFast` 开的是裸 TCP，`httpConnectOver` 写的是明文 CONNECT。
+  原来的 `proto = "http"` 让显式要求 TLS 到自己 VPS 的用户拿到明文通道，账号密码一起走明文。
+  现在直接报错并提示改用 `http://` 或 `socks5://`（隧道内部无论哪种都是加密的）。
+  *影响：配了 `exit_via: https://…` 的部署会启动即报错，需要改成 `http://` 或 `socks5://`。*
+
+### 代理池质量
+- **链式失败按真正断掉的那一跳扣分**：`dialProxyChainPool` 以前把每一层失败都包成普通 error，
+  调用方无从区分「第 0 跳挂了」和「第 2 跳挂了」，于是 `dialChainWithFailover` 一律扣 `hops[0]`：
+  健康的入口代理被反复扣分直到删除，真正坏掉的那一跳保持 `ScoreMax` 留在轮换里，
+  下一次继续把链子搞断。新增 `chainDialError` 记录出错的 hop，`culpritHop` 供调用方查元凶。
+- **前置代理挂掉不再把整个池子洗空**：配了 `exit_via` 时 `wired` 是 `[VPS, up]`，
+  VPS 一死则每次尝试都失败，而失败全记在 `up` 头上 —— 每个请求淘汰一条好代理，
+  池子按请求速率被清空。现在只有 `up` 自己是元凶时才 `MarkValidated(false)`。
+- **`exit_via` 这一跳永不参与打分**：它是用户配置而非池成员，按 `Source == "exit_via"` 跳过。
+- **`socks4://` 前置代理真正可用**：`viaPool.dialReady` 原先把 `socks4` 和 `socks5`
+  归到同一支，向 SOCKS4 端点发 SOCKS5 方法协商帧会直接把它打乱序 —— 经 socks4 前置的连接
+  必然死在第一跳。SOCKS4 没有独立握手（CONNECT 请求本身就是线上第一个包），
+  现在交回裸连接由 `tunnelThrough` 分派到 `socks4ConnectOver`；
+  也不能包 `socksAuthed`，否则 socks5 仍然需要的那次握手会被跳过。
+  （`dialReady` 里的 `socks4a` 分支目前不可达：`viaPool` 只由 `ParseViaProxy` 构造，
+  而它不接受 `socks4a://`。留着是为了以后放开该 scheme 时不再退回 socks5 分支。）
+
+### 测试
+- 三个回归测试：只支持正向 GET、不支持 CONNECT 的代理不得进链；
+  `https://` 前置协议被拒；`exit_via` 配坏时触发 fail-closed 而非绕过。
+
+### 已知缺口
+- 链式选路阶段仍未单独探测 **CONNECT 能力**：目前靠校验器保证，但 report API 路径可能绕过。
+  实测样本 `218.252.100.222:80` 说明「校验通过」不等于「能当链式中继」。
+  要彻底堵上需在 `filterCandidates` 或链式选路里加一次 CONNECT 探测（多一个网络往返）。
+
 ## Unreleased — 2026-09-09 · 安全与正确性修复
 
 一轮全面审计后的集中修复。**行为有变化的地方在每条末尾标了「影响」。**
