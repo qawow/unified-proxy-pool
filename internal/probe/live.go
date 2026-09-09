@@ -96,11 +96,14 @@ func probeNativeHTTP(ctx context.Context, node models.RuntimeNode, testURL strin
 	if proto == "socks" {
 		proto = "socks5"
 	}
+	user, pass := nodeCredentials(node)
 	p := freproxies.Proxy{
 		Host:     node.Server,
 		Port:     node.Port,
 		Addr:     joinHostPort(node.Server, node.Port),
 		Protocol: proto,
+		Username: user,
+		Password: pass,
 	}
 	ms, ok := freproxies.CheckProxy(ctx, p, testURL, timeout)
 	if !ok {

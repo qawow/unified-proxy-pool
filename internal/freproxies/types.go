@@ -67,21 +67,21 @@ func (p Proxy) Family() string {
 }
 
 type ScraperStat struct {
-	Name      string    `json:"name"`
-	Enabled   bool      `json:"enabled"`
-	Protocol  string    `json:"protocol"`
-	LastRunAt time.Time `json:"last_run_at"`
-	LastOK    int       `json:"last_ok"`
-	LastFail  int       `json:"last_fail"`
-	LastError string    `json:"last_error"`
-	TotalOK   int64     `json:"total_ok"`
-	TotalFail int64     `json:"total_fail"`
-	URLHint   string    `json:"url_hint"`
-	Fragile      bool     `json:"fragile"`
-	Builtin      bool     `json:"builtin"`
-	Format       string   `json:"format"`
-	URLs         []string `json:"urls,omitempty"`
-	AutoDisabled bool     `json:"auto_disabled,omitempty"`
+	Name         string    `json:"name"`
+	Enabled      bool      `json:"enabled"`
+	Protocol     string    `json:"protocol"`
+	LastRunAt    time.Time `json:"last_run_at"`
+	LastOK       int       `json:"last_ok"`
+	LastFail     int       `json:"last_fail"`
+	LastError    string    `json:"last_error"`
+	TotalOK      int64     `json:"total_ok"`
+	TotalFail    int64     `json:"total_fail"`
+	URLHint      string    `json:"url_hint"`
+	Fragile      bool      `json:"fragile"`
+	Builtin      bool      `json:"builtin"`
+	Format       string    `json:"format"`
+	URLs         []string  `json:"urls,omitempty"`
+	AutoDisabled bool      `json:"auto_disabled,omitempty"`
 }
 
 type Overview struct {
@@ -122,6 +122,31 @@ type ListFilter struct {
 
 	// groupRule is populated internally by the service when Group is set.
 	groupRule *GroupRule
+}
+
+// MaxListPage bounds pagination. (Page-1)*Size is computed as an int, so an
+// unbounded page number overflows to a negative offset and panics the slice
+// expression that follows.
+const (
+	MaxListPage = 100000
+	MaxListSize = 5000
+)
+
+// Normalize clamps user-supplied pagination into a range the offset arithmetic
+// can represent.
+func (f *ListFilter) Normalize() {
+	if f.Page <= 0 {
+		f.Page = 1
+	}
+	if f.Page > MaxListPage {
+		f.Page = MaxListPage
+	}
+	if f.Size <= 0 {
+		f.Size = 20
+	}
+	if f.Size > MaxListSize {
+		f.Size = MaxListSize
+	}
 }
 
 type ListResult struct {

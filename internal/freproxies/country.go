@@ -62,7 +62,17 @@ func (s *Service) PurgeBlocked(ctx context.Context) (int, error) {
 	return removed, nil
 }
 
-func proxyTransport(p Proxy, timeout time.Duration) *http.Transport {
+// proxyTransportTLS builds a transport through p. insecure=true is only
+// acceptable where the response is not trusted for a decision (liveness); the
+// exit-country probe must verify, otherwise the proxy under test can forge the
+// country that decides whether it is allowed into the pool.
+//
+// Every caller currently passes false, and new ones should think twice before
+// passing true: a proxy that MITMs the CONNECT can rewrite any plaintext or
+// unverified response. That is not hypothetical — sampling the live pool turned
+// up proxies rewriting their own geo lookup to claim "United Kingdom /
+// AS415579" when a direct query said China / AS37963.
+func proxyTransportTLS(p Proxy, timeout time.Duration, insecure bool) *http.Transport {
 	if timeout <= 0 {
 		timeout = 8 * time.Second
 	}
@@ -70,13 +80,17 @@ func proxyTransport(p Proxy, timeout time.Duration) *http.Transport {
 	if p.Protocol == "socks5" || p.Protocol == "socks4" {
 		proxyURL.Scheme = "socks5"
 	}
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if insecure {
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // liveness only, no trust decision
+	}
 	return &http.Transport{
 		Proxy: http.ProxyURL(proxyURL),
 		DialContext: (&net.Dialer{
 			Timeout: timeout,
 		}).DialContext,
 		TLSHandshakeTimeout: timeout,
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		TLSClientConfig:     tlsCfg,
 		DisableKeepAlives:   true,
 	}
 }
@@ -91,7 +105,7 @@ func (s *Service) probeExitCountry(ctx context.Context, p Proxy, timeout time.Du
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	r, err := geo.LookupVia(cctx, proxyTransport(p, timeout))
+	r, err := geo.LookupVia(cctx, proxyTransportTLS(p, timeout, false))
 	if err != nil {
 		return ""
 	}

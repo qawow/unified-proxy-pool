@@ -45,10 +45,33 @@ func (c *memoryCache) GetGeo(_ context.Context, ip string) (Result, bool) {
 	return e.r, true
 }
 
+// maxGeoCacheEntries bounds the in-memory cache. Entries were only ever added,
+// so a long-running pool churning through free proxies grew it without limit.
+const maxGeoCacheEntries = 20000
+
 func (c *memoryCache) SetGeo(_ context.Context, ip string, r Result) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.data[ip] = cacheEntry{r: r, exp: time.Now().Add(7 * 24 * time.Hour)}
+	now := time.Now()
+	if len(c.data) >= maxGeoCacheEntries {
+		for k, e := range c.data {
+			if now.After(e.exp) {
+				delete(c.data, k)
+			}
+		}
+		// Still full of live entries: drop an arbitrary slice rather than grow.
+		if len(c.data) >= maxGeoCacheEntries {
+			n := len(c.data) / 4
+			for k := range c.data {
+				if n <= 0 {
+					break
+				}
+				delete(c.data, k)
+				n--
+			}
+		}
+	}
+	c.data[ip] = cacheEntry{r: r, exp: now.Add(7 * 24 * time.Hour)}
 	return nil
 }
 

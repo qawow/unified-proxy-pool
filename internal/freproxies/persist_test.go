@@ -58,3 +58,50 @@ func TestMemoryStoreSQLiteRoundTrip(t *testing.T) {
 		t.Fatalf("proxy not restored: %+v", p)
 	}
 }
+
+// Custom groups and yield history lived only in RAM: without Redis they were
+// lost on every restart.
+func TestSnapshotRoundTripsGroupsAndYields(t *testing.T) {
+	dir := t.TempDir()
+	store, err := db.Open(filepath.Join(dir, "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	ms := PersistMemoryStore(NewMemoryStore(), store).(*memoryStore)
+	if err := ms.SaveGroup(ctx, ProxyGroup{Name: "fast-us", Label: "Fast US", Rule: GroupRule{Regions: []string{"US"}, MinScore: 50}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.SaveSourceYield(ctx, SourceYieldRecord{Source: "src1", Sampled: 100, Alive: 7}); err != nil {
+		t.Fatal(err)
+	}
+	ms.markDirty()
+	ms.flushSnapshot()
+
+	reloaded := PersistMemoryStore(NewMemoryStore(), store).(*memoryStore)
+	groups, err := reloaded.ListGroups(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, g := range groups {
+		if g.Name == "fast-us" {
+			found = true
+			if len(g.Rule.Regions) != 1 || g.Rule.Regions[0] != "US" || g.Rule.MinScore != 50 {
+				t.Fatalf("group rule after restart = %+v, want the saved rule", g.Rule)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("custom group missing after restart; got %+v", groups)
+	}
+	yields, err := reloaded.ListSourceYield(ctx, "src1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(yields) != 1 || yields[0].Alive != 7 {
+		t.Fatalf("yields after restart = %+v, want the saved record", yields)
+	}
+}

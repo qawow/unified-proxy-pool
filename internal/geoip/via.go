@@ -15,9 +15,14 @@ import (
 // returns the exit country websites would see. Pattern from
 // monosans/proxy-scraper-checker and ProxyBroker: geolocate the tunnel, not
 // the listening host.
+// HTTPS only: this answer decides whether a proxy passes the country deny
+// list, and the request travels *through* the proxy being judged. Over plain
+// HTTP that proxy can simply write the reply itself and claim any country it
+// likes. The transport used for these lookups must verify certificates.
 var defaultSelfURLs = []string{
-	"http://ip-api.com/json?fields=status,country,countryCode,query,message",
-	"http://ipwho.is/?fields=success,country,country_code,ip",
+	"https://ipwho.is/?fields=success,country,country_code,ip",
+	"https://api.ip.sb/geoip",
+	"https://ipinfo.io/json",
 }
 
 // LookupVia asks geo endpoints through rt. The RoundTripper is the proxy

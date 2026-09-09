@@ -2,6 +2,7 @@ package freproxies
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -320,12 +321,26 @@ func (s *Service) SubmitRaw(ctx context.Context, items []Proxy, source string) (
 		if p.Addr == "" {
 			continue
 		}
+		// A local mihomo/clash instance is a legitimate submission, but our own
+		// listeners are not: dialling those loops the pool back into itself.
+		if isSelfAddr(p.Addr) {
+			res.Blocked++
+			continue
+		}
 		if p.Source == "" {
 			p.Source = source
 		}
 		if p.Protocol == "" {
 			p.Protocol = "http"
 		}
+		// The caller does not get to declare a proxy healthy. These fields are
+		// the pool's own verdict; accepting them let a submitter appear in
+		// only_ok listings and the pick ladder without ever being probed.
+		p.Validated = false
+		p.Score = ScoreInit
+		p.FailCount = 0
+		p.LatencyMS = 0
+		p.LastCheck = time.Time{}
 		toAdd = append(toAdd, p)
 	}
 	res.Parsed = len(toAdd)
@@ -572,6 +587,18 @@ func (s *Service) runOne(ctx context.Context, c crawlers.Crawler) (ScraperStat, 
 		})
 	}
 	converted, _ = s.dropBlocked(converted)
+	// Scraped lists are untrusted input too: a poisoned source that lists
+	// 127.0.0.1 or a LAN address would get it dialled from inside the network.
+	kept := converted[:0]
+	for _, p := range converted {
+		// Scraped lists are untrusted: a poisoned source listing 127.0.0.1 or a
+		// LAN address would get it dialled from inside the network.
+		if isLocalAddr(normalizeAddr(p.Host, p.Port)) {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	converted = kept
 	added, addErr := s.store.AddRaw(ctx, converted)
 	if addErr != nil {
 		stat.LastError = addErr.Error()
@@ -595,6 +622,23 @@ func (s *Service) TestProxy(ctx context.Context, addr, validateURL string, timeo
 
 // TestProxyOpts validates a proxy. When publish is false, no per-item SSE is emitted (batch mode).
 func (s *Service) TestProxyOpts(ctx context.Context, addr, validateURL string, timeout time.Duration, publish bool) (Proxy, error) {
+	return s.TestProxyURLs(ctx, addr, []string{validateURL}, timeout, publish)
+}
+
+// ErrCheckAborted means the check never produced a verdict — the context was
+// cancelled or timed out first. It must not be recorded as a proxy failure:
+// doing so deleted untested raw proxies and penalised their sources whenever a
+// validation batch ran past its deadline.
+var ErrCheckAborted = errors.New("validation aborted")
+
+// TestProxyURLs tries each URL in turn and persists exactly one verdict.
+//
+// Calling the single-URL check once per URL (which the validator used to do)
+// stores an intermediate verdict per attempt: the first failure deletes a raw
+// proxy, the next URL then re-creates it from scratch as protocol "http" /
+// source "manual", losing the real protocol and origin. Two failing URLs in one
+// round were also enough to reach the delete threshold for a live proxy.
+func (s *Service) TestProxyURLs(ctx context.Context, addr string, validateURLs []string, timeout time.Duration, publish bool) (Proxy, error) {
 	host, port, ok := splitAddr(addr)
 	if !ok {
 		return Proxy{}, fmt.Errorf("invalid addr")
@@ -612,7 +656,27 @@ func (s *Service) TestProxyOpts(ctx context.Context, addr, validateURL string, t
 		_ = s.store.Delete(ctx, addr)
 		return p, countryBlockedError(p.Region)
 	}
-	latency, okResult := checkHTTPProxy(ctx, p, validateURL, timeout)
+	if len(validateURLs) == 0 {
+		validateURLs = []string{""}
+	}
+	var latency int64
+	okResult := false
+	for _, u := range validateURLs {
+		if ctx.Err() != nil {
+			break
+		}
+		// Each URL gets its own budget; sharing one deadline left the later URLs
+		// a sliver of time and turned them into guaranteed failures.
+		attemptCtx, cancel := context.WithTimeout(ctx, timeout+2*time.Second)
+		latency, okResult = checkHTTPProxy(attemptCtx, p, u, timeout)
+		cancel()
+		if okResult {
+			break
+		}
+	}
+	if !okResult && ctx.Err() != nil {
+		return p, ErrCheckAborted
+	}
 	region := p.Region
 	// Via-proxy geo is expensive (ip-api ~45/min). If we already know a
 	// country, trust it for this check; unknown region still goes through.

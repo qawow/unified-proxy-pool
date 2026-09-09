@@ -2,6 +2,7 @@ package validator
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strconv"
 	"strings"
@@ -16,43 +17,43 @@ import (
 )
 
 type BatchSummary struct {
-	OK       int       `json:"ok"`
-	Fail     int       `json:"fail"`
-	Raw      int       `json:"raw"`
-	Recheck  int       `json:"recheck"`
+	OK       int `json:"ok"`
+	Fail     int `json:"fail"`
+	Raw      int `json:"raw"`
+	Recheck  int `json:"recheck"`
 	Duration time.Duration
 	At       time.Time `json:"at"`
 }
 
 type Progress struct {
-	Running          bool
-	Size             int
-	OK               int
-	Fail             int
-	LifetimeOK       int64
-	LifetimeFail     int64
-	LifetimeBatches  int64
-	RawTotal         int
-	RawUnchecked     int
-	Last             BatchSummary
-	History          []BatchSummary
+	Running         bool
+	Size            int
+	OK              int
+	Fail            int
+	LifetimeOK      int64
+	LifetimeFail    int64
+	LifetimeBatches int64
+	RawTotal        int
+	RawUnchecked    int
+	Last            BatchSummary
+	History         []BatchSummary
 }
 
 type Service struct {
-	mu        sync.RWMutex
-	cfg       config.App
-	free      *freproxies.Service
-	extraURLs []string
-	minRate   float64
-	minSample int
-	lastBatch BatchSummary
-	store     *db.Store
-	batchSize int
-	batchOK   int
-	batchFail int
-	lifeOK    int64
-	lifeFail  int64
-	lifeN      int64
+	mu           sync.RWMutex
+	cfg          config.App
+	free         *freproxies.Service
+	extraURLs    []string
+	minRate      float64
+	minSample    int
+	lastBatch    BatchSummary
+	store        *db.Store
+	batchSize    int
+	batchOK      int
+	batchFail    int
+	lifeOK       int64
+	lifeFail     int64
+	lifeN        int64
 	history      []BatchSummary
 	sourceBatch  map[string][2]int
 	rawTotal     int
@@ -154,7 +155,7 @@ func (s *Service) Snapshot() Progress {
 	hist := append([]BatchSummary(nil), s.history...)
 	return Progress{
 		Running: DefaultLogs.Running(),
-		Size: s.batchSize, OK: s.batchOK, Fail: s.batchFail,
+		Size:    s.batchSize, OK: s.batchOK, Fail: s.batchFail,
 		LifetimeOK: s.lifeOK, LifetimeFail: s.lifeFail, LifetimeBatches: s.lifeN,
 		RawTotal: s.rawTotal, RawUnchecked: s.rawUnchecked,
 		Last: s.lastBatch, History: hist,
@@ -333,20 +334,21 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			runCtx, cancel := context.WithTimeout(ctx, timeout+2*time.Second)
-			defer cancel()
-			var lastErr error
+			// One call, one persisted verdict. Looping TestProxyOpts per URL made
+			// each attempt mutate the store, so a proxy could be deleted by URL 1
+			// and re-created with the wrong protocol by URL 2.
 			var latency int64
-			okResult := false
-			for _, u := range urls {
-				item, err := s.free.TestProxyOpts(runCtx, p.Addr, u, timeout, false)
-				if err == nil {
-					okResult = true
-					latency = item.LatencyMS
-					lastErr = nil
-					break
-				}
-				lastErr = err
+			item, lastErr := s.free.TestProxyURLs(ctx, p.Addr, urls, timeout, false)
+			okResult := lastErr == nil
+			if okResult {
+				latency = item.LatencyMS
+			}
+			if errors.Is(lastErr, freproxies.ErrCheckAborted) {
+				// The batch ran out of time before this proxy was actually
+				// tested; recording a failure here would delete untested entries
+				// and blame their source.
+				DefaultLogs.Add("skip", p.Addr, "本轮超时未测", p.Source, 0)
+				return
 			}
 			mu.Lock()
 			kind := classifyValidateErr(lastErr)

@@ -19,7 +19,13 @@ import (
 )
 
 const (
-	keyScored     = "upp:proxies:scored"
+	keyScored = "upp:proxies:scored"
+	// keyChecked orders validated proxies by last check time. keyScored is
+	// ordered by quality score, but MarkValidated always writes ScoreMax, so
+	// ranges over it fell back to lexicographic address order: the same handful
+	// of addresses were re-checked and served forever while the rest of the pool
+	// was never revisited.
+	keyChecked    = "upp:proxies:checked"
 	keyRaw        = "upp:proxies:raw"
 	keyRetry      = "upp:proxies:retry"
 	keyAll        = "upp:proxies:all"
@@ -185,12 +191,27 @@ func (s *redisStore) AddRaw(ctx context.Context, proxies []Proxy) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Pre-cap against the raw limit: a 45k-address source would otherwise write
+	// every entry and rely on Trim to delete most of them again, every round.
+	room := int64(-1)
+	if rawCount, err := s.rdb.ZCard(ctx, keyRaw).Result(); err == nil {
+		room = MaxRawProxies - rawCount
+		if room < 0 {
+			room = 0
+		}
+	}
 	writePipe := s.rdb.Pipeline()
 	added := 0
 	for i, c := range cands {
 		exists, err := existCmds[i].Result()
 		if err != nil || exists {
 			continue
+		}
+		if room == 0 {
+			break
+		}
+		if room > 0 {
+			room--
 		}
 		p := c.p
 		p.Addr = c.addr
@@ -244,12 +265,40 @@ func (s *redisStore) saveMeta(ctx context.Context, p Proxy) error {
 	return s.rdb.Set(ctx, s.metaKey(p.Addr), raw, 0).Err()
 }
 
+// deleteMany removes a batch in one pipeline. Deleting through Delete() in a
+// loop costs five commands and a round trip per address; a full raw trim can be
+// tens of thousands of addresses, which is minutes of sequential Redis chatter
+// every scrape round.
+func (s *redisStore) deleteMany(ctx context.Context, addrs []string) error {
+	const chunk = 500
+	for start := 0; start < len(addrs); start += chunk {
+		end := start + chunk
+		if end > len(addrs) {
+			end = len(addrs)
+		}
+		pipe := s.rdb.Pipeline()
+		for _, addr := range addrs[start:end] {
+			pipe.SRem(ctx, keyAll, addr)
+			pipe.ZRem(ctx, keyRaw, addr)
+			pipe.ZRem(ctx, keyRetry, addr)
+			pipe.ZRem(ctx, keyScored, addr)
+			pipe.ZRem(ctx, keyChecked, addr)
+			pipe.Del(ctx, s.metaKey(addr))
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *redisStore) Delete(ctx context.Context, addr string) error {
 	pipe := s.rdb.Pipeline()
 	pipe.SRem(ctx, keyAll, addr)
 	pipe.ZRem(ctx, keyRaw, addr)
 	pipe.ZRem(ctx, keyRetry, addr)
 	pipe.ZRem(ctx, keyScored, addr)
+	pipe.ZRem(ctx, keyChecked, addr)
 	pipe.Del(ctx, s.metaKey(addr))
 	_, err := pipe.Exec(ctx)
 	return err
@@ -279,10 +328,20 @@ func (s *redisStore) ListValidated(ctx context.Context, limit int64) ([]Proxy, e
 	if limit <= 0 {
 		limit = 100
 	}
-	// oldest-ish first for revalidation: low end of zset by score then we sort by LastCheck
-	members, err := s.rdb.ZRange(ctx, keyScored, 0, limit*2-1).Result()
+	// Oldest check first: that is exactly what keyChecked is ordered by, so the
+	// whole validated set rotates through revalidation instead of the same
+	// lexicographic prefix.
+	members, err := s.rdb.ZRange(ctx, keyChecked, 0, limit*2-1).Result()
 	if err != nil {
 		return nil, err
+	}
+	if len(members) == 0 {
+		// Pool written before keyChecked existed: fall back so revalidation is
+		// not silently starved until every entry has been re-marked.
+		members, err = s.rdb.ZRange(ctx, keyScored, 0, limit*2-1).Result()
+		if err != nil {
+			return nil, err
+		}
 	}
 	out := s.mgetProxies(ctx, members)
 	sort.Slice(out, func(i, j int) bool {
@@ -311,6 +370,7 @@ func (s *redisStore) MarkValidated(ctx context.Context, addr string, latencyMS i
 		pipe.ZRem(ctx, keyRaw, addr)
 		pipe.ZRem(ctx, keyRetry, addr)
 		pipe.ZAdd(ctx, keyScored, redis.Z{Score: p.Score, Member: addr})
+		pipe.ZAdd(ctx, keyChecked, redis.Z{Score: float64(now.Unix()), Member: addr})
 		if err := s.saveMeta(ctx, p); err != nil {
 			return err
 		}
@@ -333,6 +393,7 @@ func (s *redisStore) MarkValidated(ctx context.Context, addr string, latencyMS i
 	pipe := s.rdb.Pipeline()
 	pipe.ZRem(ctx, keyRaw, addr)
 	pipe.ZRem(ctx, keyScored, addr)
+	pipe.ZRem(ctx, keyChecked, addr)
 	pipe.ZAdd(ctx, keyRetry, redis.Z{Score: retryDueUnix(p.FailCount, now), Member: addr})
 	if err := s.saveMeta(ctx, p); err != nil {
 		return err
@@ -346,8 +407,8 @@ func (s *redisStore) PurgeRetry(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, addr := range members {
-		_ = s.Delete(ctx, addr)
+	if err := s.deleteMany(ctx, members); err != nil {
+		return 0, err
 	}
 	return len(members), nil
 }
@@ -393,7 +454,10 @@ func (s *redisStore) RandomN(ctx context.Context, protocol string, n int) ([]Pro
 	if fetch > 128 {
 		fetch = 128
 	}
-	members, err := s.rdb.ZRevRange(ctx, keyScored, 0, fetch-1).Result()
+	// ZRandMember, not ZRevRange: every validated proxy scores ScoreMax, so a
+	// range returned the same lexicographic window on every call and the rest of
+	// the pool was never handed out.
+	members, err := s.rdb.ZRandMember(ctx, keyScored, int(fetch)).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -448,14 +512,15 @@ func (s *redisStore) Trim(ctx context.Context) error {
 		return err
 	}
 	if rawCount > MaxRawProxies {
-		// drop lowest-score raw first (ZRANGE low to high)
+		// Raw entries all carry ScoreInit, so this is effectively FIFO by insert
+		// order rather than by score — which is the policy we want anyway.
 		drop := rawCount - MaxRawProxies
 		addrs, err := s.rdb.ZRange(ctx, keyRaw, 0, drop-1).Result()
 		if err != nil {
 			return err
 		}
-		for _, addr := range addrs {
-			_ = s.Delete(ctx, addr)
+		if err := s.deleteMany(ctx, addrs); err != nil {
+			return err
 		}
 	}
 	scoredCount, err := s.rdb.ZCard(ctx, keyScored).Result()
@@ -464,12 +529,19 @@ func (s *redisStore) Trim(ctx context.Context) error {
 	}
 	if scoredCount > MaxValidatedProxies {
 		drop := scoredCount - MaxValidatedProxies
-		addrs, err := s.rdb.ZRange(ctx, keyScored, 0, drop-1).Result()
+		// Evict the stalest, not the lexicographically smallest address.
+		addrs, err := s.rdb.ZRange(ctx, keyChecked, 0, drop-1).Result()
 		if err != nil {
 			return err
 		}
-		for _, addr := range addrs {
-			_ = s.Delete(ctx, addr)
+		if int64(len(addrs)) < drop {
+			extra, err2 := s.rdb.ZRange(ctx, keyScored, 0, drop-1).Result()
+			if err2 == nil {
+				addrs = append(addrs, extra...)
+			}
+		}
+		if err := s.deleteMany(ctx, addrs); err != nil {
+			return err
 		}
 	}
 	retryCount, err := s.rdb.ZCard(ctx, keyRetry).Result()
@@ -483,8 +555,8 @@ func (s *redisStore) Trim(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		for _, addr := range addrs {
-			_ = s.Delete(ctx, addr)
+		if err := s.deleteMany(ctx, addrs); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -535,15 +607,7 @@ func matchListFilter(p Proxy, filter ListFilter) bool {
 }
 
 func (s *redisStore) List(ctx context.Context, filter ListFilter) (ListResult, error) {
-	if filter.Page <= 0 {
-		filter.Page = 1
-	}
-	if filter.Size <= 0 {
-		filter.Size = 20
-	}
-	if filter.Size > 5000 {
-		filter.Size = 5000
-	}
+	filter.Normalize()
 	needFilter := filter.Source != "" || filter.Protocol != "" || filter.Region != "" ||
 		filter.Family != "" || filter.groupRule != nil ||
 		filter.MinScore > 0 || strings.TrimSpace(filter.Query) != "" || !filter.OnlyOK
@@ -957,6 +1021,7 @@ type memoryStore struct {
 	persist     *db.Store
 	dirty       atomic.Bool
 	stopPersist chan struct{}
+	persistDone chan struct{}
 }
 
 func NewMemoryStore() Store {
@@ -987,7 +1052,14 @@ func (s *memoryStore) Close() error {
 		default:
 			close(s.stopPersist)
 		}
-		s.flushSnapshot()
+		// Wait for the loop's own final flush; racing it from here could leave
+		// the last writes unwritten when the process exits right after Close.
+		if s.persistDone != nil {
+			select {
+			case <-s.persistDone:
+			case <-time.After(20 * time.Second):
+			}
+		}
 	}
 	return nil
 }
@@ -1311,12 +1383,7 @@ func (s *memoryStore) Count(ctx context.Context) (total, validated, raw int64, e
 func (s *memoryStore) List(ctx context.Context, filter ListFilter) (ListResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if filter.Page <= 0 {
-		filter.Page = 1
-	}
-	if filter.Size <= 0 {
-		filter.Size = 20
-	}
+	filter.Normalize()
 	items := make([]Proxy, 0, len(s.proxies))
 	for _, p := range s.proxies {
 		if matchListFilter(p, filter) {

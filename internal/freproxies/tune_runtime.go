@@ -59,25 +59,19 @@ func (s *Service) TuneFromYield(ctx context.Context) (applied int, abort string,
 		_ = s.store.PushEvent(ctx, "sourcetune abort: "+abort)
 		return 0, abort, nil
 	}
-	n := 0
+	// Neither direction flips a scraper automatically any more.
+	//
+	// Disabling from in-process validate samples stops the crawl, so there is no
+	// recovery signal afterwards; sourcestats already hides dead sources from
+	// pick. Enabling was worse: a source the operator turned off still has
+	// thousands of entries sitting in raw, which kept producing "KEEP"
+	// measurements and switched it back on behind their back. Both are logged as
+	// advice instead.
 	for _, d := range decisions {
 		switch d.Action {
-		case TuneDisable:
-			// Do not flip scrapers off from in-process validate samples: that
-			// stops the crawl, so there is no recovery signal. sourcestats
-			// already hides dead sources from pick. Log the advice only.
-			_ = s.store.PushEvent(ctx, fmt.Sprintf("sourcetune would disable %s: %s", d.Source, d.Reason))
-			continue
-		case TuneEnable:
-			if err := s.store.SetScraperEnabled(ctx, d.Source, true); err != nil {
-				return n, "", err
-			}
-			n++
-		default:
-			continue
+		case TuneDisable, TuneEnable:
+			_ = s.store.PushEvent(ctx, fmt.Sprintf("sourcetune would %s %s: %s", d.Action, d.Source, d.Reason))
 		}
-		_ = s.store.PushEvent(ctx, fmt.Sprintf("sourcetune %s %s: %s", d.Action, d.Source, d.Reason))
-		s.publish("scrapers.toggled", map[string]any{"name": d.Source, "action": d.Action, "reason": d.Reason})
 	}
-	return n, "", nil
+	return 0, "", nil
 }
