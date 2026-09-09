@@ -106,6 +106,57 @@ type SourceStatRow struct {
 	DisabledUntil sql.NullTime
 }
 
+// UpsertSourceStats writes the whole set in one transaction. One autocommit
+// statement per source meant ~130 separate fsync-bearing writes every 5s.
+func (s *Store) UpsertSourceStats(ctx context.Context, rows []SourceStatRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO source_stats(name, ok, fail, latency_sum_ms, auto_disabled, disabled_until, updated_at)
+		VALUES(?,?,?,?,?,?,?)
+		ON CONFLICT(name) DO UPDATE SET ok=excluded.ok, fail=excluded.fail, latency_sum_ms=excluded.latency_sum_ms,
+			auto_disabled=excluded.auto_disabled, disabled_until=excluded.disabled_until, updated_at=excluded.updated_at`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := time.Now().UTC()
+	for _, row := range rows {
+		en := 0
+		if row.AutoDisabled {
+			en = 1
+		}
+		if _, err := stmt.ExecContext(ctx, row.Name, row.OK, row.Fail, row.LatencySumMS, en, row.DisabledUntil, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// SaveKV / LoadKV persist small JSON blobs that belong to the memory-backed
+// free-proxy store (custom groups, per-source yield history). They used to live
+// only in RAM, so they vanished on every restart whenever Redis was absent.
+func (s *Store) SaveKV(ctx context.Context, key, body string) error {
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO free_proxy_kv(key, body_json, updated_at) VALUES(?,?,?)
+		ON CONFLICT(key) DO UPDATE SET body_json=excluded.body_json, updated_at=excluded.updated_at`,
+		key, body, time.Now().UTC())
+	return err
+}
+
+func (s *Store) LoadKV(ctx context.Context, key string) (string, error) {
+	var body string
+	err := s.DB.QueryRowContext(ctx, `SELECT body_json FROM free_proxy_kv WHERE key = ?`, key).Scan(&body)
+	if err != nil {
+		return "", err
+	}
+	return body, nil
+}
+
 func (s *Store) UpsertSourceStat(ctx context.Context, row SourceStatRow) error {
 	en := 0
 	if row.AutoDisabled {

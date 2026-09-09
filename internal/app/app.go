@@ -111,6 +111,10 @@ func Run() {
 	registry := crawlers.NewRegistry(crawlers.DefaultSources())
 	scraperSvc := scrapers.New(store, registry)
 	freeSvc := freproxies.NewService(freeStore, registry, broker, redisOK)
+	// Our own listeners must never end up in the pool as exits: dialling one
+	// loops the pool back into itself.
+	freproxies.SetSelfPorts(currentSettings.PanelPort,
+		portOfAddr(cfg.DirectProxyAddr), portOfAddr(cfg.ProxyChainAddr))
 	geoSvc := geoip.New(nil)
 	freeSvc.SetGeoService(geoSvc)
 	freeSvc.SetGeoLookup(func(ctx context.Context, ip string) (string, error) {
@@ -298,6 +302,8 @@ func Run() {
 		log.Printf("server shutdown error: %v", err)
 	}
 	direct.Stop()
+	// Order matters: stop the writers, flush them, then tear down the children.
+	sourcestats.Default.Stop()
 	_ = freeStore.Close()
 	mihomoMgr.Stop()
 }

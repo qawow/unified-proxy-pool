@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,7 +38,13 @@ type Crawler interface {
 	Parse(body []byte, rawURL string) ([]Proxy, error)
 }
 
+// Registry is mutated at runtime — the panel adds and deletes custom sources
+// while the scheduler and the dashboard iterate it — so every access is guarded.
+// Without the lock a create/delete concurrent with a scrape run is a
+// "concurrent map read and map write" fatal error, which no recover() can catch
+// and which takes the whole proxy service down.
 type Registry struct {
+	mu    sync.RWMutex
 	items map[string]Crawler
 	order []string
 }
@@ -59,19 +66,27 @@ func NewRegistry(list []Crawler) *Registry {
 }
 
 func (r *Registry) Get(name string) (Crawler, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	c, ok := r.items[name]
 	return c, ok
 }
 
 func (r *Registry) All() []Crawler {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]Crawler, 0, len(r.order))
 	for _, name := range r.order {
-		out = append(out, r.items[name])
+		if c, ok := r.items[name]; ok {
+			out = append(out, c)
+		}
 	}
 	return out
 }
 
 func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return append([]string(nil), r.order...)
 }
 

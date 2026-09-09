@@ -125,3 +125,27 @@ func TestExtractIPPortMixedFamilies(t *testing.T) {
 		t.Errorf("the IPv6 entry was dropped from a mixed list: %+v", got)
 	}
 }
+
+// The panel mutates the registry while the scheduler iterates it; without the
+// lock this is a fatal "concurrent map read and map write".
+func TestRegistryConcurrentMutationAndIteration(t *testing.T) {
+	r := NewRegistry(nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			c, err := NewDynamic(DynamicSpec{Name: "dyn", URLs: []string{"http://example.invalid"}})
+			if err != nil {
+				return
+			}
+			r.RegisterDynamic(c)
+			r.Remove("dyn")
+		}
+	}()
+	for i := 0; i < 500; i++ {
+		_ = r.All()
+		_ = r.Names()
+		_, _ = r.Get("dyn")
+	}
+	<-done
+}

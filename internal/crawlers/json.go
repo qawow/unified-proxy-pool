@@ -11,9 +11,9 @@ import (
 // these constantly, so matching a set of aliases is more durable than writing
 // one parser per site.
 var (
-	jsonHostKeys  = []string{"ip", "host", "hostname", "server", "address", "ip_address", "ipAddress"}
-	jsonPortKeys  = []string{"port", "portNumber", "port_number"}
-	jsonAddrKeys  = []string{"proxy", "addr", "address", "ip_port", "ipPort", "endpoint", "url"}
+	jsonHostKeys    = []string{"ip", "host", "hostname", "server", "address", "ip_address", "ipAddress"}
+	jsonPortKeys    = []string{"port", "portNumber", "port_number"}
+	jsonAddrKeys    = []string{"proxy", "addr", "address", "ip_port", "ipPort", "endpoint", "url"}
 	jsonProtoKeys   = []string{"protocol", "type", "scheme", "proxy_type", "proxyType"}
 	jsonCountryKeys = []string{"countryCode", "country_code", "country_code_iso2", "code", "cc", "country", "nation"}
 )

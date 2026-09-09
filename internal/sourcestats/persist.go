@@ -15,6 +15,9 @@ func (r *Registry) Attach(store *db.Store) {
 	}
 	r.mu.Lock()
 	r.db = store
+	if r.stop == nil {
+		r.stop = make(chan struct{})
+	}
 	r.mu.Unlock()
 	if err := r.load(context.Background()); err != nil {
 		log.Printf("source_stats load: %v", err)
@@ -59,9 +62,24 @@ func (r *Registry) markDirty() {
 func (r *Registry) flushLoop() {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
-	for range t.C {
-		r.flush()
+	for {
+		select {
+		case <-r.stop:
+			r.flush() // final write on shutdown
+			return
+		case <-t.C:
+			r.flush()
+		}
 	}
+}
+
+// Stop ends the flush loop after one last write.
+func (r *Registry) Stop() {
+	r.stopOnce.Do(func() {
+		if r.stop != nil {
+			close(r.stop)
+		}
+	})
 }
 
 func (r *Registry) Flush() { r.flush() }
@@ -71,8 +89,9 @@ func (r *Registry) flush() {
 		return
 	}
 	stats := r.List()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	rows := make([]db.SourceStatRow, 0, len(stats))
 	for _, st := range stats {
 		row := db.SourceStatRow{
 			Name: st.Name, OK: st.OK, Fail: st.Fail, LatencySumMS: st.LatencySumMS,
@@ -81,9 +100,11 @@ func (r *Registry) flush() {
 		if !st.DisabledUntil.IsZero() {
 			row.DisabledUntil = sql.NullTime{Time: st.DisabledUntil, Valid: true}
 		}
-		if err := r.db.UpsertSourceStat(ctx, row); err != nil {
-			log.Printf("source_stats save %s: %v", st.Name, err)
-			r.dirty.Store(true)
-		}
+		rows = append(rows, row)
+	}
+	// One transaction for the whole set instead of one write per source.
+	if err := r.db.UpsertSourceStats(ctx, rows); err != nil {
+		log.Printf("source_stats save: %v", err)
+		r.dirty.Store(true)
 	}
 }

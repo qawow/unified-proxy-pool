@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -272,23 +273,29 @@ func (r *Registry) evaluateLocked(ch *channelState, addr string, e *entry, o Out
 			reason = "fail_rate"
 		}
 	}
+	// A custom rule that fires supplies its own TTL; Rule.TTLSec was accepted by
+	// the API and stored but never consulted, so per-rule ban lengths silently
+	// did nothing.
+	var firedRule *Rule
 	if reason == "" {
-			for _, rule := range r.rules {
-				if !rule.appliesTo(ch.name) {
-					continue
-				}
-				if why, hit := rule.matches(o, e, now, p.window(), r.bucketSec()); hit {
-					reason = why
-					break
-				}
+		for i := range r.rules {
+			rule := r.rules[i]
+			if !rule.appliesTo(ch.name) {
+				continue
+			}
+			if why, hit := rule.matches(o, e, now, p.window(), r.bucketSec()); hit {
+				reason = why
+				firedRule = &r.rules[i]
+				break
 			}
 		}
-		if reason == "" {
-			return nil
-		}
-		if o.Reported {
-			reason += "_reported"
-		}
+	}
+	if reason == "" {
+		return nil
+	}
+	if o.Reported {
+		reason += "_reported"
+	}
 
 	// Reset the escalation ladder when the pair has behaved for a while, so an
 	// occasional offender does not creep up to the maximum ban and stay there.
@@ -296,6 +303,9 @@ func (r *Registry) evaluateLocked(ch *channelState, addr string, e *entry, o Out
 		e.strikes = 0
 	}
 	ttl := banTTL(p, e.strikes)
+	if firedRule != nil {
+		ttl = firedRule.ttl(p)
+	}
 	e.strikes++
 	e.bannedUntil = now.Add(ttl)
 	e.banReason = reason
@@ -812,8 +822,13 @@ func (r *Registry) RestoreAllows(items []Allow) {
 	}
 }
 
+// ruleSeq makes rule IDs unique. A truncated nanosecond timestamp wrapped every
+// ~100ms, and AddRule replaces by ID, so two rules created in quick succession
+// could silently overwrite one another.
+var ruleSeq atomic.Uint64
+
 func nextRuleID() string {
-	return "r" + itoa(int(time.Now().UTC().UnixNano()%100_000_000))
+	return "r" + itoa(int(time.Now().UTC().UnixNano()%100_000_000)) + "-" + itoa(int(ruleSeq.Add(1)))
 }
 
 // AddRule stores a custom ban condition. Empty Channel = every channel.

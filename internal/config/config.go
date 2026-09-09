@@ -25,55 +25,55 @@ const (
 	defaultProbeControllerAddr           = "127.0.0.1:19091"
 	defaultProdControllerAddr            = "127.0.0.1:19090"
 	defaultProbeMixedPort                = 17891
-	defaultSessionMaxAgeSec = 7 * 24 * 3600 // 7 days persistent login
+	defaultSessionMaxAgeSec              = 7 * 24 * 3600 // 7 days persistent login
 	defaultLogLevel                      = "info"
 	defaultSpeedMaxBytes           int64 = 5000000
 	defaultRedisAddr                     = "127.0.0.1:6379"
 	defaultScrapeIntervalSec             = 300
 	defaultValidateIntervalSec           = 120
 	// HTTPS forces CONNECT through upstream HTTP proxies, matching DirectProxy HTTPS usage.
-	defaultFreeValidateURL = "https://www.gstatic.com/generate_204"
-	defaultFreeValidateTimeoutMS         = 8000
-	defaultFreeValidateConcurrency       = 32
-	defaultDirectProxyAddr = "0.0.0.0:7892"
-	defaultProxyChainAddr  = "0.0.0.0:7893"
-	defaultProxyChainHops  = 2
+	defaultFreeValidateURL         = "https://www.gstatic.com/generate_204"
+	defaultFreeValidateTimeoutMS   = 8000
+	defaultFreeValidateConcurrency = 32
+	defaultDirectProxyAddr         = "0.0.0.0:7892"
+	defaultProxyChainAddr          = "0.0.0.0:7893"
+	defaultProxyChainHops          = 2
 )
 
 var allowedLogLevels = []string{"trace", "debug", "info", "warning", "warn", "error", "silent"}
 
 type App struct {
-	PanelHost                 string
-	PanelPort                 int
-	DataDir                   string
-	DBPath                    string
-	RuntimeDir                string
-	ProdConfigPath            string
-	ProbeConfigPath           string
-	MihomoInstallDir          string
-	MihomoBinaryStatePath     string
-	MihomoBinaryPath          string
-	ProdControllerAddr        string
-	ProbeControllerAddr       string
-	ProbeMixedPort            int
-	SessionMaxAgeSec          int
-	DefaultControllerSecret   string
-	RedisAddr                 string
-	RedisPassword             string
-	RedisDB                   int
-	FreeProxyEnabled          bool
-	ScrapeIntervalSec         int
-	ValidateIntervalSec       int
-	FreeValidateURL           string
-	FreeValidateTimeoutMS     int
-	FreeValidateConcurrency   int
-	DirectProxyEnabled        bool
-	DirectProxyAddr           string
-	DirectProxyUsername       string
-	DirectProxyPassword       string
-	ProxyChainEnabled         bool
-	ProxyChainAddr            string
-	ProxyChainHops            int
+	PanelHost               string
+	PanelPort               int
+	DataDir                 string
+	DBPath                  string
+	RuntimeDir              string
+	ProdConfigPath          string
+	ProbeConfigPath         string
+	MihomoInstallDir        string
+	MihomoBinaryStatePath   string
+	MihomoBinaryPath        string
+	ProdControllerAddr      string
+	ProbeControllerAddr     string
+	ProbeMixedPort          int
+	SessionMaxAgeSec        int
+	DefaultControllerSecret string
+	RedisAddr               string
+	RedisPassword           string
+	RedisDB                 int
+	FreeProxyEnabled        bool
+	ScrapeIntervalSec       int
+	ValidateIntervalSec     int
+	FreeValidateURL         string
+	FreeValidateTimeoutMS   int
+	FreeValidateConcurrency int
+	DirectProxyEnabled      bool
+	DirectProxyAddr         string
+	DirectProxyUsername     string
+	DirectProxyPassword     string
+	ProxyChainEnabled       bool
+	ProxyChainAddr          string
+	ProxyChainHops          int
 }
 
 func Load() App {

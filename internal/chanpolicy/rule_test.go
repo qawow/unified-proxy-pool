@@ -1,6 +1,9 @@
 package chanpolicy
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestCustomStatusRuleBansOnUnlistedCode(t *testing.T) {
 	r, _ := newTestRegistry(t, nil)
@@ -68,5 +71,41 @@ func TestDeleteRuleStopsFiring(t *testing.T) {
 func TestNormalizeRuleRejectsEmptyStatusList(t *testing.T) {
 	if _, err := normalizeRule(Rule{Kind: RuleStatus}); err == nil {
 		t.Fatal("empty status list was accepted")
+	}
+}
+
+// Rule.TTLSec was stored by the API but never applied: every ban used the
+// global ladder instead.
+func TestCustomRuleTTLIsApplied(t *testing.T) {
+	r, _ := newTestRegistry(t, nil)
+	if _, err := r.AddRule(Rule{Name: "ban 503 for an hour", Kind: RuleStatus, Statuses: []int{503}, Channel: "ch", TTLSec: 3600}); err != nil {
+		t.Fatal(err)
+	}
+	b := r.Record(Outcome{Channel: "ch", Addr: "1.1.1.1:80", Status: 503})
+	if b == nil {
+		t.Fatal("custom rule did not fire")
+	}
+	got := b.Until.Sub(b.BannedAt)
+	if got < 50*time.Minute {
+		t.Fatalf("ban lasts %v, want ~1h from the rule's TTLSec rather than the global ladder", got)
+	}
+}
+
+// Two rules created back to back must not share an ID (AddRule replaces by ID).
+func TestRuleIDsAreUnique(t *testing.T) {
+	r, _ := newTestRegistry(t, nil)
+	seen := map[string]struct{}{}
+	for i := 0; i < 50; i++ {
+		rule, err := r.AddRule(Rule{Name: "r", Kind: RuleStatus, Statuses: []int{503}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, dup := seen[rule.ID]; dup {
+			t.Fatalf("duplicate rule id %q", rule.ID)
+		}
+		seen[rule.ID] = struct{}{}
+	}
+	if len(r.Rules()) != 50 {
+		t.Fatalf("registry holds %d rules, want 50", len(r.Rules()))
 	}
 }

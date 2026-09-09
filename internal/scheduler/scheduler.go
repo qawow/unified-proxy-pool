@@ -15,9 +15,9 @@ import (
 type IntervalProvider func(ctx context.Context) (scrapeSec, validateSec int)
 
 type Scheduler struct {
-	cfg       config.App
-	free      *freproxies.Service
-	validator *validator.Service
+	cfg        config.App
+	free       *freproxies.Service
+	validator  *validator.Service
 	mu         sync.Mutex
 	scraping   bool
 	validating bool

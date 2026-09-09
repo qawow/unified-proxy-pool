@@ -56,6 +56,11 @@ func NewMux(poolSvc *pools.Service, httpHandler http.Handler, addr string) (*Mux
 	m.httpServer = &http.Server{
 		Handler:           httpHandler,
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bound slow-loris style request bodies and abandoned keep-alive
+		// connections. WriteTimeout is deliberately unset: /api/events is a
+		// long-lived SSE stream and any write deadline would sever it.
+		ReadTimeout: 2 * time.Minute,
+		IdleTimeout: 3 * time.Minute,
 	}
 	return m, nil
 }

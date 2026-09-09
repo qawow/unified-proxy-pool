@@ -9,12 +9,12 @@ import (
 )
 
 type Sample struct {
-	TS         time.Time `json:"ts"`
-	UpBytes    int64     `json:"up_bytes"`
-	DownBytes  int64     `json:"down_bytes"`
-	ActiveIn   int64     `json:"active_in"`
-	ActiveOut  int64     `json:"active_out"`
-	ActiveConns int64    `json:"active_conns"`
+	TS          time.Time `json:"ts"`
+	UpBytes     int64     `json:"up_bytes"`
+	DownBytes   int64     `json:"down_bytes"`
+	ActiveIn    int64     `json:"active_in"`
+	ActiveOut   int64     `json:"active_out"`
+	ActiveConns int64     `json:"active_conns"`
 }
 
 type Store struct {

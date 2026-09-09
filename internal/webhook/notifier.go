@@ -57,10 +57,10 @@ func (n *Notifier) Notify(event string, payload map[string]any) {
 	n.mu.Unlock()
 
 	body := map[string]any{
-		"event":     event,
-		"ts":        time.Now().UTC().Format(time.RFC3339),
-		"payload":   payload,
-		"service":   "unified-proxy-pool",
+		"event":   event,
+		"ts":      time.Now().UTC().Format(time.RFC3339),
+		"payload": payload,
+		"service": "unified-proxy-pool",
 	}
 	raw, _ := json.Marshal(body)
 	go func() {

@@ -175,8 +175,10 @@ func TestBuildProbeInventoryConfigSanitizesLegacyTransportTypeOverride(t *testin
 
 // Repro (pre-fix): leave one ss with cipher "�G" at dash.zendegizibast.ir:2087,
 // publish, then mihomo logs:
-//   Parse config error: proxy 3021: ... cipher: �G initialize error: unknown method: �G
-//   mihomo probe exited unexpectedly
+//
+//	Parse config error: proxy 3021: ... cipher: �G initialize error: unknown method: �G
+//	mihomo probe exited unexpectedly
+//
 // :7893 times out while :7891 /api/health stays 200.
 func TestBuildProbeInventoryConfigDropsBadSSAndFixesALPN(t *testing.T) {
 	bad := models.RuntimeNode{
@@ -229,7 +231,8 @@ func TestBuildProbeInventoryConfigDropsBadSSAndFixesALPN(t *testing.T) {
 }
 
 // Repro: vless encryption "none=" (node 104004 / 85.133.215.108:235) fatals mihomo:
-//   Parse config error: proxy 1008: invaild vless encryption value: none=
+//
+//	Parse config error: proxy 1008: invaild vless encryption value: none=
 func TestBuildProbeInventoryConfigCleansVLESSEncryption(t *testing.T) {
 	bad := models.RuntimeNode{
 		SourceType:     "subscription",

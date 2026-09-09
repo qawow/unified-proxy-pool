@@ -25,11 +25,11 @@ type Status struct {
 }
 
 type RunRequest struct {
-	Targets     string `json:"targets"`
-	TCPConc     int    `json:"tcp_conc"`
-	TLSConc     int    `json:"tls_conc"`
-	TCPTimeoutMS int   `json:"tcp_timeout_ms"`
-	TLSTimeoutMS int   `json:"tls_timeout_ms"`
+	Targets      string `json:"targets"`
+	TCPConc      int    `json:"tcp_conc"`
+	TLSConc      int    `json:"tls_conc"`
+	TCPTimeoutMS int    `json:"tcp_timeout_ms"`
+	TLSTimeoutMS int    `json:"tls_timeout_ms"`
 }
 
 type Service struct {

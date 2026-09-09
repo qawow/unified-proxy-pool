@@ -21,6 +21,11 @@ import (
 	"unified-proxy-pool/internal/config"
 )
 
+// ErrConfigRejected means mihomo parsed the config and refused it. The running
+// instance keeps its previous config in that case, so the correct response is
+// to roll back — not to restart into the config that was just refused.
+var ErrConfigRejected = errors.New("mihomo rejected config")
+
 type Options struct {
 	BinaryPath          string
 	RuntimeDir          string
@@ -36,13 +41,17 @@ type Manager struct {
 	opts       Options
 	httpClient *http.Client
 
-	mu           sync.Mutex
-	binaryPath   string
-	prodCmd      *exec.Cmd
-	probeCmd     *exec.Cmd
-	hasBinary    bool
-	lastSecret   string
-	stopping     bool
+	// applyMu serialises config apply/publish; it must never be held while
+	// taking mu.
+	applyMu sync.Mutex
+
+	mu              sync.Mutex
+	binaryPath      string
+	prodCmd         *exec.Cmd
+	probeCmd        *exec.Cmd
+	hasBinary       bool
+	lastSecret      string
+	stopping        bool
 	prodBackoff     time.Duration
 	probeBackoff    time.Duration
 	expectedExit    map[int]struct{}
@@ -188,6 +197,14 @@ func (m *Manager) ApplyProbeConfig(ctx context.Context, payload []byte) error {
 }
 
 func (m *Manager) ApplyConfigBundle(ctx context.Context, prodPayload, probePayload []byte, nextSecret string) error {
+	// Serialise: Publish is triggered from subscription sync hooks, the startup
+	// goroutine and several handlers at once, and two writers racing on the same
+	// config paths produce rename failures and half-written YAML.
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+
+	prevProd := readFileOrNil(m.opts.ProdConfigPath)
+	prevProbe := readFileOrNil(m.opts.ProbeConfigPath)
 	if err := writeFileAtomic(m.opts.ProdConfigPath, prodPayload); err != nil {
 		return err
 	}
@@ -202,6 +219,16 @@ func (m *Manager) ApplyConfigBundle(ctx context.Context, prodPayload, probePaylo
 	currentSecret := m.currentSecret()
 	prodErr := m.reloadConfigWithSecret(ctx, false, m.opts.ProdConfigPath, prodPayload, currentSecret)
 	probeErr := m.reloadConfigWithSecret(ctx, true, m.opts.ProbeConfigPath, probePayload, currentSecret)
+	if errors.Is(prodErr, ErrConfigRejected) || errors.Is(probeErr, ErrConfigRejected) {
+		// Put the last known-good files back so a later restart (or a crash)
+		// does not boot from a config mihomo has already refused.
+		restoreFile(m.opts.ProdConfigPath, prevProd)
+		restoreFile(m.opts.ProbeConfigPath, prevProbe)
+		if prodErr != nil {
+			return fmt.Errorf("mihomo rejected the new prod config, keeping the previous one: %w", prodErr)
+		}
+		return fmt.Errorf("mihomo rejected the new probe config, keeping the previous one: %w", probeErr)
+	}
 	if prodErr != nil || probeErr != nil {
 		if prodErr != nil {
 			log.Printf("mihomo prod hot reload failed, falling back to restart: %v", prodErr)
@@ -227,6 +254,10 @@ func (m *Manager) ApplyConfigBundle(ctx context.Context, prodPayload, probePaylo
 }
 
 func (m *Manager) applySingleConfig(ctx context.Context, kind, configPath string, payload []byte) error {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+
+	prev := readFileOrNil(configPath)
 	if err := writeFileAtomic(configPath, payload); err != nil {
 		return err
 	}
@@ -234,11 +265,15 @@ func (m *Manager) applySingleConfig(ctx context.Context, kind, configPath string
 		return nil
 	}
 	probe := kind == "probe"
-	if err := m.reloadConfigWithSecret(ctx, probe, configPath, payload, m.currentSecret()); err == nil {
+	err := m.reloadConfigWithSecret(ctx, probe, configPath, payload, m.currentSecret())
+	if err == nil {
 		return m.waitControllerWithSecret(ctx, probe, m.currentSecret())
-	} else {
-		log.Printf("mihomo %s hot reload failed, falling back to restart: %v", kind, err)
 	}
+	if errors.Is(err, ErrConfigRejected) {
+		restoreFile(configPath, prev)
+		return fmt.Errorf("mihomo rejected the new %s config, keeping the previous one: %w", kind, err)
+	}
+	log.Printf("mihomo %s hot reload failed, falling back to restart: %v", kind, err)
 	if err := m.restartProcess(ctx, kind); err != nil {
 		return err
 	}
@@ -377,16 +412,30 @@ func (m *Manager) startProcess(ctx context.Context, kind string) error {
 		return nil
 	}
 	m.mu.Unlock()
+	// NOTE: Stop() can land between here and the assignment below; the
+	// post-Start re-check handles that so the new child is never left unmanaged.
 
 	cmd := exec.CommandContext(ctx, binaryPath, "-d", m.opts.RuntimeDir, "-f", configPath)
 	cmd.Dir = m.opts.RuntimeDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Without this, a parent that log.Fatal's or execs into a new binary leaves
+	// mihomo running: the orphan keeps the controller and listener ports and the
+	// next start crash-loops against it.
+	applyDeathSignal(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
 	m.mu.Lock()
+	if m.stopping {
+		// Stop() ran while we were starting: it saw no cmd to kill, so this one
+		// would keep running unmanaged.
+		m.markExpectedExitLocked(cmd)
+		m.mu.Unlock()
+		stopCmd(cmd)
+		return context.Canceled
+	}
 	if kind == "prod" {
 		m.prodCmd = cmd
 	} else {
@@ -452,7 +501,14 @@ func (m *Manager) reloadConfigWithSecret(ctx context.Context, probe bool, config
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("config reload failed: %s", strings.TrimSpace(string(body)))
+		msg := strings.TrimSpace(string(body))
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			// mihomo parsed the payload and refused it while continuing to run
+			// on the last good config. Restarting would only feed it the same
+			// bad config from disk and crash-loop the process.
+			return fmt.Errorf("%w: %s", ErrConfigRejected, msg)
+		}
+		return fmt.Errorf("config reload failed: %s", msg)
 	}
 	return nil
 }
@@ -605,15 +661,54 @@ func stopCmd(cmd *exec.Cmd) {
 	_ = cmd.Process.Kill()
 }
 
+// writeFileAtomic writes through a unique temp file: a fixed "<path>.tmp" is
+// shared state, and two concurrent publishes would make one of the renames fail
+// with ENOENT. Mode is 0600 because these configs carry the controller secret
+// and every node's credentials.
 func writeFileAtomic(path string, payload []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, payload, 0o644); err != nil {
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() { _ = os.Remove(tmp) }()
+	if _, err := f.Write(payload); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func readFileOrNil(path string) []byte {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+func restoreFile(path string, prev []byte) {
+	if prev == nil {
+		return
+	}
+	if err := writeFileAtomic(path, prev); err != nil {
+		log.Printf("mihomo: restoring previous config %s failed: %v", path, err)
+	}
 }
 
 func minimalProdConfig(secret, controller, logLevel string) []byte {

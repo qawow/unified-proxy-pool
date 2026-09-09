@@ -3,22 +3,22 @@ package models
 import "time"
 
 type Settings struct {
-	ID                             int64     `json:"id"`
-	PanelHost                      string    `json:"panel_host"`
-	PanelPort                      int       `json:"panel_port"`
-	PasswordHash                   string    `json:"-"`
-	SpeedTestEnabled               bool      `json:"speed_test_enabled"`
-	LatencyTestURL                 string    `json:"latency_test_url"`
-	SpeedTestURL                   string    `json:"speed_test_url"`
-	LatencyTimeoutMS               int       `json:"latency_timeout_ms"`
-	SpeedTimeoutMS                 int       `json:"speed_timeout_ms"`
-	LatencyConcurrency             int       `json:"latency_concurrency"`
-	SpeedConcurrency               int       `json:"speed_concurrency"`
-	DefaultSubscriptionIntervalSec int       `json:"default_subscription_interval_sec"`
-	MihomoControllerSecret         string    `json:"mihomo_controller_secret"`
-	FailureRetryCount              int       `json:"failure_retry_count"`
-	LogLevel                       string    `json:"log_level"`
-	SpeedMaxBytes                  int64     `json:"speed_max_bytes"`
+	ID                             int64  `json:"id"`
+	PanelHost                      string `json:"panel_host"`
+	PanelPort                      int    `json:"panel_port"`
+	PasswordHash                   string `json:"-"`
+	SpeedTestEnabled               bool   `json:"speed_test_enabled"`
+	LatencyTestURL                 string `json:"latency_test_url"`
+	SpeedTestURL                   string `json:"speed_test_url"`
+	LatencyTimeoutMS               int    `json:"latency_timeout_ms"`
+	SpeedTimeoutMS                 int    `json:"speed_timeout_ms"`
+	LatencyConcurrency             int    `json:"latency_concurrency"`
+	SpeedConcurrency               int    `json:"speed_concurrency"`
+	DefaultSubscriptionIntervalSec int    `json:"default_subscription_interval_sec"`
+	MihomoControllerSecret         string `json:"mihomo_controller_secret"`
+	FailureRetryCount              int    `json:"failure_retry_count"`
+	LogLevel                       string `json:"log_level"`
+	SpeedMaxBytes                  int64  `json:"speed_max_bytes"`
 	// Free proxy / session runtime (persisted, hot-applied where possible)
 	SessionMaxAgeSec        int    `json:"session_max_age_sec"`
 	ScrapeIntervalSec       int    `json:"scrape_interval_sec"`
@@ -99,23 +99,23 @@ type ManualNode struct {
 }
 
 type ProxyPool struct {
-	ID                  int64      `json:"id"`
-	Name                string     `json:"name"`
-	AuthUsername        string     `json:"auth_username"`
-	AuthPasswordSecret  string     `json:"auth_password_secret,omitempty"`
-	Strategy            string     `json:"strategy"`
-	StrategyLabel       string     `json:"strategy_label"`
-	StrategyAdvancedJSON string    `json:"strategy_advanced_json"`
-	FailoverEnabled     bool       `json:"failover_enabled"`
-	Enabled             bool       `json:"enabled"`
-	Channel             string     `json:"channel,omitempty"` // bound dest channel; empty = no filter
-	LastPublishedAt     *time.Time `json:"last_published_at"`
-	LastPublishStatus   string     `json:"last_publish_status"`
-	LastError           string     `json:"last_error"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
-	CurrentMemberCount  int        `json:"current_member_count"`
-	CurrentHealthyCount int        `json:"current_healthy_count"`
+	ID                   int64      `json:"id"`
+	Name                 string     `json:"name"`
+	AuthUsername         string     `json:"auth_username"`
+	AuthPasswordSecret   string     `json:"auth_password_secret,omitempty"`
+	Strategy             string     `json:"strategy"`
+	StrategyLabel        string     `json:"strategy_label"`
+	StrategyAdvancedJSON string     `json:"strategy_advanced_json"`
+	FailoverEnabled      bool       `json:"failover_enabled"`
+	Enabled              bool       `json:"enabled"`
+	Channel              string     `json:"channel,omitempty"` // bound dest channel; empty = no filter
+	LastPublishedAt      *time.Time `json:"last_published_at"`
+	LastPublishStatus    string     `json:"last_publish_status"`
+	LastError            string     `json:"last_error"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+	CurrentMemberCount   int        `json:"current_member_count"`
+	CurrentHealthyCount  int        `json:"current_healthy_count"`
 }
 
 // StrategyAdvanced is optional per-pool scheduling customization.

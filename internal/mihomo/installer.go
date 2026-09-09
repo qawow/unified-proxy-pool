@@ -95,7 +95,16 @@ func NewInstaller(installDir, selectionPath string) *Installer {
 func NewInstallerWithOptions(opts InstallerOptions) *Installer {
 	client := opts.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		// No client-wide Timeout: it covers the body too, and 30s is not enough
+		// to pull a ~15 MB mihomo release over a slow link (the soft-router case
+		// this feature exists for). Bound the handshake and headers instead.
+		client = &http.Client{
+			Transport: &http.Transport{
+				TLSHandshakeTimeout:   15 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+				IdleConnTimeout:       30 * time.Second,
+			},
+		}
 	}
 	releaseAPIURL := opts.ReleaseAPIURL
 	if releaseAPIURL == "" {
@@ -230,6 +239,9 @@ func (i *Installer) Install(ctx context.Context, assetName string) (InstallResul
 }
 
 func (i *Installer) downloadAsset(ctx context.Context, downloadURL, destination string) error {
+	// A generous overall deadline still bounds a stalled transfer.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return err

@@ -108,7 +108,11 @@ func buildProdConfig(secret, controller, testURL, logLevel string, poolList []mo
 			seenProxyNames[name] = struct{}{}
 		}
 		if len(memberNames) == 0 {
-			memberNames = []string{"DIRECT"}
+			// REJECT, not DIRECT: a pool whose members all disappeared must fail
+			// loudly. With DIRECT the listener keeps answering and silently
+			// egresses from the host's own IP — the exact opposite of what a
+			// proxy pool is for, and invisible to the client.
+			memberNames = []string{"REJECT"}
 		}
 		group := buildProxyGroup(pool, groupName, memberNames, testURL)
 		root["proxy-groups"] = append(root["proxy-groups"].([]map[string]any), group)

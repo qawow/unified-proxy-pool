@@ -27,15 +27,21 @@ type Stat struct {
 }
 
 type Registry struct {
-	mu    sync.RWMutex
-	m     map[string]*Stat
-	db    *db.Store
-	dirty atomic.Bool
-	now   func() time.Time
+	mu       sync.RWMutex
+	m        map[string]*Stat
+	db       *db.Store
+	dirty    atomic.Bool
+	now      func() time.Time
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 func New() *Registry {
-	return &Registry{m: map[string]*Stat{}, now: func() time.Time { return time.Now().UTC() }}
+	return &Registry{
+		m:    map[string]*Stat{},
+		now:  func() time.Time { return time.Now().UTC() },
+		stop: make(chan struct{}),
+	}
 }
 
 var Default = New()

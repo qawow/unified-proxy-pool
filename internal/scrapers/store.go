@@ -13,18 +13,18 @@ import (
 )
 
 type Record struct {
-	ID         int64    `json:"id"`
-	Name       string   `json:"name"`
-	URLs       []string `json:"urls"`
-	Format     string   `json:"format"`
-	Protocol   string   `json:"protocol"`
-	Enabled    bool     `json:"enabled"`
-	Fragile    bool     `json:"fragile"`
-	HostCol    int      `json:"host_col"`
-	PortCol    int      `json:"port_col"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	Builtin    bool     `json:"builtin"`
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	URLs      []string  `json:"urls"`
+	Format    string    `json:"format"`
+	Protocol  string    `json:"protocol"`
+	Enabled   bool      `json:"enabled"`
+	Fragile   bool      `json:"fragile"`
+	HostCol   int       `json:"host_col"`
+	PortCol   int       `json:"port_col"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Builtin   bool      `json:"builtin"`
 }
 
 type Service struct {

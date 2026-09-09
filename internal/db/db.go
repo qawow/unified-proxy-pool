@@ -338,6 +338,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			in_scored INTEGER NOT NULL DEFAULT 0,
 			updated_at TIMESTAMP NOT NULL
 		);`,
+		`CREATE TABLE IF NOT EXISTS free_proxy_kv (
+			key TEXT PRIMARY KEY,
+			body_json TEXT NOT NULL,
+			updated_at TIMESTAMP NOT NULL
+		);`,
 		`CREATE TABLE IF NOT EXISTS scraper_toggles (
 			name TEXT PRIMARY KEY,
 			enabled INTEGER NOT NULL,

@@ -121,6 +121,8 @@ func (r *Registry) RegisterDynamic(c Crawler) {
 		return
 	}
 	name := c.Name()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if _, exists := r.items[name]; !exists {
 		r.order = append(r.order, name)
 	}
@@ -128,11 +130,15 @@ func (r *Registry) RegisterDynamic(c Crawler) {
 }
 
 func (r *Registry) Remove(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if _, ok := r.items[name]; !ok {
 		return
 	}
 	delete(r.items, name)
-	out := r.order[:0]
+	// Rebuild instead of filtering in place: All() hands out slices derived
+	// from order, and r.order[:0] would rewrite memory a reader may still hold.
+	out := make([]string, 0, len(r.order))
 	for _, n := range r.order {
 		if n != name {
 			out = append(out, n)

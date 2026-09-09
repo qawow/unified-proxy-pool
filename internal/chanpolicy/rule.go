@@ -8,11 +8,11 @@ import (
 
 // RuleKind is one condition a custom rule can test.
 const (
-	RuleStatus      = "status"       // HTTP status is in Statuses
-	RuleConsecutive = "consecutive"  // consecutive failures >= Threshold
-	RuleFailRate    = "fail_rate"    // window fail rate >= Rate (needs MinSamples)
-	RuleTimeouts    = "timeouts"     // window timeouts >= Threshold
-	RuleError       = "error"        // Err tag contains Match
+	RuleStatus      = "status"      // HTTP status is in Statuses
+	RuleConsecutive = "consecutive" // consecutive failures >= Threshold
+	RuleFailRate    = "fail_rate"   // window fail rate >= Rate (needs MinSamples)
+	RuleTimeouts    = "timeouts"    // window timeouts >= Threshold
+	RuleError       = "error"       // Err tag contains Match
 )
 
 // Rule is one extra ban condition. Channel empty = applies everywhere.
