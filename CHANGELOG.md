@@ -1,3 +1,80 @@
+## Unreleased — 2026-09-09 · 安全与正确性修复
+
+一轮全面审计后的集中修复。**行为有变化的地方在每条末尾标了「影响」。**
+
+### 安全
+- **热更新不再可被池子里的恶意出口投毒**：回退通道改用校验证书的客户端（原先复用采集器的
+  `InsecureSkipVerify` 客户端，且出口就是免费代理池，等于把任意 ELF 交给对方）；
+  新增 `unified-proxy-pool.sha256` 校验，校验和只从验证过证书的通道取，取不到就拒绝升级。
+  *影响：CI 必须随二进制发布 `.sha256`（已加）。*
+- **`/api/public/report` 不再采信调用方的结论**：过去无鉴权、无限速地把任意地址置为
+  `Validated + ScoreMax`，局域网内任何人（甚至网页里的一个简单 POST）都能把自己的出口塞进池子。
+  现在只登记线索、由面板自己复测，并按 IP 限速。*影响：报告结果不再立即生效。*
+- **链式代理 `:7893` 的认证 / CIDR / 限速真正生效**：面板一直在收集
+  `chain.auth_required`、`username`、`allowed_cidrs`、`rate_limit_bps`，但代码从未读过，
+  勾了也等于没勾。同时补上限速的实际实现（令牌桶）。
+- **未设账号密码的监听不再对公网开放**：`allowed_cidrs` 为空时隐式只允许私网/回环，
+  并在启动日志里提示。*影响：从公网 IP 直连 7892/7893 会被拒，需显式配 CIDR 或账号密码。*
+- **API Token 范围真正生效**：`proxies:read` / `proxies:write` / `channels:write` / `ai:write` / `admin`，
+  写操作与 AI 接口逐路由校验。*影响：过去用只读 Token 调 submit 的脚本要换成 `proxies:write`。*
+- **转发头默认不再被信任**：新增 `feature.trusted_proxy_cidrs`，为空时忽略
+  `X-Forwarded-For` / `X-Real-IP`；配置后按最右侧非可信条目取客户端 IP。
+  *影响：装在 nginx 后面的部署要填这一项，否则审计日志与 LAN 判定看到的是反代地址。*
+- 出口国家探测改用 HTTPS 且验证证书 —— 明文 HTTP 走被测代理时，对方可以直接伪造国家绕过 CN 封禁。
+- **存活校验不再只看状态码**：`InsecureSkipVerify` 让 HTTPS 判定 URL 也能被 MITM 的代理伪造，
+  校验证书后它就伪造不了；判定 URL 是明文时，额外要求通过一个证书校验过的
+  HTTPS 金丝雀（`cp.cloudflare.com/generate_204`），证明它真的在转发。
+  实测抽样：只会应答常见探针的假代理 40/40 倒在金丝雀上，真代理 29/40 通过；
+  全量 72,340 条跑下来，"可用"从 947 条收敛到百余条。
+  *影响：只对判定 URL 有反应的假代理会被判死，池子会变小但都是真的。*
+- 登录限速（每 IP 5 分钟 10 次）、密码至少 6 位、代理密码常量时间比较、
+  SOCKS5 目标域名校验（防 CR/LF 注入到上游 CONNECT）、响应体大小上限、分页上限、
+  安全响应头（`X-Frame-Options`/`nosniff`/CSP）。
+- 采集到的私网/回环地址一律丢弃；提交接口只拒绝面板自己的监听端口（本地 clash 仍可入池）。
+- 提交的 `validated`/`score`/`latency` 等字段不再采信，一律按未测处理。
+
+### 稳定性
+- **mihomo 配置被拒不再引发崩溃循环**：4xx（配置被拒）时保留上一份可用配置并报错，
+  只有传输层失败才重启。此前一个订阅里的坏节点就能让所有出口反复重启。
+- **发布配置串行化 + 唯一临时文件**：并发 Publish 曾在固定的 `.tmp` 上互相踩踏，
+  导致 rename 失败甚至半截 YAML。配置文件权限收紧到 0600（内含控制口令与节点密码）。
+- **`crawlers.Registry` 加锁**：面板增删采集源与调度器遍历并发时会触发
+  `concurrent map read and map write`，整个进程直接挂掉。
+- mihomo 子进程设 `Pdeathsig`：父进程 `log.Fatal` 或 exec 后不再留下抢端口的孤儿进程。
+- 监听 accept 出错改为退避重试（此前一次 EMFILE 就会让监听永久停摆）。
+- 明文 HTTP 转发路径补上游超时；响应中继用独立预算，不再被 30s 连接级 deadline 掐断。
+- 面板 HTTP 服务补 `ReadTimeout`/`IdleTimeout`（SSE 不设 WriteTimeout）。
+
+### 代理池质量
+- **Redis 排序修复**：`MarkValidated` 永远写 `ScoreMax`，导致所有按分数的 ZSET 区间退化成
+  地址字典序 —— 复检永远只测同一批、`RandomN` 永远只发同一批、`Trim` 淘汰的是刚验过的。
+  新增按最后检查时间排序的集合，`RandomN` 改用 `ZRANDMEMBER`。
+- **多校验 URL 只写一次结论**：过去每个 URL 各写一次，URL1 失败先把 raw 代理删掉，
+  URL2 再以 `http`/`manual` 重建，协议与来源全丢；两个 URL 失败就够删掉一条活代理。
+- 上下文取消/超时不再计为代理失败（此前批次超时会删掉一整批未测代理并惩罚其来源）。
+- 存活判定收紧为 2xx —— 此前 407/403 也算“可用”。
+- **SOCKS4 真正可用**：新增 SOCKS4/4a 拨号（校验与链式出口都接上），
+  此前 socks4 按 SOCKS5 握手必然失败，十几个默认开启的 socks4 源纯占坑。
+- 认证代理（手动节点）校验时带上账号密码，不再一律判为不可用。
+- 出口池成员为空时用 `REJECT` 而非 `DIRECT` —— 后者会静默改用本机 IP 出网。
+- 自动调优不再擅自开关采集源（此前被手动关掉的源会被自己打开）。
+
+### 节点导入
+- **分享链接的 TLS/传输参数不再丢失**：vmess 的 `net/tls/host/path/aid/scy`、
+  vless/trojan 的 `security/sni/fp/pbk/sid/serviceName` 现在会翻译成 mihomo 的
+  `network/tls/servername/client-fingerprint/reality-opts/ws-opts/grpc-opts`。
+  此前这些节点被当作明文 TCP 发布，Reality 节点导入后完全不可用。
+- SIP002 形式 `ss://…@host:port/?plugin=…` 不再因为路径段解析失败被丢弃；
+  `plugin` 转成 `plugin`+`plugin-opts`（缺 `mode` 的 obfs 会去掉插件而不是让整份配置 fatal）。
+
+### 数据与依赖
+- 内存+SQLite 模式：自定义分组与来源产出纳入快照（此前重启即丢），
+  快照写入从 3s 放宽到 20s（关闭时仍立即落盘），来源统计改为单事务批量写。
+- 订阅代理拉取复用 Transport（此前每次同步泄漏一批空闲连接）。
+- Go 工具链 1.25.0 → 1.25.13，`golang.org/x/net` 0.53.0 → 0.55.0：
+  govulncheck 从 32 个可达漏洞降到 0。
+- 面板可编辑的 AI 提示词真正生效（此前保存了但调用时仍用内置模板，自定义 key 还会丢掉正文）。
+
 ## Unreleased — 2026-08-07
 
 ### CF 优选扫描（Free-Fly）

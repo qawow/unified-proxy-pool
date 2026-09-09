@@ -132,6 +132,19 @@ export http_proxy=http://172.18.49.135:7893 https_proxy=http://172.18.49.135:789
 
 更多运行参数可在面板 **系统设置** / `feature_json` 中热更新（采集校验周期、Webhook、仪表盘卡片、链式策略等）。
 
+## 安全默认值
+
+| 项目 | 行为 |
+|------|------|
+| `:7892` / `:7893` 未设账号密码 | 只接受私网/回环来源（`allowed_cidrs` 为空时的隐式白名单），日志会提示补认证 |
+| 链式代理 `chain.auth_required` / `allowed_cidrs` / `rate_limit_bps` | 只作用于 `:7893`，与单跳互不影响 |
+| `feature.trusted_proxy_cidrs` | **默认空 = 不信任任何 `X-Forwarded-For` / `X-Real-IP`**。放在 nginx 后面时填反代地址，才会按最右侧非可信条目取客户端 IP |
+| API Token 范围 | `proxies:read` / `proxies:write` / `channels:write` / `ai:write` / `admin`，后端强制校验；只读 Token 不能入池、不能调 AI |
+| `/api/public/report` | 不采信调用方给的结论，只触发面板自己复测（并限速） |
+| 热更新 | 校验和只走验证证书的通道（直连或经代理 CONNECT），二进制必须匹配 `unified-proxy-pool.sha256`，否则拒绝升级 |
+| 密码 | 至少 6 位；登录失败每 IP 5 分钟 10 次 |
+| mihomo 配置被拒 | 保留上一份可用配置并报错，不会用坏配置重启（避免崩溃循环） |
+
 ## 页面
 
 | 路由 | 说明 |
