@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,9 @@ type Service struct {
 	mu             sync.Mutex
 	syncing        map[int64]struct{}
 	afterSyncHooks []func(context.Context, int64, []int64)
+
+	proxyClientsMu sync.Mutex
+	proxyClients   map[string]*http.Client
 }
 
 // SetLocalExits tells sync how to interpret fetch_proxy shortcuts
@@ -734,26 +738,34 @@ func loadStoredSubscriptionNodes(ctx context.Context, tx *sql.Tx, subscriptionID
 	return result, rows.Err()
 }
 
+// identityKeys are the fields that make a node *that* node. Everything else
+// (transport tweaks, display name, sanitizer output) can change between syncs
+// without it becoming a different node.
+var identityKeys = []string{"uuid", "password", "auth", "auth-str", "psk", "id"}
+
+// subscriptionNodeFingerprint identifies a node across syncs.
+//
+// It deliberately does NOT hash the whole normalized JSON: any change to the
+// sanitizer, or a provider renaming a node (vmess keeps "ps" inside the
+// payload), produced a different fingerprint, so the node was deleted and
+// re-created with a new id. Pool memberships point at that id, so they silently
+// dangled and the pool quietly shrank — with an empty pool falling back to a
+// plain egress.
 func subscriptionNodeFingerprint(protocol, server string, port int, normalizedJSON string) string {
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSpace(normalizedJSON)), &payload); err != nil || payload == nil {
 		payload = make(map[string]any)
 	}
-	if protocol != "" {
-		payload["type"] = protocol
+	parts := []string{strings.ToLower(strings.TrimSpace(protocol)),
+		strings.ToLower(strings.TrimSpace(server)), strconv.Itoa(port)}
+	for _, k := range identityKeys {
+		if v, ok := payload[k]; ok {
+			if sv, ok := v.(string); ok && strings.TrimSpace(sv) != "" {
+				parts = append(parts, k+"="+strings.TrimSpace(sv))
+			}
+		}
 	}
-	if server != "" {
-		payload["server"] = server
-	}
-	if port > 0 {
-		payload["port"] = port
-	}
-	delete(payload, "name")
-	fingerprint, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Sprintf("%s|%s|%d|%s", protocol, server, port, strings.TrimSpace(normalizedJSON))
-	}
-	return string(fingerprint)
+	return strings.Join(parts, "|")
 }
 
 func popStoredSubscriptionNode(items []storedSubscriptionNode, rawPayload string) (storedSubscriptionNode, bool) {
@@ -792,7 +804,21 @@ func (s *Service) clientFor(sub models.Subscription) *http.Client {
 	if proxyURL == nil {
 		return s.client
 	}
+	// Cache per proxy URL: building a fresh Transport on every sync left its
+	// idle keep-alive connections (and their goroutines) alive until the peer
+	// gave up, once per subscription per interval.
+	key := proxyURL.String()
+	s.proxyClientsMu.Lock()
+	defer s.proxyClientsMu.Unlock()
+	if s.proxyClients == nil {
+		s.proxyClients = map[string]*http.Client{}
+	}
+	if c, ok := s.proxyClients[key]; ok {
+		return c
+	}
 	transport := &http.Transport{
+		MaxIdleConns:      8,
+		IdleConnTimeout:   90 * time.Second,
 		ForceAttemptHTTP2: false,
 		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS12},
 	}
@@ -814,7 +840,9 @@ func (s *Service) clientFor(sub models.Subscription) *http.Client {
 	default:
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
-	return &http.Client{Timeout: 45 * time.Second, Transport: transport}
+	client := &http.Client{Timeout: 45 * time.Second, Transport: transport}
+	s.proxyClients[key] = client
+	return client
 }
 
 func (s *Service) resolveFetchProxy(raw string) *url.URL {

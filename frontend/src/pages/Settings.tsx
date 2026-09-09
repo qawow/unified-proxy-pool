@@ -47,6 +47,7 @@ export function SettingsPage() {
   const [direct, setDirect] = useState<DirectProxyStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [passwordForm, setPasswordForm] = useState({ old_password: "", new_password: "" });
+  const [tokenScopes, setTokenScopes] = useState("proxies:read");
   const [restartOpen, setRestartOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [ver, setVer] = useState<{ commit?: string; short?: string; time?: string } | null>(null);
@@ -937,7 +938,9 @@ export function SettingsPage() {
               <CardTitle>修改密码</CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-3" onSubmit={changePassword}>
+              {/* A real form: on a <div> the required attributes never fire, so
+                  an empty new password could be submitted with one click. */}
+              <form className="space-y-3" onSubmit={changePassword}>
                 <Field label="旧密码">
                   <Input
                     type="password"
@@ -946,16 +949,17 @@ export function SettingsPage() {
                     required
                   />
                 </Field>
-                <Field label="新密码">
+                <Field label="新密码（至少 6 位）">
                   <Input
                     type="password"
+                    minLength={6}
                     value={passwordForm.new_password}
                     onChange={(e) => setPasswordForm({ ...passwordForm, new_password: e.target.value })}
                     required
                   />
                 </Field>
-                <Button type="button" onClick={(e) => void changePassword(e as unknown as FormEvent)}>修改密码</Button>
-              </div>
+                <Button type="submit">修改密码</Button>
+              </form>
             </CardContent>
           </Card>
 
@@ -964,12 +968,21 @@ export function SettingsPage() {
               <CardTitle>API Token</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
+              <Field label="权限范围">
+                <Select value={tokenScopes} onChange={(e) => setTokenScopes(e.target.value)}>
+                  <option value="proxies:read">只读（查询代理）</option>
+                  <option value="proxies:write">读写代理（入池 / 批量校验）</option>
+                  <option value="channels:write">上报渠道结果</option>
+                  <option value="ai:write">调用 AI 接口</option>
+                  <option value="admin">全部权限</option>
+                </Select>
+              </Field>
               <Button
                 type="button"
                 variant="secondary"
                 onClick={async () => {
                   try {
-                    const t = await endpoints.tokens.create("panel");
+                    const t = await endpoints.tokens.create("panel", tokenScopes);
                     if (t.token) {
                       await navigator.clipboard?.writeText(t.token);
                       toast(`已创建并复制 Token：${t.token.slice(0, 16)}…`, "success");
@@ -982,6 +995,7 @@ export function SettingsPage() {
                 生成 Token
               </Button>
               <p className="text-xs text-muted-foreground">Bearer 头：Authorization: Bearer upp_xxx</p>
+              <p className="text-xs text-muted-foreground">范围会被后端强制校验，只读 Token 不能入池或调 AI。</p>
             </CardContent>
           </Card>
 

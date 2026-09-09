@@ -113,6 +113,12 @@ func parseSS(raw string) (ParsedNode, error) {
 	if !ok {
 		return ParsedNode{}, errors.New("invalid ss auth")
 	}
+	// SIP002 permits a path segment: ss://…@host:8388/?plugin=…#name. Feeding
+	// "8388/" to Atoi failed, so every link in that (very common) form was
+	// dropped instead of imported.
+	if idx := strings.Index(endpoint, "/"); idx >= 0 {
+		endpoint = endpoint[:idx]
+	}
 	host, portStr, err := net.SplitHostPort(endpoint)
 	if err != nil {
 		return ParsedNode{}, err
@@ -133,6 +139,8 @@ func parseSS(raw string) (ParsedNode, error) {
 		"password": password,
 	}
 	copyQuery(normalized, query)
+	applySSPlugin(normalized)
+	translateShareFields(normalized)
 	if err := SanitizeProxyMap(normalized); err != nil {
 		return ParsedNode{}, err
 	}
@@ -175,6 +183,7 @@ func parseVMess(raw string) (ParsedNode, error) {
 	data["type"] = "vmess"
 	data["server"] = server
 	data["port"] = port
+	translateShareFields(data)
 	if err := SanitizeProxyMap(data); err != nil {
 		return ParsedNode{}, err
 	}
@@ -253,6 +262,7 @@ func parseSimpleURLNode(protocol, raw string) (ParsedNode, error) {
 			normalized["skip-cert-verify"] = s == "1" || s == "true"
 		}
 	}
+	translateShareFields(normalized)
 	if err := SanitizeProxyMap(normalized); err != nil {
 		return ParsedNode{}, err
 	}

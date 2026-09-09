@@ -6,13 +6,13 @@ import "sync"
 // versions are persisted to SQLite (ai_prompts table).
 
 type Prompt struct {
-	Name        string `json:"name"`                 // key, e.g. "proxy_extract"
-	Title       string `json:"title"`                // display label
+	Name        string `json:"name"`                  // key, e.g. "proxy_extract"
+	Title       string `json:"title"`                 // display label
 	Description string `json:"description,omitempty"` // UI hint
-	System      string `json:"system"`               // system-level instruction
-	User        string `json:"user,omitempty"`       // user message template
-	Default     bool   `json:"default"`              // true if unmodified built-in
-	Builtin     bool   `json:"builtin"`              // shipped with binary
+	System      string `json:"system"`                // system-level instruction
+	User        string `json:"user,omitempty"`        // user message template
+	Default     bool   `json:"default"`               // true if unmodified built-in
+	Builtin     bool   `json:"builtin"`               // shipped with binary
 }
 
 var DefaultPrompts = []Prompt{
@@ -58,7 +58,7 @@ Return ONLY a JSON array of "host:port" strings, no markdown.`,
 // PromptStore persists edited prompts. Zero value keeps prompts in memory only.
 type PromptStore struct {
 	// DB is optional; when nil, edits live in memory.
-	DB      interface {
+	DB interface {
 		Exec(query string, args ...any) (result interface {
 			RowsAffected() (int64, error)
 		}, err error)

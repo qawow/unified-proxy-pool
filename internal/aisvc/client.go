@@ -13,13 +13,17 @@ import (
 
 // Options controls a single AI chat call from the proxy-search panel.
 type Options struct {
-	URL       string // OpenAI-compatible /chat/completions endpoint
-	APIKey    string // Bearer token
-	Model     string // model id (default from endpoint)
+	URL    string // OpenAI-compatible /chat/completions endpoint
+	APIKey string // Bearer token
+	Model  string // model id (default from endpoint)
 	// Effort is off|low|medium|high|max. The old 0–10 Level is still accepted
 	// by the HTTP layer and folded into this field.
 	Effort    string
 	PromptKey string // which prompt template to use
+	// System overrides the template's system message. Without it the client
+	// always used the built-in table, so prompts edited in the panel — and any
+	// custom prompt_key — were silently ignored.
+	System    string
 	UserMsg   string // content that fills {{.Content}}
 	Timeout   time.Duration
 	MaxTokens int
@@ -71,6 +75,14 @@ func Call(ctx context.Context, opts Options) (string, error) {
 	}
 
 	prompt := defaultByName(opts.PromptKey)
+	if s := strings.TrimSpace(opts.System); s != "" {
+		prompt.System = s
+	}
+	if strings.TrimSpace(prompt.User) == "" {
+		// An unknown prompt_key yields an empty template, which would drop the
+		// caller's content entirely.
+		prompt.User = "{{.Content}}"
+	}
 	userMsg := strings.ReplaceAll(prompt.User, "{{.Content}}", opts.UserMsg)
 	userMsg = strings.ReplaceAll(userMsg, "{{.Count}}", "50")
 
