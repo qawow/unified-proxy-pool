@@ -2,6 +2,8 @@ package update
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -53,19 +55,84 @@ func TestCheckNewer(t *testing.T) {
 }
 
 func TestValidateBinary(t *testing.T) {
-	if err := validateBinary([]byte("tiny")); err == nil {
+	if err := validateBinary([]byte("tiny"), ""); err == nil {
 		t.Fatal("tiny must fail")
 	}
 	body := make([]byte, minBinaryBytes+4)
 	copy(body, []byte(elfMagic))
-	if runtimeGOOSLinux() {
-		if err := validateBinary(body); err != nil {
-			t.Fatal(err)
-		}
+	sum := sha256.Sum256(body)
+	good := hex.EncodeToString(sum[:])
+	if err := validateBinary(body, good); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBinary(body, ""); err == nil {
+		t.Fatal("missing checksum must fail")
+	}
+	if err := validateBinary(body, strings.Repeat("a", 64)); err == nil {
+		t.Fatal("checksum mismatch must fail")
 	}
 }
 
-func runtimeGOOSLinux() bool { return true }
+func TestParseChecksum(t *testing.T) {
+	want := strings.Repeat("ab", 32)
+	if got := parseChecksum("# comment\n" + want + "  unified-proxy-pool\n"); got != want {
+		t.Fatalf("parseChecksum = %q", got)
+	}
+	if got := parseChecksum("not a checksum\n"); got != "" {
+		t.Fatalf("expected empty, got %q", got)
+	}
+}
+
+// A tampered binary from the untrusted mirror must be rejected even though it
+// is a valid, large ELF file — the checksum comes from the verified channel.
+func TestPrepareRejectsTamperedBinary(t *testing.T) {
+	version.Commit = "aaa1111"
+	good := make([]byte, minBinaryBytes+16)
+	copy(good, []byte(elfMagic))
+	sum := sha256.Sum256(good)
+	tampered := make([]byte, len(good))
+	copy(tampered, good)
+	tampered[len(tampered)-1] ^= 0xff
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "version.txt"):
+			_, _ = w.Write([]byte("bbb2222deadbeef\n"))
+		case strings.HasSuffix(r.URL.Path, ".sha256"):
+			_, _ = w.Write([]byte(hex.EncodeToString(sum[:]) + "  unified-proxy-pool\n"))
+		default:
+			_, _ = w.Write(tampered)
+		}
+	}))
+	defer ts.Close()
+	s := New("owner/repo", "nightly", ts.Client(), nil)
+	s.baseURL = ts.URL
+	if _, err := s.Prepare(context.Background()); err == nil {
+		t.Fatal("expected checksum mismatch, got nil")
+	} else if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// No checksum published → refuse rather than install unverified bytes.
+func TestPrepareRefusesWithoutChecksum(t *testing.T) {
+	version.Commit = "aaa1111"
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "version.txt") {
+			_, _ = w.Write([]byte("bbb2222deadbeef\n"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+	s := New("owner/repo", "nightly", ts.Client(), nil)
+	s.baseURL = ts.URL
+	if _, err := s.Prepare(context.Background()); err == nil {
+		t.Fatal("expected refusal without checksum")
+	} else if !strings.Contains(err.Error(), "checksum unavailable") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
 func TestWriteReplace(t *testing.T) {
 	dir := t.TempDir()

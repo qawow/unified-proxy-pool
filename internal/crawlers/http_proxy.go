@@ -18,15 +18,32 @@ import (
 //	http(s)://…   — HTTP CONNECT proxy
 //	socks5://…    — SOCKS5 (used for clash mixed-port / VPS)
 func NewHTTPClientWithProxy(timeout time.Duration, proxyRaw string) *HTTPClient {
+	return newProxyClient(timeout, proxyRaw, true)
+}
+
+// NewVerifiedHTTPClientWithProxy is NewHTTPClientWithProxy with certificate
+// verification left ON. Scraped proxy lists are low-trust data, so the plain
+// constructor tolerates the broken certificates free proxies hand out; anything
+// whose *integrity matters* (release binaries, checksums) must use this one so
+// the untrusted exit node only ever sees an opaque CONNECT tunnel.
+func NewVerifiedHTTPClientWithProxy(timeout time.Duration, proxyRaw string) *HTTPClient {
+	return newProxyClient(timeout, proxyRaw, false)
+}
+
+func newProxyClient(timeout time.Duration, proxyRaw string, insecure bool) *HTTPClient {
 	if timeout <= 0 {
 		timeout = 20 * time.Second
+	}
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if insecure {
+		tlsCfg.InsecureSkipVerify = true //nolint:gosec // free-proxy lists are served over broken TLS
 	}
 	transport := &http.Transport{
 		ForceAttemptHTTP2: false,
 		DialContext: (&net.Dialer{
 			Timeout: 6 * time.Second,
 		}).DialContext,
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		TLSClientConfig:       tlsCfg,
 		MaxIdleConns:          32,
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   8 * time.Second,
