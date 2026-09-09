@@ -777,7 +777,11 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 			// reused, or stickiness would quietly defeat the ban.
 			if !s.channelBanned(channel, addr) {
 				start := time.Now()
-				wired := s.withVia([]freproxies.Proxy{up})
+				wired, werr := s.withVia([]freproxies.Proxy{up})
+				if werr != nil {
+					// Fail closed, same as the main path below.
+					return nil, freproxies.Proxy{}, werr
+				}
 				if conn, err := dialProxyChainPool(ctx, wired, target, s.getViaPool()); err == nil {
 					s.recordChannel(channel, addr, true, 0, "", time.Since(start).Milliseconds())
 					return conn, lastHop(wired, up), nil
@@ -793,7 +797,13 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 	var lastErr error
 	for _, up := range upstreams {
 		start := time.Now()
-		wired := s.withVia([]freproxies.Proxy{up})
+		wired, werr := s.withVia([]freproxies.Proxy{up})
+		if werr != nil {
+			// Fail closed: exit_via is set but unusable. Do not dial `up` at
+			// all — that would send the client out bare while the panel claims
+			// a VPS front is in place.
+			return nil, freproxies.Proxy{}, werr
+		}
 		conn, err := dialProxyChainPool(ctx, wired, target, s.getViaPool())
 		if err == nil {
 			if stickyOn && clientIP != "" {
@@ -806,10 +816,16 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 			return conn, lastHop(wired, up), nil
 		}
 		lastErr = err
-		_ = s.free.Store().MarkValidated(ctx, up.Addr, 0, false)
-		// Global score already took the hit above; this records that the failure
-		// happened against *this* destination, which is what scopes the ban.
-		s.recordChannel(channel, up.Addr, false, 0, errTag(err), 0)
+		// With exit_via configured, `wired` is [VPS, up]: a dead VPS fails every
+		// attempt, and scoring `up` for it walked the whole pool down one proxy
+		// per request. Only penalise `up` when `up` is what failed.
+		blame, ok := culpritHop(err)
+		if !ok || blame.Addr == up.Addr {
+			_ = s.free.Store().MarkValidated(ctx, up.Addr, 0, false)
+			// Global score already took the hit above; this records that the failure
+			// happened against *this* destination, which is what scopes the ban.
+			s.recordChannel(channel, up.Addr, false, 0, errTag(err), 0)
+		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("all upstreams failed")
@@ -895,15 +911,26 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 		// that destination's bans. Filtering every hop would starve the chain over
 		// relay proxies the target never sees.
 		hops = s.avoidBannedExit(hops, rotated, channel)
-		wired := s.withVia(hops)
+		wired, werr := s.withVia(hops)
+		if werr != nil {
+			// Fail closed: exit_via is set but unusable — do not dial the pool
+			// direct, the panel claims a VPS front is in place.
+			return nil, nil, werr
+		}
 		conn, err := dialProxyChainPool(dialCtx, wired, target, s.getViaPool())
 		if err == nil {
 			return conn, wired, nil
 		}
 		lastErr = err
-		_ = s.free.Store().MarkValidated(dialCtx, hops[0].Addr, 0, false)
-		if s.free.Hot() != nil {
-			s.free.Hot().Invalidate(hops[0].Addr)
+		// Score the hop that actually broke. Blaming hops[0] unconditionally
+		// deleted healthy entry proxies while the failing hop kept ScoreMax and
+		// was picked again on the next attempt. The via/VPS hop is user config,
+		// not a pool member, so it is never scored here.
+		if blame, ok := culpritHop(err); ok && blame.Source != "exit_via" && blame.Addr != "" {
+			_ = s.free.Store().MarkValidated(dialCtx, blame.Addr, 0, false)
+			if s.free.Hot() != nil {
+				s.free.Hot().Invalidate(blame.Addr)
+			}
 		}
 		// Deliberately not recorded against the channel: a chain that failed to
 		// build never reached the destination, so there is nothing to attribute to

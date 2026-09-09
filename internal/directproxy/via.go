@@ -26,14 +26,19 @@ func ParseViaProxy(raw string) (freproxies.Proxy, error) {
 	}
 	proto := strings.ToLower(u.Scheme)
 	switch proto {
-	case "socks", "socks4", "socks5", "http", "https":
-		if proto == "socks" || proto == "https" {
-			if proto == "https" {
-				proto = "http"
-			} else {
-				proto = "socks5"
-			}
-		}
+	case "http", "socks4", "socks5":
+	case "socks", "socks5h":
+		proto = "socks5"
+	case "https":
+		// "https://" as a *proxy* scheme means the hop to the proxy is itself
+		// wrapped in TLS — not the same thing as an HTTP proxy carrying https via
+		// CONNECT. Nothing here implements it: dialFast opens a bare TCP conn and
+		// httpConnectOver writes a plaintext CONNECT. Rewriting the scheme to
+		// "http" (which this used to do) meant a user who asked for TLS to their
+		// VPS silently got cleartext, credentials included.
+		return freproxies.Proxy{}, fmt.Errorf(
+			"exit_via: https:// (TLS to the proxy) is not supported; " +
+				"use http:// or socks5:// — the tunnel inside is encrypted either way")
 	default:
 		return freproxies.Proxy{}, fmt.Errorf("exit_via: unsupported scheme %q", u.Scheme)
 	}
@@ -135,15 +140,26 @@ func (s *Server) rebuildViaPool() {
 	s.mu.Unlock()
 }
 
-func (s *Server) withVia(hops []freproxies.Proxy) []freproxies.Proxy {
+// withVia inserts the configured VPS hop. It fails closed: when exit_via is set
+// but unusable, the dial must not proceed.
+//
+// Returning the bare hop list on a parse error (which this used to do) meant a
+// single typo in exit_via sent traffic straight out through the free proxies
+// while the panel still displayed "本机 → VPS → …". Someone relying on the VPS
+// as their front would have no signal that it had been bypassed — the same
+// silent-leak shape as a VPN tunnel dropping without a kill switch.
+func (s *Server) withVia(hops []freproxies.Proxy) ([]freproxies.Proxy, error) {
 	opts := s.GetChainOptions()
 	raw := strings.TrimSpace(opts.ExitVia)
 	if raw == "" {
-		return hops
+		return hops, nil
 	}
 	via, err := ParseViaProxy(raw)
-	if err != nil || via.Addr == "" {
-		return hops
+	if err != nil {
+		return nil, err
 	}
-	return attachVia(hops, via, opts.ExitViaMode)
+	if via.Addr == "" {
+		return nil, fmt.Errorf("exit_via %q resolved to no address", raw)
+	}
+	return attachVia(hops, via, opts.ExitViaMode), nil
 }

@@ -49,8 +49,34 @@ func TestAttachViaExitAndEntry(t *testing.T) {
 func TestWithViaEmptyIsNoop(t *testing.T) {
 	s := &Server{}
 	in := []freproxies.Proxy{{Addr: "1.1.1.1:80"}}
-	out := s.withVia(in)
+	out, err := s.withVia(in)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(out) != 1 || out[0].Addr != "1.1.1.1:80" {
 		t.Fatalf("%+v", out)
+	}
+}
+
+// An https:// exit_via must not silently become plaintext http: nothing in this
+// codebase wraps the proxy hop in TLS, so the scheme has to be refused.
+func TestParseViaProxyRejectsHTTPS(t *testing.T) {
+	if _, err := ParseViaProxy("https://user:pass@198.51.100.7:8443"); err == nil {
+		t.Fatal("https:// exit_via should be rejected, not rewritten to http")
+	}
+}
+
+// A configured-but-broken exit_via must fail closed. Dropping the via hop on
+// error sends traffic out bare while the panel still shows the VPS front.
+func TestWithViaFailsClosedOnBadExitVia(t *testing.T) {
+	s := &Server{}
+	s.SetChainOptions(ChainOptions{ExitVia: "https://203.0.113.9:8443"})
+	in := []freproxies.Proxy{{Addr: "1.1.1.1:80"}}
+	out, err := s.withVia(in)
+	if err == nil {
+		t.Fatalf("https:// exit_via must surface an error, got hops %+v", out)
+	}
+	if out != nil {
+		t.Fatalf("fail-closed must return no hops, got %+v", out)
 	}
 }

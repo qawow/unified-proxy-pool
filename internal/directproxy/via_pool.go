@@ -136,14 +136,25 @@ func (p *viaPool) dialReady(ctx context.Context) (net.Conn, error) {
 		return nil, err
 	}
 	proto := strings.ToLower(p.hop.Protocol)
-	if proto == "socks5" || proto == "socks" || proto == "socks4" {
+	switch proto {
+	case "socks5", "socks":
 		if err := socks5Handshake(raw, p.hop.Username, p.hop.Password); err != nil {
 			_ = raw.Close()
 			return nil, err
 		}
 		return &socksAuthed{Conn: raw}, nil
+	case "socks4", "socks4a":
+		// SOCKS4 has no separate handshake — the CONNECT request *is* the first
+		// thing on the wire. Sending the SOCKS5 method frame to a SOCKS4 endpoint
+		// desynchronises it, so every connection through a socks4 front died at
+		// the first hop. Hand back the raw conn and let tunnelThrough dispatch to
+		// socks4ConnectOver; wrapping it in socksAuthed would also make
+		// tunnelThrough skip a handshake it still needs for socks5.
+		return raw, nil
+	default:
+		// HTTP forward proxy is just a plain TCP connection until CONNECT.
+		return raw, nil
 	}
-	return raw, nil
 }
 
 func (p *viaPool) loop() {

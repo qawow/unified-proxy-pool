@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -210,13 +211,38 @@ func socks5ConnectCmd(conn net.Conn, target string) (net.Conn, error) {
 // dialProxyChain connects: client path TCP→hop0→hop1→...→target
 // hops must be non-empty; length 1 is single-hop.
 
+// chainDialError names the hop that actually broke.
+//
+// Without it the caller cannot tell a failure at hop 2 from a failure at hop 0,
+// and dialChainWithFailover blamed hops[0] for every one of them: the entry
+// proxy lost score and was eventually deleted while the hop that really failed
+// kept ScoreMax and stayed in rotation to break the next chain too.
+type chainDialError struct {
+	Hop freproxies.Proxy
+	msg string
+	Err error
+}
+
+func (e *chainDialError) Error() string { return e.msg + ": " + e.Err.Error() }
+func (e *chainDialError) Unwrap() error { return e.Err }
+
+// culpritHop reports which hop caused err, when err came from chain dialling.
+func culpritHop(err error) (freproxies.Proxy, bool) {
+	var ce *chainDialError
+	if errors.As(err, &ce) {
+		return ce.Hop, true
+	}
+	return freproxies.Proxy{}, false
+}
+
 func dialProxyChainPool(ctx context.Context, hops []freproxies.Proxy, target string, pool *viaPool) (net.Conn, error) {
 	if len(hops) == 0 {
 		return nil, fmt.Errorf("empty chain")
 	}
 	conn, err := dialEntry(ctx, hops[0], pool)
 	if err != nil {
-		return nil, fmt.Errorf("dial entry %s: %w", hops[0].Addr, err)
+		return nil, &chainDialError{Hop: hops[0], Err: err,
+			msg: fmt.Sprintf("dial entry %s", hops[0].Addr)}
 	}
 
 	// Through hop i, reach hop i+1
@@ -224,14 +250,16 @@ func dialProxyChainPool(ctx context.Context, hops []freproxies.Proxy, target str
 		next := hops[i+1].Addr
 		conn, err = tunnelThrough(conn, hops[i], next)
 		if err != nil {
-			return nil, fmt.Errorf("chain hop %d (%s -> %s): %w", i, hops[i].Addr, next, err)
+			return nil, &chainDialError{Hop: hops[i], Err: err,
+				msg: fmt.Sprintf("chain hop %d (%s -> %s)", i, hops[i].Addr, next)}
 		}
 	}
 	// Through last hop, reach final target
 	last := hops[len(hops)-1]
 	conn, err = tunnelThrough(conn, last, target)
 	if err != nil {
-		return nil, fmt.Errorf("chain exit %s -> %s: %w", last.Addr, target, err)
+		return nil, &chainDialError{Hop: last, Err: err,
+			msg: fmt.Sprintf("chain exit %s -> %s", last.Addr, target)}
 	}
 	return conn, nil
 }
