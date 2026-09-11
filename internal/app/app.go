@@ -229,6 +229,9 @@ func Run() {
 	if err := direct.Start(rootCtx); err != nil {
 		log.Printf("directproxy start skipped: %v", err)
 	}
+	// Validation probes must traverse the same front node (exit_via) as client
+	// traffic, or the pool fills with proxies that only work from this host.
+	freeSvc.SetProbeFront(direct.ProbeFront, direct.ChainProbeDial)
 
 	subSvc.SetAfterSyncHook(func(ctx context.Context, subscriptionID int64, nodeIDs []int64) {
 		_ = subscriptionID

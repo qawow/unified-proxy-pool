@@ -1,6 +1,7 @@
 package directproxy
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
@@ -111,6 +112,89 @@ func (s *Server) getViaPool() *viaPool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.viaPool
+}
+
+// viaConfig parses the configured front node once per dial round. ok is false
+// when no via is set or it does not parse (the fail-closed error path in
+// withVia handles the misconfigured case before any dial happens).
+func (s *Server) viaConfig() (via freproxies.Proxy, ok bool) {
+	opts := s.GetChainOptions()
+	if strings.TrimSpace(opts.ExitVia) == "" {
+		return freproxies.Proxy{}, false
+	}
+	via, err := ParseViaProxy(opts.ExitVia)
+	if err != nil || via.Addr == "" {
+		return freproxies.Proxy{}, false
+	}
+	return via, true
+}
+
+// viaReachable re-checks the front node on a failure path. It runs on a fresh
+// context: the dial context may be at its deadline exactly when we need this
+// answer, and an expired ctx would falsely report the front as dead.
+func viaReachable(via freproxies.Proxy) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), viaDialTimeout)
+	defer cancel()
+	c, err := dialFast(ctx, via.Addr)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
+// frontFailure re-attributes a chain dial error when the real culprit is a dead
+// front node, returning nil when the failure genuinely belongs to a pool hop.
+//
+// Entry mode blames the via hop directly (Source == "exit_via"), but without a
+// liveness re-check a single stale warm connection would mark the front down.
+// Exit mode is the dangerous case: the VPS is the CONNECT *target* of the last
+// pool hop, so a dead VPS surfaces as a failure blamed on that hop — scoring it
+// would flush the whole pool for an outage that belongs to the VPS.
+func frontFailure(via freproxies.Proxy, err error) error {
+	if _, ok := culpritHop(err); !ok {
+		return nil
+	}
+	if viaReachable(via) {
+		return nil
+	}
+	return &freproxies.FrontError{Err: err}
+}
+
+// ProbeFront exposes the configured exit_via to the validator. The probe must
+// traverse the same front node as client traffic: a proxy reachable from this
+// host but unreachable from the VPS is dead for every chain user, and the
+// reverse is a proxy direct probing would wrongly bury.
+func (s *Server) ProbeFront() *freproxies.ProbeFront {
+	opts := s.GetChainOptions()
+	raw := strings.TrimSpace(opts.ExitVia)
+	if raw == "" {
+		return nil
+	}
+	via, err := ParseViaProxy(raw)
+	if err != nil {
+		return &freproxies.ProbeFront{Err: err}
+	}
+	if via.Addr == "" {
+		return &freproxies.ProbeFront{Err: fmt.Errorf("exit_via %q resolved to no address", raw)}
+	}
+	return &freproxies.ProbeFront{Hop: via, Mode: opts.ExitViaMode}
+}
+
+// ChainProbeDial satisfies freproxies.ChainDialer with the production chain
+// dialer. A failure owned by the front node is wrapped so the validator does
+// not blame the candidate for a dead VPS.
+func (s *Server) ChainProbeDial(ctx context.Context, hops []freproxies.Proxy, target string) (net.Conn, error) {
+	conn, err := dialProxyChainPool(ctx, hops, target, s.getViaPool())
+	if err != nil {
+		if via, ok := s.viaConfig(); ok {
+			if fe := frontFailure(via, err); fe != nil {
+				return nil, fe
+			}
+		}
+		return nil, err
+	}
+	return conn, nil
 }
 
 func (s *Server) ViaPoolStats() map[string]any {

@@ -1,3 +1,42 @@
+## Unreleased — 2026-09-11 · 探测经前置节点
+
+把校验探测接到和客户端流量同一条路上，并补上 exit 模式下残留的误归因漏洞；CI 消除 Node 20 弃用告警。
+**行为有变化的地方标了「影响」。**
+
+### 代理池质量
+- **校验探测现在经过配置的前置节点（`exit_via`）**：以前验证器从本机直连候选代理，和客户端实际走的
+  「本机 → VPS → 代理 → 目标」不是同一条路 —— 从本机通但从 VPS 不通的代理被标绿进池，
+  从 VPS 才通的代理被误埋。现在配了 `exit_via` 时，探测复用生产链式拨号器
+  （directproxy 注册进 freproxies，避免第二份拨号实现日后漂移）：entry 模式按 `[VPS → 候选]`、
+  exit 模式按 `[候选 → VPS]` 探测，候选的 CONNECT 能力顺带被真实验证（探测本身就要它完成 CONNECT）。
+  没配 `exit_via` 时行为不变（本机直连探测）。
+- **前置节点故障不误杀池子、也不打满容错**：新增 `ErrFrontUnavailable` / `FrontError`。
+  失败先按跳归因；exit 模式下 VPS 是 CONNECT 的*目标*，它的死会被误记到「发言」那一跳头上，
+  因此扣分前再对 VPS 做一次 TCP 活性复查。确认是前置的问题后：探测跳过不计分
+  （候选保持原分数与位置），并进入 30s 冷却，避免整批候选逐条重拨一个死 VPS；
+  生产拨号（单跳/链式）同样直接返回错误，不再把剩余候选逐个试完。
+- **修掉 exit 模式的误归因漏洞**：上一轮的「VPS 挂了不洗池」只覆盖 entry 模式；
+  exit 模式下死 VPS 表现为「最后一个池内跳 CONNECT 失败」，仍会按请求速率清空池子。
+  现在两条生产路径与探测路径统一在扣分前复查 VPS 活性。
+
+### 测试
+- 新增 21 个测试：探测链 hop 顺序（entry/exit）、`FrontError` 语义、前置死/候选死/配置坏三种失败的
+  所有权归属、探测全链路（前置收到对候选的 CONNECT、候选收到对 origin 的 CONNECT、隧道字节回读）、
+  候选失败照常计分（raw 失败即删）、冷却期内不重拨前置、接线 fail-closed，
+  以及此前无覆盖的链式选路：热缓存窗口的 host/地区去重、入口/出口协议与地区位置约束、
+  `uniqueHops` / `applyEntryExitPrefs`。
+
+### CI
+- GitHub Actions 全部升到 Node 24 原生版本：`checkout@v7`、`setup-node@v7`、`setup-go@v7`、
+  `upload-artifact@v7`、`docker/setup-buildx-action@v4`、`docker/login-action@v4`、
+  `docker/build-push-action@v7`。各版本的破坏性变更（fork PR 检出限制、废弃输入移除等）
+  均不涉及本仓库用法；Node 20 弃用告警消除。
+
+### 已知缺口
+- 未配置 `exit_via` 时，校验仍只证明「能转发」，不单独证明「能当链式中继」（CONNECT）。
+  report API 路径同样可能绕过。链式场景建议配置 `exit_via`（探测即真实 CONNECT），
+  否则仍靠拨号失败扣分兜底。
+
 ## Unreleased — 2026-09-10 · 链式失败归因与前置代理
 
 接着上一轮审计，把链式代理（`:7893`）与前置代理（`exit_via`）里三类会自己扩散的问题修掉。

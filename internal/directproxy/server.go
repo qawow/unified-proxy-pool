@@ -816,6 +816,14 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 			return conn, lastHop(wired, up), nil
 		}
 		lastErr = err
+		// A dead front node must stop the loop, not walk it: exit mode surfaces
+		// the dead VPS as a failed CONNECT at `up`, and scoring `up` for it
+		// walks the whole pool down one proxy per request.
+		if via, ok := s.viaConfig(); ok {
+			if fe := frontFailure(via, err); fe != nil {
+				return nil, freproxies.Proxy{}, fe
+			}
+		}
 		// With exit_via configured, `wired` is [VPS, up]: a dead VPS fails every
 		// attempt, and scoring `up` for it walked the whole pool down one proxy
 		// per request. Only penalise `up` when `up` is what failed.
@@ -922,6 +930,14 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 			return conn, wired, nil
 		}
 		lastErr = err
+		// Stop early when the failure is really the front node's: with a dead
+		// VPS every remaining attempt fails the same way (and in exit mode each
+		// would be mis-blamed on the hop that spoke the CONNECT).
+		if via, ok := s.viaConfig(); ok {
+			if fe := frontFailure(via, err); fe != nil {
+				return nil, nil, fe
+			}
+		}
 		// Score the hop that actually broke. Blaming hops[0] unconditionally
 		// deleted healthy entry proxies while the failing hop kept ScoreMax and
 		// was picked again on the next attempt. The via/VPS hop is user config,

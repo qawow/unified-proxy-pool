@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"unified-proxy-pool/internal/crawlers"
@@ -37,9 +38,14 @@ type Service struct {
 	picks           *pickState
 	geoQueue        chan string
 	hot             *HotCache
-	overviewMu      sync.Mutex
-	overviewCache   Overview
-	overviewAt      time.Time
+	// probeHooks routes validation through the chain's front node (exit_via).
+	// Atomic because the validator's workers read it while web handlers can
+	// rewire it at runtime.
+	probe         atomic.Pointer[probeHooks]
+	frontDown     atomic.Int64 // unixnano deadline while the front is believed down
+	overviewMu    sync.Mutex
+	overviewCache Overview
+	overviewAt    time.Time
 }
 
 func NewService(store Store, registry *crawlers.Registry, broker *events.Broker, redisOK bool) *Service {
@@ -138,6 +144,76 @@ func (s *Service) SetPickDefaults(strategy string, cooldown time.Duration) {
 	}
 	if s.picks != nil && cooldown >= 0 {
 		s.picks.setCooldown(cooldown)
+	}
+}
+
+type probeHooks struct {
+	front ProbeFrontProvider
+	dial  ChainDialer
+}
+
+// SetProbeFront routes validation probes through the chain's configured front
+// node (exit_via). A proxy reachable from this host but unreachable from the
+// VPS is dead for every chain user — and the reverse is a proxy direct probing
+// would wrongly bury. Both nil (or never called) restores direct probing.
+func (s *Service) SetProbeFront(provider ProbeFrontProvider, dialer ChainDialer) {
+	if s == nil {
+		return
+	}
+	if provider == nil || dialer == nil {
+		s.probe.Store(nil)
+		return
+	}
+	s.probe.Store(&probeHooks{front: provider, dial: dialer})
+}
+
+// probeFrontDownCooldown bounds how long probes short-circuit after the front
+// node failed. Without it a dead VPS would be re-dialled once per candidate —
+// 400 candidates × a 12s tunnel deadline is a batch that never finishes.
+const probeFrontDownCooldown = 30 * time.Second
+
+// errProbeFrontCooldown is the FrontError probes fail with while the front-down
+// cooldown window is still running.
+var errProbeFrontCooldown = errors.New("front node failed recently (cooldown)")
+
+// currentProbePlan resolves the front node for this probe round. A configured
+// but broken front yields an error — the caller fails closed without blaming
+// the candidate.
+func (s *Service) currentProbePlan() (*probePlan, error) {
+	if s == nil {
+		return nil, nil
+	}
+	hooks := s.probe.Load()
+	if hooks == nil {
+		return nil, nil
+	}
+	f := hooks.front()
+	if f == nil {
+		return nil, nil // no front configured: probe direct
+	}
+	if f.Err != nil {
+		// Misconfiguration gets no cooldown: the panel can fix it at any moment.
+		return nil, &FrontError{Err: f.Err}
+	}
+	if f.Hop.Addr == "" {
+		return nil, nil
+	}
+	if until := s.frontDown.Load(); until > 0 && time.Now().UnixNano() < until {
+		return nil, &FrontError{Err: errProbeFrontCooldown}
+	}
+	return &probePlan{front: f.Hop, mode: f.Mode, dial: hooks.dial}, nil
+}
+
+// noteProbeFront arms (or, on success, clears) the front-down cooldown, so a
+// dead VPS fails one probe per window instead of one per candidate.
+func (s *Service) noteProbeFront(down bool) {
+	if s == nil {
+		return
+	}
+	if down {
+		s.frontDown.Store(time.Now().Add(probeFrontDownCooldown).UnixNano())
+	} else {
+		s.frontDown.Store(0)
 	}
 }
 
@@ -659,6 +735,13 @@ func (s *Service) TestProxyURLs(ctx context.Context, addr string, validateURLs [
 	if len(validateURLs) == 0 {
 		validateURLs = []string{""}
 	}
+	// A configured front node (exit_via) applies to probes exactly as it does to
+	// client traffic: fail closed when it is unusable, and never bill the
+	// candidate for the front's outage.
+	plan, planErr := s.currentProbePlan()
+	if planErr != nil {
+		return p, planErr
+	}
 	var latency int64
 	okResult := false
 	for _, u := range validateURLs {
@@ -668,10 +751,18 @@ func (s *Service) TestProxyURLs(ctx context.Context, addr string, validateURLs [
 		// Each URL gets its own budget; sharing one deadline left the later URLs
 		// a sliver of time and turned them into guaranteed failures.
 		attemptCtx, cancel := context.WithTimeout(ctx, timeout+2*time.Second)
-		latency, okResult = checkHTTPProxy(attemptCtx, p, u, timeout)
+		var checkErr error
+		latency, okResult, checkErr = checkHTTPProxyPlan(attemptCtx, p, u, timeout, plan)
 		cancel()
 		if okResult {
+			s.noteProbeFront(false)
 			break
+		}
+		if errors.Is(checkErr, ErrFrontUnavailable) {
+			// The front node is down: every URL fails the same way, and none of
+			// it is the candidate's fault — no MarkValidated, no delete.
+			s.noteProbeFront(true)
+			return p, checkErr
 		}
 	}
 	if !okResult && ctx.Err() != nil {

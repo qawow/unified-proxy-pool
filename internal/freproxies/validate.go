@@ -3,6 +3,7 @@ package freproxies
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,60 @@ import (
 
 	"unified-proxy-pool/internal/netutil"
 )
+
+// ChainDialer opens target through the given hops, speaking each hop's own
+// protocol. directproxy registers the production chain dialer here, so a probe
+// exercises exactly the path a client would take — a second implementation
+// would drift and then probe and production would disagree about what works.
+type ChainDialer func(ctx context.Context, hops []Proxy, target string) (net.Conn, error)
+
+// ProbeFront is the fixed front node (exit_via) a validation probe must
+// traverse before it reaches the candidate. Err is non-nil when a front is
+// configured but unusable: the probe then fails closed, and the failure
+// belongs to the front, never to the candidate.
+type ProbeFront struct {
+	Hop  Proxy
+	Mode string // "entry": front first; "exit": front last
+	Err  error
+}
+
+// ProbeFrontProvider reports the live front-node configuration. Returning nil
+// means no front is configured and probes dial the candidate directly.
+type ProbeFrontProvider func() *ProbeFront
+
+// ErrFrontUnavailable marks a failure owned by the configured front node
+// (exit_via) rather than by the pool proxy under test. Like ErrCheckAborted it
+// must not be recorded as a candidate failure: a dead VPS says nothing about
+// the proxies behind it.
+var ErrFrontUnavailable = errors.New("exit_via front node unavailable")
+
+// FrontError wraps a dial failure caused by the front node.
+type FrontError struct{ Err error }
+
+func (e *FrontError) Error() string { return ErrFrontUnavailable.Error() + ": " + e.Err.Error() }
+func (e *FrontError) Unwrap() error { return e.Err }
+func (e *FrontError) Is(target error) bool {
+	return target == ErrFrontUnavailable
+}
+
+// probePlan routes one validation probe through the configured front node, so
+// the checked path is the chain clients actually dial. A nil plan probes the
+// candidate directly.
+type probePlan struct {
+	front Proxy
+	mode  string
+	dial  ChainDialer
+}
+
+// hops orders the chain the way production does: entry mode reaches the
+// candidate through the front, exit mode reaches the front through the
+// candidate.
+func (plan probePlan) hops(p Proxy) []Proxy {
+	if strings.EqualFold(plan.mode, "exit") {
+		return []Proxy{p, plan.front}
+	}
+	return []Proxy{plan.front, p}
+}
 
 // CheckProxy runs the pool's own liveness check against a single proxy and
 // returns its latency in milliseconds plus whether it worked.
@@ -41,26 +96,34 @@ func CheckProxy(ctx context.Context, p Proxy, validateURL string, timeout time.D
 var canaryURL = "https://cp.cloudflare.com/generate_204"
 
 func checkHTTPProxy(ctx context.Context, p Proxy, validateURL string, timeout time.Duration) (int64, bool) {
+	latency, ok, _ := checkHTTPProxyPlan(ctx, p, validateURL, timeout, nil)
+	return latency, ok
+}
+
+// checkHTTPProxyPlan is checkHTTPProxy plus front-node routing and error
+// visibility. The error distinguishes "the candidate failed" from "the front
+// node failed" (ErrFrontUnavailable) — the two must not cost the same score.
+func checkHTTPProxyPlan(ctx context.Context, p Proxy, validateURL string, timeout time.Duration, plan *probePlan) (int64, bool, error) {
 	if validateURL == "" {
 		validateURL = "http://httpbin.org/ip"
 	}
 	if timeout <= 0 {
 		timeout = 8 * time.Second
 	}
-	latency, ok := fetchThrough(ctx, p, validateURL, timeout, tlsVerifiedFor(validateURL))
+	latency, ok, err := fetchThrough(ctx, p, validateURL, timeout, tlsVerifiedFor(validateURL), plan)
 	if !ok {
-		return latency, false
+		return latency, false, err
 	}
 	// A plaintext validate URL proves nothing on its own — the proxy sees the
 	// whole exchange and can fabricate any status it likes. Make it prove itself
 	// over a channel it cannot forge. An HTTPS validate URL is already that
 	// proof, so skip the extra round trip.
 	if isPlaintextURL(validateURL) {
-		if _, ok := fetchThrough(ctx, p, canaryURL, timeout, true); !ok {
-			return latency, false
+		if _, ok, err := fetchThrough(ctx, p, canaryURL, timeout, true, plan); !ok {
+			return latency, false, err
 		}
 	}
-	return latency, true
+	return latency, true, nil
 }
 
 // tlsVerifiedFor reports whether certificate verification should be enforced for
@@ -76,7 +139,7 @@ func isPlaintextURL(rawURL string) bool {
 	return !strings.EqualFold(u.Scheme, "https")
 }
 
-func fetchThrough(ctx context.Context, p Proxy, target string, timeout time.Duration, verifyTLS bool) (int64, bool) {
+func fetchThrough(ctx context.Context, p Proxy, target string, timeout time.Duration, verifyTLS bool, plan *probePlan) (int64, bool, error) {
 	proxyURL := &url.URL{
 		Scheme: "http",
 		Host:   p.Addr,
@@ -102,7 +165,16 @@ func fetchThrough(ctx context.Context, p Proxy, target string, timeout time.Dura
 		TLSClientConfig:   &tls.Config{InsecureSkipVerify: !verifyTLS, MinVersion: tls.VersionTLS12}, //nolint:gosec
 		DisableKeepAlives: true,
 	}
-	if socks4 {
+	switch {
+	case plan != nil:
+		// Chain probe: the dialer already speaks every hop's protocol (the
+		// candidate's included), so the transport must not layer its own proxy
+		// handling on top — Proxy stays nil and dialling is the chain.
+		transport.Proxy = nil
+		transport.DialContext = func(cctx context.Context, _, addr string) (net.Conn, error) {
+			return plan.dial(cctx, plan.hops(p), addr)
+		}
+	case socks4:
 		// net/http has no SOCKS4 support, so tunnel every dial ourselves and
 		// leave Proxy unset. Without this, socks4 lists could never validate.
 		addr := p.Addr
@@ -123,14 +195,14 @@ func fetchThrough(ctx context.Context, p Proxy, target string, timeout time.Dura
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return 0, false
+		return 0, false, err
 	}
 	netutil.ApplyDefaultHeaders(req.Header)
 	start := time.Now()
 	resp, err := client.Do(req)
 	latency := time.Since(start).Milliseconds()
 	if err != nil {
-		return latency, false
+		return latency, false, err
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
@@ -139,9 +211,9 @@ func fetchThrough(ctx context.Context, p Proxy, target string, timeout time.Dura
 	// forbidden" block page was recorded as a working proxy — it reached the
 	// pool and then failed for every real request.
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return latency, true
+		return latency, true, nil
 	}
 	// 3xx is only meaningful if the client stopped following redirects, which
 	// happens for the "too many redirects" guard above; treat it as a failure.
-	return latency, false
+	return latency, false, fmt.Errorf("probe status %d", resp.StatusCode)
 }

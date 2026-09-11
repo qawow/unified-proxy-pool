@@ -350,6 +350,12 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 				DefaultLogs.Add("skip", p.Addr, "本轮超时未测", p.Source, 0)
 				return
 			}
+			if errors.Is(lastErr, freproxies.ErrFrontUnavailable) {
+				// exit_via is down or misconfigured: the candidate never got
+				// tested, so it keeps its score and its place in the pool.
+				DefaultLogs.Add("skip", p.Addr, "前置节点不可用，未探测", p.Source, 0)
+				return
+			}
 			mu.Lock()
 			kind := classifyValidateErr(lastErr)
 			if okResult {
