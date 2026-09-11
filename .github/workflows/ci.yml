@@ -47,6 +47,10 @@ jobs:
       - name: Go test (race)
         run: go test -race -count=1 ./...
       - name: govulncheck
+        # setup-go pins GOTOOLCHAIN=local, but govulncheck@latest can require a
+        # newer Go than go.mod's — let this one step fetch the toolchain it needs.
+        env:
+          GOTOOLCHAIN: auto
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           "$(go env GOPATH)/bin/govulncheck" ./...
