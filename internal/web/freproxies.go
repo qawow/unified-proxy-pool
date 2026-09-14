@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"sort"
@@ -382,7 +383,7 @@ func (a *App) handleFreeProxyTest(w http.ResponseWriter, r *http.Request) {
 			Addr  string `json:"addr"`
 			Proxy string `json:"proxy"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewDecoder(io.LimitReader(r.Body, maxJSONBody)).Decode(&body)
 		if body.Addr != "" {
 			addr = body.Addr
 		} else if body.Proxy != "" {
@@ -561,15 +562,31 @@ func (a *App) handlePublicSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var proxies []freproxies.Proxy
+	rejected := 0
 	for _, line := range strings.Split(string(body), "\n") {
 		p := parseAddrLine(strings.TrimSpace(line))
-		if p.Host != "" {
-			proxies = append(proxies, p)
+		if p.Host == "" {
+			continue
 		}
+		// This endpoint is unauthenticated, so the submitter can name any host.
+		// A private target would put the panel's LAN inside the pool and get it
+		// probed by the validator and dialed by chain traffic.
+		if isPrivateSubmitTarget(p.Host) {
+			rejected++
+			continue
+		}
+		proxies = append(proxies, p)
 	}
 	if len(proxies) == 0 {
-		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "no valid addresses found"})
+		msg := "no valid addresses found"
+		if rejected > 0 {
+			msg = fmt.Sprintf("all %d submitted address(es) target private/internal ranges, which the public submit endpoint does not accept", rejected)
+		}
+		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: msg})
 		return
+	}
+	if rejected > 0 {
+		log.Printf("public submit: dropped %d address(es) targeting private ranges", rejected)
 	}
 
 	source := strings.TrimSpace(r.URL.Query().Get("source"))
@@ -582,6 +599,25 @@ func (a *App) handlePublicSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: submitPayload(res, len(proxies))})
+}
+
+// isPrivateSubmitTarget rejects submissions that target internal ranges. The
+// pool's whole purpose is public egress, and an unauthenticated submitter has no
+// business naming the LAN: the validator would then scan it, and chain traffic
+// would dial it.
+func isPrivateSubmitTarget(host string) bool {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
+	}
+	if addrs, err := net.LookupHost(host); err == nil {
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil && (ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseAddrLine converts a single text line into a Proxy.
@@ -845,7 +881,7 @@ func (a *App) handleDirectProxyChainUpdate(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "direct proxy disabled"})
 		return
 	}
-	raw, err := io.ReadAll(r.Body)
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxJSONBody))
 	if err != nil || len(raw) == 0 {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "invalid json body"})
 		return

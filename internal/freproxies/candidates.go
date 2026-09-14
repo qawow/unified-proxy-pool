@@ -298,6 +298,32 @@ func (s *Service) gatherCandidates(ctx context.Context, opt PickOptions, banned 
 	return nil, nil
 }
 
+// FilterCandidates is the exported choke point for callers that build a
+// candidate set outside Pick (the chain path uses the hot cache directly).
+// It applies every exclusion filterCandidates enforces except protocol/region
+// matching, which the chain already handled positionally.
+func (s *Service) FilterCandidates(items []Proxy, channel string) []Proxy {
+	if s == nil {
+		return items
+	}
+	banned := s.bannedForChannel(channel)
+	return s.filterCandidates(items, PickOptions{}, banned)
+}
+
+// bannedForChannel is the per-channel ban set filterCandidates expects.
+func (s *Service) bannedForChannel(channel string) map[string]time.Time {
+	if channel == "" || s.channelPolicy == nil {
+		return nil
+	}
+	type banSetter interface {
+		BanSet(channel string) map[string]time.Time
+	}
+	if bs, ok := s.channelPolicy.(banSetter); ok {
+		return bs.BanSet(channel)
+	}
+	return nil
+}
+
 // filterCandidates drops everything the caller cannot use. It returns the full
 // surviving set, not the first N: the selection strategy needs the population.
 //

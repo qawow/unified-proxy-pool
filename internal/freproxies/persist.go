@@ -87,6 +87,10 @@ func (s *memoryStore) flushSnapshot() {
 	for k, v := range s.yields {
 		yields[k] = v
 	}
+	stats := make(map[string]ScraperStat, len(s.stats))
+	for k, v := range s.stats {
+		stats[k] = v
+	}
 	s.mu.RUnlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -106,11 +110,19 @@ func (s *memoryStore) flushSnapshot() {
 			log.Printf("free-proxy yields save: %v", err)
 		}
 	}
+	// Per-source stats were never persisted at all: TotalOK / LastRunAt / error
+	// counts are what the source-quality page shows, and they reset every boot.
+	if body, err := json.Marshal(stats); err == nil {
+		if err := s.persist.SaveKV(ctx, kvScraperStats, string(body)); err != nil {
+			log.Printf("free-proxy scraper stats save: %v", err)
+		}
+	}
 }
 
 const (
-	kvGroups = "groups"
-	kvYields = "yields"
+	kvGroups       = "groups"
+	kvYields       = "yields"
+	kvScraperStats = "scraper_stats"
 )
 
 func (s *memoryStore) loadSnapshot(ctx context.Context) error {
@@ -136,7 +148,10 @@ func (s *memoryStore) loadSnapshot(ctx context.Context) error {
 			s.scored[row.Addr] = struct{}{}
 		}
 		if row.InRetry || (!row.InRaw && !row.InScored && p.FailCount > 0 && !p.Validated) {
-			s.retry[row.Addr] = time.Now()
+			// Restore the backoff deadline rather than "now": a proxy that failed
+			// seconds before shutdown used to be retested immediately on the next
+			// boot instead of after its 5/15-minute backoff.
+			s.retry[row.Addr] = time.Unix(int64(retryDueUnix(p.FailCount, p.LastCheck)), 0)
 		}
 	}
 	for name, on := range toggles {
@@ -163,6 +178,12 @@ func (s *memoryStore) loadSnapshot(ctx context.Context) error {
 		var yields map[string][]SourceYieldRecord
 		if json.Unmarshal([]byte(body), &yields) == nil && yields != nil {
 			s.yields = yields
+		}
+	}
+	if body, err := s.persist.LoadKV(ctx, kvScraperStats); err == nil {
+		var stats map[string]ScraperStat
+		if json.Unmarshal([]byte(body), &stats) == nil && stats != nil {
+			s.stats = stats
 		}
 	}
 	return nil

@@ -141,6 +141,7 @@ func (s *memoryStore) SaveGroup(ctx context.Context, g ProxyGroup) error {
 		s.groups = map[string]ProxyGroup{}
 	}
 	s.groups[g.Name] = g
+	s.markDirty()
 	return nil
 }
 
@@ -176,6 +177,7 @@ func (s *memoryStore) DeleteGroup(ctx context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.groups, name)
+	s.markDirty()
 	return nil
 }
 

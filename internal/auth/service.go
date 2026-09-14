@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -301,6 +302,12 @@ func TokenScopesFrom(ctx context.Context) string {
 	return s
 }
 
+// secureCookie marks the session cookie Secure when the panel is reachable
+// over TLS. The admin session is a bearer token, so over plain HTTP a network
+// observer could read it off the wire; setting Secure on an http:// panel would
+// make the browser drop it, so this is opt-in per deployment.
+var secureCookie = os.Getenv("UPP_SECURE_COOKIE") == "1"
+
 func (s *Service) SetSessionCookie(w http.ResponseWriter, token string) {
 	maxAge := int(s.sessionMaxAge.Seconds())
 	http.SetCookie(w, &http.Cookie{
@@ -311,6 +318,7 @@ func (s *Service) SetSessionCookie(w http.ResponseWriter, token string) {
 		Expires:  time.Now().Add(s.sessionMaxAge),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   secureCookie,
 	})
 }
 
@@ -323,6 +331,7 @@ func (s *Service) ClearSessionCookie(w http.ResponseWriter) {
 		Expires:  time.Unix(0, 0),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
+		Secure:   secureCookie,
 	})
 }
 

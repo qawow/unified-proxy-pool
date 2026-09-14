@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"unified-proxy-pool/internal/db"
 	"unified-proxy-pool/internal/events"
@@ -137,15 +138,16 @@ func (s *Service) CloneWithServers(ctx context.Context, srcID int64, servers []s
 			cp[k] = v
 		}
 		cp["server"] = ip
-		name := src.DisplayName + "-" + ip
-		if len(name) > 80 {
-			name = name[:80]
-		}
+		name := truncateDisplayName(src.DisplayName + "-" + ip)
 		cp["name"] = name
 		body := NormalizeJSON(cp)
 		var exists int
-		_ = s.store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM manual_nodes WHERE protocol = ? AND server = ? AND port = ?`,
-			src.Protocol, ip, src.Port).Scan(&exists)
+		// Propagate the error: a transient DB failure made this dedup check a
+		// silent no-op and allowed duplicate manual rows.
+		if err := s.store.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM manual_nodes WHERE protocol = ? AND server = ? AND port = ?`,
+			src.Protocol, ip, src.Port).Scan(&exists); err != nil {
+			return n, err
+		}
 		if exists > 0 {
 			continue
 		}
@@ -159,6 +161,17 @@ func (s *Service) CloneWithServers(ctx context.Context, srcID int64, servers []s
 		n++
 	}
 	return n, nil
+}
+
+// truncateDisplayName caps a node name on a rune boundary. Slicing by byte
+// split multibyte names mid-character and stored invalid UTF-8 into the YAML.
+func truncateDisplayName(name string) string {
+	const maxRunes = 80
+	if utf8.RuneCountInString(name) <= maxRunes {
+		return name
+	}
+	runes := []rune(name)
+	return string(runes[:maxRunes])
 }
 
 func (s *Service) Update(ctx context.Context, id int64, req UpdateRequest) (models.ManualNode, error) {
@@ -184,6 +197,11 @@ func (s *Service) Update(ctx context.Context, id int64, req UpdateRequest) (mode
 				return models.ManualNode{}, errs[0]
 			}
 			return models.ManualNode{}, errors.New("payload parse failed")
+		}
+		if len(parsed) > 1 {
+			// The update endpoint edits one node; pasting a multi-node payload
+			// used to silently keep only the first and drop the rest.
+			return models.ManualNode{}, fmt.Errorf("payload contains %d nodes, expected exactly one", len(parsed))
 		}
 		node := parsed[0]
 		displayName = node.DisplayName
@@ -212,6 +230,10 @@ func (s *Service) Update(ctx context.Context, id int64, req UpdateRequest) (mode
 func (s *Service) Delete(ctx context.Context, id int64) error {
 	_, err := s.store.DB.ExecContext(ctx, `DELETE FROM manual_nodes WHERE id = ?`, id)
 	if err == nil {
+		// Pool memberships point at this id; without the cascade they dangle and
+		// the pool silently shrinks at publish (NodeBySource returns no rows and
+		// the member is skipped without a word).
+		_, _ = s.store.DB.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE source_type = 'manual' AND source_node_id = ?`, id)
 		s.events.Publish("manual_nodes.deleted", map[string]int64{"id": id})
 	}
 	return err
@@ -353,6 +375,7 @@ func (s *Service) DisableBlocked(ctx context.Context) (int, error) {
 		if _, err := s.store.DB.ExecContext(ctx, `DELETE FROM manual_nodes WHERE id = ?`, item.ID); err != nil {
 			return n, err
 		}
+		_, _ = s.store.DB.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE source_type = 'manual' AND source_node_id = ?`, item.ID)
 		n++
 	}
 	return n, nil

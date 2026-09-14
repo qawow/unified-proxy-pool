@@ -8,6 +8,20 @@ import (
 	"time"
 )
 
+// pickRNG is a single locked source shared by every selection. Creating a fresh
+// rand.New(rand.NewSource(now.UnixNano())) per pick meant two concurrent picks
+// within the same nanosecond drew identical seeds — same shuffle, same weighted
+// draw, and a pool that looked round-robined but wasn't.
+var pickRNG = func() func() *rand.Rand {
+	var mu sync.Mutex
+	src := rand.NewSource(time.Now().UnixNano())
+	return func() *rand.Rand {
+		mu.Lock()
+		defer mu.Unlock()
+		return rand.New(src)
+	}
+}()
+
 // Selection strategies. These mirror chanpolicy's constants; freproxies does not
 // import that package so the dependency stays one-way (app wires them together).
 const (
@@ -320,7 +334,7 @@ func (s *Service) applyStrategy(items []Proxy, opt PickOptions) []Proxy {
 	}
 
 	var out []Proxy
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	rng := pickRNG()
 	switch opt.strategy() {
 	case StrategyRandom:
 		out = append([]Proxy(nil), items...)

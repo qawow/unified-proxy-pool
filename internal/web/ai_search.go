@@ -115,14 +115,15 @@ func (a *App) handleAISearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	answer, err := aisvc.Call(r.Context(), aisvc.Options{
-		URL:       req.URL,
-		APIKey:    req.APIKey,
-		Model:     req.Model,
-		Effort:    resolveEffort(req.Effort, req.Level),
-		PromptKey: key,
-		System:    system,
-		UserMsg:   userMsg,
-		Timeout:   90 * time.Second,
+		URL:                  req.URL,
+		APIKey:               req.APIKey,
+		Model:                req.Model,
+		Effort:               resolveEffort(req.Effort, req.Level),
+		PromptKey:            key,
+		System:               system,
+		UserMsg:              userMsg,
+		Timeout:              90 * time.Second,
+		AllowPrivateEndpoint: a.publicOpen(r),
 	})
 	if err != nil {
 		writeError(w, err)

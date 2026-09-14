@@ -3,7 +3,9 @@ package freproxies
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"sort"
@@ -53,6 +55,10 @@ const (
 
 type Store interface {
 	Backend() string
+	// Healthy reports whether the backend is usable right now. A Redis store
+	// that failed its last operation reports false so /api/overview can show
+	// "degraded" instead of the startup-time value.
+	Healthy() bool
 	Ping(ctx context.Context) error
 	Close() error
 	AddRaw(ctx context.Context, proxies []Proxy) (added int, err error)
@@ -91,7 +97,8 @@ type Store interface {
 }
 
 type redisStore struct {
-	rdb *redis.Client
+	rdb  *redis.Client
+	down atomic.Bool
 }
 
 func OpenRedis(addr, password string, db int) (Store, error) {
@@ -114,8 +121,36 @@ func OpenRedis(addr, password string, db int) (Store, error) {
 
 func (s *redisStore) Backend() string { return "redis" }
 
+// Healthy reports whether the backend is currently usable. Redis failure was
+// startup-only: a mid-run outage made every write error out and be discarded
+// while Overview.redis_ok kept reporting true. The flag is re-checked lazily —
+// a store that recovers starts reporting healthy on the next successful op.
+func (s *redisStore) Healthy() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return s.rdb.Ping(ctx).Err() == nil
+}
+
+// markDown records that the backend just failed an operation.
+func (s *redisStore) markDown(err error) {
+	if err == nil || errors.Is(err, redis.Nil) {
+		return
+	}
+	s.down.CompareAndSwap(false, true)
+	log.Printf("free-proxy redis store error (marked degraded): %v", err)
+}
+
+// markUp clears the degraded flag after a successful operation.
+func (s *redisStore) markUp() { s.down.CompareAndSwap(true, false) }
+
 func (s *redisStore) Ping(ctx context.Context) error {
-	return s.rdb.Ping(ctx).Err()
+	err := s.rdb.Ping(ctx).Err()
+	if err != nil {
+		s.markDown(err)
+	} else {
+		s.markUp()
+	}
+	return err
 }
 
 func (s *redisStore) Close() error { return s.rdb.Close() }
@@ -193,7 +228,10 @@ func (s *redisStore) AddRaw(ctx context.Context, proxies []Proxy) (int, error) {
 	}
 	// Pre-cap against the raw limit: a 45k-address source would otherwise write
 	// every entry and rely on Trim to delete most of them again, every round.
-	room := int64(-1)
+	// A ZCard failure leaves room at -1, which matches neither "full" nor
+	// "space left" and so silently bypasses the cap for the whole batch — fail
+	// closed instead.
+	room := int64(0)
 	if rawCount, err := s.rdb.ZCard(ctx, keyRaw).Result(); err == nil {
 		room = MaxRawProxies - rawCount
 		if room < 0 {
@@ -228,7 +266,12 @@ func (s *redisStore) AddRaw(ctx context.Context, proxies []Proxy) (int, error) {
 		p.UpdatedAt = now
 		raw, _ := json.Marshal(p)
 		writePipe.SAdd(ctx, keyAll, c.addr)
-		writePipe.ZAdd(ctx, keyRaw, redis.Z{Score: p.Score, Member: c.addr})
+		// Raw members score by creation time so Trim's rank-0..n eviction is
+		// genuinely FIFO. Every entry used to carry ScoreInit, so equal scores
+		// fell back to lexicographic member order and the cap systematically
+		// evicted the lowest-*address* proxies regardless of age, starving the
+		// sources that happen to publish low ranges.
+		writePipe.ZAdd(ctx, keyRaw, redis.Z{Score: float64(now.UnixNano()), Member: c.addr})
 		writePipe.Set(ctx, s.metaKey(c.addr), raw, 0)
 		added++
 	}
@@ -236,8 +279,10 @@ func (s *redisStore) AddRaw(ctx context.Context, proxies []Proxy) (int, error) {
 		return 0, nil
 	}
 	if _, err := writePipe.Exec(ctx); err != nil {
+		s.markDown(err)
 		return added, err
 	}
+	s.markUp()
 	// Trim is caller's responsibility (scrape round end) — cheap opportunistic if huge batch
 	if added > 500 {
 		_ = s.Trim(ctx)
@@ -301,6 +346,11 @@ func (s *redisStore) Delete(ctx context.Context, addr string) error {
 	pipe.ZRem(ctx, keyChecked, addr)
 	pipe.Del(ctx, s.metaKey(addr))
 	_, err := pipe.Exec(ctx)
+	if err != nil {
+		s.markDown(err)
+	} else {
+		s.markUp()
+	}
 	return err
 }
 
@@ -371,9 +421,12 @@ func (s *redisStore) MarkValidated(ctx context.Context, addr string, latencyMS i
 		pipe.ZRem(ctx, keyRetry, addr)
 		pipe.ZAdd(ctx, keyScored, redis.Z{Score: p.Score, Member: addr})
 		pipe.ZAdd(ctx, keyChecked, redis.Z{Score: float64(now.Unix()), Member: addr})
-		if err := s.saveMeta(ctx, p); err != nil {
-			return err
-		}
+		// Meta belongs inside the same pipeline as the zset moves, written last:
+		// writing it before Exec meant a failed Exec left "validated" metadata
+		// while the address sat in keyRaw, invisible to picks and re-probed
+		// forever.
+		raw, _ := json.Marshal(p)
+		pipe.Set(ctx, s.metaKey(addr), raw, 0)
 		_, err = pipe.Exec(ctx)
 		return err
 	}
@@ -395,10 +448,14 @@ func (s *redisStore) MarkValidated(ctx context.Context, addr string, latencyMS i
 	pipe.ZRem(ctx, keyScored, addr)
 	pipe.ZRem(ctx, keyChecked, addr)
 	pipe.ZAdd(ctx, keyRetry, redis.Z{Score: retryDueUnix(p.FailCount, now), Member: addr})
-	if err := s.saveMeta(ctx, p); err != nil {
-		return err
-	}
+	raw, _ := json.Marshal(p)
+	pipe.Set(ctx, s.metaKey(addr), raw, 0)
 	_, err = pipe.Exec(ctx)
+	if err != nil {
+		s.markDown(err)
+	} else {
+		s.markUp()
+	}
 	return err
 }
 
@@ -512,8 +569,8 @@ func (s *redisStore) Trim(ctx context.Context) error {
 		return err
 	}
 	if rawCount > MaxRawProxies {
-		// Raw entries all carry ScoreInit, so this is effectively FIFO by insert
-		// order rather than by score — which is the policy we want anyway.
+		// Raw members are scored by creation time (see AddRaw), so rank order is
+		// FIFO — evict the oldest candidates.
 		drop := rawCount - MaxRawProxies
 		addrs, err := s.rdb.ZRange(ctx, keyRaw, 0, drop-1).Result()
 		if err != nil {
@@ -529,13 +586,16 @@ func (s *redisStore) Trim(ctx context.Context) error {
 	}
 	if scoredCount > MaxValidatedProxies {
 		drop := scoredCount - MaxValidatedProxies
-		// Evict the stalest, not the lexicographically smallest address.
+		// keyChecked is scored by last-check time, so its rank order is the
+		// stalest-first policy we want. Only when that set is short do we fall
+		// back to keyScored — and there low score (high latency) is the right
+		// eviction key, never the member name.
 		addrs, err := s.rdb.ZRange(ctx, keyChecked, 0, drop-1).Result()
 		if err != nil {
 			return err
 		}
 		if int64(len(addrs)) < drop {
-			extra, err2 := s.rdb.ZRange(ctx, keyScored, 0, drop-1).Result()
+			extra, err2 := s.rdb.ZRangeByScore(ctx, keyScored, &redis.ZRangeBy{Min: "-inf", Max: "+inf", Offset: 0, Count: drop}).Result()
 			if err2 == nil {
 				addrs = append(addrs, extra...)
 			}
@@ -994,6 +1054,12 @@ func normalizeAddr(host string, port int) string {
 	if host == "" || port <= 0 || port > 65535 {
 		return ""
 	}
+	// Canonicalise before keying: 2001:DB8::1 and 2001:db8::1 (plus the bracketed
+	// spelling) would otherwise be three pool entries, three metas and three
+	// family detections for one proxy, and dedup across sources silently fails.
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		host = ip.String()
+	}
 	// net.JoinHostPort wraps IPv6 addresses in brackets: [::1]:8080
 	return net.JoinHostPort(host, strconv.Itoa(port))
 }
@@ -1044,6 +1110,10 @@ func (s *memoryStore) Backend() string {
 	}
 	return "memory"
 }
+
+// memoryStore is never "down" in the Redis sense; it reports healthy unless it
+// has no backing state at all.
+func (s *memoryStore) Healthy() bool                  { return s != nil }
 func (s *memoryStore) Ping(ctx context.Context) error { return nil }
 func (s *memoryStore) Close() error {
 	if s.stopPersist != nil {
@@ -1407,6 +1477,7 @@ func (s *memoryStore) SaveScraperStat(ctx context.Context, stat ScraperStat) err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stats[stat.Name] = stat
+	s.markDirty()
 	return nil
 }
 

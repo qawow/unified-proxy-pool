@@ -121,13 +121,14 @@ func TestHandlePublicSubmitEmptyBody(t *testing.T) {
 }
 
 // TestHandlePublicSubmitGarbageLines ensures unparseable lines are silently
-// skipped and do not cause a 500.
+// skipped and do not cause a 500. One public address is included so the
+// response is a real 200 with an added count, not a rejection.
 func TestHandlePublicSubmitGarbageLines(t *testing.T) {
 	app := newTestApp(t)
 	srv := httptest.NewServer(mustRouter(t, app))
 	defer srv.Close()
 
-	body := "notanaddress\n# comment\n\n192.168.1.1:9090\n"
+	body := "notanaddress\n# comment\n\n93.184.216.34:8080\n"
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/public/submit", strings.NewReader(body))
 	req.Header.Set("Content-Type", "text/plain")
 	resp, err := http.DefaultClient.Do(req)
@@ -143,6 +144,29 @@ func TestHandlePublicSubmitGarbageLines(t *testing.T) {
 	data := out.Data.(map[string]any)
 	if int(data["submitted"].(float64)) != 1 {
 		t.Errorf("submitted = %v, want 1", data["submitted"])
+	}
+}
+
+// TestHandlePublicSubmitRefusesPrivateTargets is the regression test for the
+// unauthenticated submit path: a submitter has no business naming the LAN, and
+// accepting it would put internal hosts into a pool the validator then probes
+// and chain traffic dials.
+func TestHandlePublicSubmitRefusesPrivateTargets(t *testing.T) {
+	app := newTestApp(t)
+	srv := httptest.NewServer(mustRouter(t, app))
+	defer srv.Close()
+
+	for _, line := range []string{"192.168.1.1:9090", "127.0.0.1:8080", "10.0.0.1:3128", "169.254.169.254:80"} {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/public/submit", strings.NewReader(line))
+		req.Header.Set("Content-Type", "text/plain")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("POST %q: status = %d, want 400 (private target refused)", line, resp.StatusCode)
+		}
+		resp.Body.Close()
 	}
 }
 

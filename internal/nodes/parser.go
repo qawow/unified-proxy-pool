@@ -29,8 +29,11 @@ func ParseRawNodes(input string) ([]ParsedNode, []error) {
 		return nil, []error{errors.New("input is empty")}
 	}
 
-	if parsed, err := parseYAMLNodes(input); err == nil && len(parsed) > 0 {
-		return parsed, nil
+	// parseYAMLNodes returns (nodes, rejections, ok). Rejections are surfaced
+	// alongside good nodes rather than swallowed, so a half-broken Clash
+	// subscription reports why part of it did not make it in.
+	if parsed, rejected, ok := parseYAMLNodes(input); ok {
+		return parsed, rejected
 	}
 
 	var result []ParsedNode
@@ -48,6 +51,11 @@ func ParseRawNodes(input string) ([]ParsedNode, []error) {
 			continue
 		}
 		result = append(result, node)
+	}
+	// scanner.Err() is the only signal for a line longer than the 1MB buffer:
+	// without it the parse silently stops and the caller reports "no nodes".
+	if err := scanner.Err(); err != nil {
+		errs = append(errs, err)
 	}
 	if len(result) == 0 && len(errs) == 0 {
 		errs = append(errs, errors.New("no nodes parsed"))
@@ -138,7 +146,11 @@ func parseSS(raw string) (ParsedNode, error) {
 		"cipher":   method,
 		"password": password,
 	}
-	copyQuery(normalized, query)
+	// SIP002 query params are transport-level: `type` means the transport
+	// (ws/grpc/h2), not the protocol. copyQuery would overwrite "type": "ss"
+	// with it, and mihomo then rejects the whole config for an unknown proxy
+	// type — so the share link's transport silently destroyed the node.
+	translateShareQuery(normalized, query)
 	applySSPlugin(normalized)
 	translateShareFields(normalized)
 	if err := SanitizeProxyMap(normalized); err != nil {
@@ -276,31 +288,40 @@ func parseSimpleURLNode(protocol, raw string) (ParsedNode, error) {
 	}, nil
 }
 
-func parseYAMLNodes(input string) ([]ParsedNode, error) {
+func parseYAMLNodes(input string) ([]ParsedNode, []error, bool) {
 	var wrapper struct {
 		Proxies []map[string]any `yaml:"proxies"`
 	}
 	if err := yaml.Unmarshal([]byte(input), &wrapper); err == nil && len(wrapper.Proxies) > 0 {
-		return normalizeProxyMaps(wrapper.Proxies)
+		if nodes, errs, ok := normalizeProxyMaps(wrapper.Proxies); ok {
+			return nodes, errs, true
+		}
 	}
 	var list []map[string]any
 	if err := yaml.Unmarshal([]byte(input), &list); err == nil && len(list) > 0 {
-		return normalizeProxyMaps(list)
+		if nodes, errs, ok := normalizeProxyMaps(list); ok {
+			return nodes, errs, true
+		}
 	}
-	return nil, errors.New("not yaml proxies")
+	return nil, nil, false
 }
 
-func normalizeProxyMaps(items []map[string]any) ([]ParsedNode, error) {
+func normalizeProxyMaps(items []map[string]any) ([]ParsedNode, []error, bool) {
 	var result []ParsedNode
+	var errs []error
 	for _, item := range items {
 		name := fmt.Sprint(item["name"])
 		protocol := fmt.Sprint(item["type"])
 		server := fmt.Sprint(item["server"])
 		port, _ := toInt(item["port"])
 		if name == "" || protocol == "" || server == "" || port == 0 {
+			errs = append(errs, fmt.Errorf("%s %s@%s: missing name/type/server/port", protocol, name, server))
 			continue
 		}
 		if err := SanitizeProxyMap(item); err != nil {
+			// A bad Clash node used to vanish with FailedCount=0 and an empty
+			// last_error, so the operator saw "ok" while the pool emptied.
+			errs = append(errs, fmt.Errorf("%s (%s): %v", name, protocol, err))
 			continue
 		}
 		raw, _ := yaml.Marshal(item)
@@ -314,9 +335,12 @@ func normalizeProxyMaps(items []map[string]any) ([]ParsedNode, error) {
 		})
 	}
 	if len(result) == 0 {
-		return nil, errors.New("no valid proxy items")
+		if len(errs) > 0 {
+			return nil, errs, false
+		}
+		return nil, []error{errors.New("no valid proxy items")}, false
 	}
-	return result, nil
+	return result, errs, true
 }
 
 // decodeSSUserInfo accepts:
@@ -359,7 +383,10 @@ func decodeFlexibleBase64(s string) ([]byte, error) {
 	return base64.RawStdEncoding.DecodeString(strings.TrimRight(s, "="))
 }
 
-func copyQuery(target map[string]any, rawQuery string) {
+// translateShareQuery copies a share link's query string into the normalized
+// proxy map, mapping `type` (the transport in URI share links) to `network`
+// rather than letting it clobber the proxy `type`.
+func translateShareQuery(target map[string]any, rawQuery string) {
 	if rawQuery == "" {
 		return
 	}
@@ -368,6 +395,18 @@ func copyQuery(target map[string]any, rawQuery string) {
 		return
 	}
 	for key, items := range values {
+		if key == "type" {
+			// The protocol is already in target["type"]; this type is the
+			// transport, which mihomo reads as "network".
+			if _, exists := target["network"]; !exists {
+				if len(items) == 1 {
+					target["network"] = items[0]
+				} else {
+					target["network"] = items
+				}
+			}
+			continue
+		}
 		if len(items) == 1 {
 			target[key] = items[0]
 		} else {

@@ -161,6 +161,23 @@ func (a *App) handleChannelReport(w http.ResponseWriter, r *http.Request) {
 		if errTag == "" && !it.ok() {
 			errTag = "reported"
 		}
+		// The unauthenticated path never honours the caller's verdict — same rule
+		// as handlePublicReport. ok:true would let anyone on the LAN promote an
+		// address they control to validated/ScoreMax (a MITM position over every
+		// pool consumer), and ok:false would evict the pool one report at a time.
+		// It registers the outcome for the channel's own accounting (a ban is
+		// still only struck by the policy's own thresholds) and queues the
+		// panel's own re-validation of the address.
+		if strings.HasPrefix(r.URL.Path, "/api/public/") {
+			if b := a.channels.Record(chanpolicy.Outcome{
+				Channel: channel, Addr: addr, OK: false, Status: it.Status,
+				Err: errTag, LatencyMS: it.LatencyMS, Reported: true,
+			}); b != nil {
+				bans = append(bans, *b)
+			}
+			a.queueReportRecheck(addr)
+			continue
+		}
 		if b := a.channels.Record(chanpolicy.Outcome{
 			Channel:   channel,
 			Addr:      addr,

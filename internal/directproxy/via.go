@@ -49,13 +49,28 @@ func ParseViaProxy(raw string) (freproxies.Proxy, error) {
 	}
 	port := 0
 	if p := u.Port(); p != "" {
-		port, _ = strconv.Atoi(p)
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return freproxies.Proxy{}, fmt.Errorf("exit_via: invalid port %q", p)
+		}
+		port = n
 	}
 	if port <= 0 {
 		if proto == "socks5" || proto == "socks4" {
 			port = 1080
 		} else {
 			port = 8080
+		}
+	}
+	// A scheme with a user but no password, or vice versa, was accepted and then
+	// silently sent as one half of a credential pair — which either authenticates
+	// wrong or prompts the upstream to interpret the empty half as a wildcard.
+	if u.User != nil {
+		if user := u.User.Username(); user != "" {
+			if pass, _ := u.User.Password(); pass == "" {
+				return freproxies.Proxy{}, fmt.Errorf(
+					"exit_via: username present but password is empty; provide user:pass@ or remove the user")
+			}
 		}
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
@@ -132,6 +147,11 @@ func (s *Server) viaConfig() (via freproxies.Proxy, ok bool) {
 // viaReachable re-checks the front node on a failure path. It runs on a fresh
 // context: the dial context may be at its deadline exactly when we need this
 // answer, and an expired ctx would falsely report the front as dead.
+//
+// It speaks the proxy protocol, not just TCP. A VPS that accepts the connection
+// but rejects the proxy handshake (rotated credentials, a 407, a SOCKS5 auth
+// failure) is "reachable" at TCP level and still dead as a front — and in exit
+// mode that mis-blame flushed the whole pool one proxy per request.
 func viaReachable(via freproxies.Proxy) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), viaDialTimeout)
 	defer cancel()
@@ -139,8 +159,37 @@ func viaReachable(via freproxies.Proxy) bool {
 	if err != nil {
 		return false
 	}
-	_ = c.Close()
-	return true
+	defer c.Close()
+	probeTarget := "www.example.com:80"
+	switch strings.ToLower(via.Protocol) {
+	case "socks5", "socks", "socks5h":
+		if err := socks5Handshake(c, via.Username, via.Password); err != nil {
+			return false
+		}
+		// A server that negotiated auth but cannot CONNECT is not usable as a
+		// front, which is all we ever ask of it.
+		nc, err := socks5ConnectCmd(c, probeTarget)
+		if err != nil {
+			return false
+		}
+		_ = nc.Close()
+		return true
+	case "socks4":
+		nc, err := socks4ConnectOver(c, probeTarget)
+		if err != nil {
+			return false
+		}
+		_ = nc.Close()
+		return true
+	default:
+		// http proxy: a CONNECT that returns 2xx proves it forwards.
+		nc, err := httpConnectOver(c, probeTarget, via.Username, via.Password)
+		if err != nil {
+			return false
+		}
+		_ = nc.Close()
+		return true
+	}
 }
 
 // frontFailure re-attributes a chain dial error when the real culprit is a dead

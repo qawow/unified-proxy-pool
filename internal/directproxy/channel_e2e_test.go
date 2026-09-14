@@ -208,3 +208,77 @@ func TestDialFailureIsRecordedAgainstChannel(t *testing.T) {
 type fakeNow struct{ t time.Time }
 
 func (f *fakeNow) now() time.Time { return f.t }
+
+// testSocket returns a connected TCP pair: the panel end and the peer end.
+// net.Pipe is synchronous, so a write on one end blocks until the other side
+// reads, which deadlocks a test that only asserts on the writer's error.
+func testSocket(t *testing.T) (panel, peer net.Conn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+	c, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	server := <-accepted
+	t.Cleanup(func() { server.Close(); c.Close() })
+	return server, c
+}
+
+// TestRefuseEgressTargetBlocksPanelPorts is the regression test for the
+// scanner risk: a client given proxy credentials must not be able to CONNECT
+// to the panel's own admin/mux port through the proxy.
+func TestRefuseEgressTargetBlocksPanelPorts(t *testing.T) {
+	panel, _ := testSocket(t)
+
+	for _, target := range []string{"127.0.0.1:7891", "127.0.0.1:3080", "192.168.1.5:17891"} {
+		err := refuseEgressTarget(panel, target, http.MethodConnect)
+		if err == nil {
+			t.Fatalf("refuseEgressTarget(%q) = nil, want refusal", target)
+		}
+	}
+
+	// A public destination is not refused.
+	if err := refuseEgressTarget(panel, "1.1.1.1:443", http.MethodConnect); err != nil {
+		t.Fatalf("refuseEgressTarget(1.1.1.1:443) = %v, want nil", err)
+	}
+}
+
+func TestRefuseEgressTargetBlocksLinkLocal(t *testing.T) {
+	panel, _ := testSocket(t)
+
+	for _, target := range []string{"169.254.169.254:80", "[fe80::1]:80"} {
+		err := refuseEgressTarget(panel, target, http.MethodConnect)
+		if err == nil || !strings.Contains(err.Error(), "link-local") {
+			t.Fatalf("refuseEgressTarget(%q) = %v, want link-local refusal", target, err)
+		}
+	}
+}
+
+func TestRefuseSocks5TargetRepliesRefusedCode(t *testing.T) {
+	panel, peer := testSocket(t)
+
+	err := refuseSocks5Target(panel, "127.0.0.1:7891")
+	if err == nil {
+		t.Fatal("refuseSocks5Target = nil, want refusal")
+	}
+	// 0x02 = connection not allowed by ruleset, ver 0x05. Written to `panel`,
+	// so it arrives on the peer end.
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(peer, reply); err != nil {
+		t.Fatalf("read reply: %v", err)
+	}
+	if reply[0] != 0x05 || reply[1] != 0x02 {
+		t.Fatalf("socks5 reply = %x, want 0502", reply)
+	}
+}

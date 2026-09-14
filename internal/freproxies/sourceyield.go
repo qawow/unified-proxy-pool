@@ -238,6 +238,7 @@ func (s *memoryStore) SaveSourceYield(ctx context.Context, rec SourceYieldRecord
 		kept = kept[:yieldMaxPerSource]
 	}
 	s.yields[rec.Source] = kept
+	s.markDirty()
 	return nil
 }
 

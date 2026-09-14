@@ -235,8 +235,10 @@ func (s *Service) StartGeoWorker(ctx context.Context) {
 				if err != nil || region == "" {
 					continue
 				}
-				// best-effort: find proxies with this host and patch via re-get/mark is heavy;
-				// store region on next validate. Push event for visibility.
+				// Actually persist it: the lookup was computed and thrown away,
+				// so a proxy's region only ever appeared if the synchronous path
+				// in TestProxyURLs happened to run first.
+				s.applyRegionToHost(ctx, ip, region)
 				_ = s.store.PushEvent(ctx, "geoip "+ip+" -> "+region)
 			}
 		}
@@ -250,6 +252,24 @@ func (s *Service) EnqueueGeo(ip string) {
 	select {
 	case s.geoQueue <- ip:
 	default:
+	}
+}
+
+// applyRegionToHost writes a resolved region onto every proxy sharing a host.
+// Region feeds the country deny list, so leaving it unset made the filter rely
+// on the slower synchronous probe path alone.
+func (s *Service) applyRegionToHost(ctx context.Context, host, region string) {
+	if s == nil || s.store == nil || host == "" || region == "" {
+		return
+	}
+	res, err := s.store.List(ctx, ListFilter{Query: host, Size: 500})
+	if err != nil {
+		return
+	}
+	for _, p := range res.Items {
+		if p.Host == host && p.Region == "" {
+			_ = s.store.UpdateRegion(ctx, p.Addr, region)
+		}
 	}
 }
 
@@ -293,10 +313,13 @@ func (s *Service) Overview(ctx context.Context) (Overview, error) {
 		SourceCount:      len(s.registry.All()),
 		EnabledSources:   enabled,
 		AvgScore:         avg,
-		RedisOK:          s.redisOK,
-		Backend:          s.store.Backend(),
-		RegionTop:        regions,
-		RecentEvents:     ev,
+		// s.redisOK is the startup-time fact; the store reports live health so a
+		// mid-run Redis outage stops advertising a backend that is dropping
+		// every write.
+		RedisOK:      s.redisOK && s.store.Healthy(),
+		Backend:      s.store.Backend(),
+		RegionTop:    regions,
+		RecentEvents: ev,
 		QueueDepth: map[string]int64{
 			"raw":       queues.RawCount,
 			"validated": queues.ValidatedCount,
@@ -388,11 +411,17 @@ func (s *Service) SubmitRaw(ctx context.Context, items []Proxy, source string) (
 	toAdd := make([]Proxy, 0, len(items))
 	for _, p := range items {
 		// Accept host+port or pre-formed addr; reject obviously malformed input.
+		// An addr-only item used to fall through to normaliseAddr with an empty
+		// Host/Port and vanish without an error to the caller.
 		if p.Addr == "" && (p.Host == "" || p.Port <= 0) {
 			continue
 		}
 		if p.Addr == "" {
 			p.Addr = normalizeAddr(p.Host, p.Port)
+		} else if p.Host == "" {
+			if host, port, ok := splitAddr(p.Addr); ok {
+				p.Host, p.Port = host, port
+			}
 		}
 		if p.Addr == "" {
 			continue
@@ -532,6 +561,12 @@ func (s *Service) BatchTest(ctx context.Context, addrs []string, validateURL str
 func (s *Service) Delete(ctx context.Context, addr string) error {
 	if err := s.store.Delete(ctx, addr); err != nil {
 		return err
+	}
+	// A deleted address stays servable from the hot snapshot for up to its TTL
+	// (3s); PurgeBlocked/Trim share the store's delete, so invalidating here
+	// covers all of them.
+	if s.hot != nil {
+		s.hot.Invalidate(addr)
 	}
 	s.publish("freproxies.deleted", map[string]any{"addr": addr})
 	return nil

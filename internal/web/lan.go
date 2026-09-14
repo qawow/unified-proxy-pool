@@ -1,6 +1,7 @@
 package web
 
 import (
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -49,16 +50,57 @@ func parseCIDRs(cidrs []string) []*net.IPNet {
 			}
 		}
 		_, n, err := net.ParseCIDR(c)
-		if err == nil {
-			out = append(out, n)
+		if err != nil {
+			log.Printf("ignoring invalid CIDR %q: %v", c, err)
+			continue
 		}
+		// Trusting 0.0.0.0/0 (or ::/0) makes every peer a trusted proxy, so
+		// strictRealIP believes a spoofed X-Forwarded-For and requireLAN waves
+		// the attacker through — one config line undoes the whole LAN gate.
+		if isWildcardNet(n) {
+			log.Printf("refusing to trust wildcard CIDR %q (it would trust every peer and defeat the LAN gate via spoofed X-Forwarded-For)", c)
+			continue
+		}
+		out = append(out, n)
 	}
 	return out
+}
+
+// isWildcardNet reports whether the network covers every address of a family.
+func isWildcardNet(n *net.IPNet) bool {
+	if n == nil {
+		return false
+	}
+	if v4 := n.IP.To4(); v4 != nil && len(n.Mask) == net.IPv4len {
+		allZero := true
+		for _, b := range v4 {
+			if b != 0 {
+				allZero = false
+				break
+			}
+		}
+		return allZero
+	}
+	allZero := true
+	for _, b := range n.IP {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	return allZero
 }
 
 func ipInNets(ip net.IP, nets []*net.IPNet) bool {
 	if ip == nil {
 		return false
+	}
+	// A dual-stack listener reports IPv4 peers as ::ffff:192.168.1.5, whose
+	// 16-byte form matches neither the /8 IPv4 nets nor the v6 ones — genuine
+	// LAN clients got 403, which looks like a broken install and tempts an
+	// operator to "fix" it with public_open.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
 	}
 	for _, n := range nets {
 		if n.Contains(ip) {

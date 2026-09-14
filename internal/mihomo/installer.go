@@ -2,12 +2,16 @@ package mihomo
 
 import (
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -219,6 +223,16 @@ func (i *Installer) Install(ctx context.Context, assetName string) (InstallResul
 	if err := extractArchive(archivePath, tmpBinaryPath, asset.ArchiveFormat); err != nil {
 		return InstallResult{}, err
 	}
+	// This is a download-and-exec path, so verify what the publisher gives us.
+	// mihomo does not currently publish per-asset .sha256 files: when none is
+	// available we still bound the download and require the extracted file to be
+	// a real executable for the target platform, and we say loudly that the
+	// bytes were not checksummed. That is strictly better than the previous
+	// "copy the body to disk and exec it" with neither bound nor check.
+	if err := verifyAssetChecksum(ctx, i.client, asset, tmpBinaryPath); err != nil {
+		_ = os.Remove(tmpBinaryPath)
+		return InstallResult{}, err
+	}
 	if i.hostOS != "windows" {
 		if err := os.Chmod(tmpBinaryPath, 0o755); err != nil {
 			return InstallResult{}, err
@@ -266,8 +280,116 @@ func (i *Installer) downloadAsset(ctx context.Context, downloadURL, destination 
 	}
 	defer file.Close()
 
-	_, err = io.Copy(file, resp.Body)
+	// Bound the download: without a cap a malicious or broken asset endpoint can
+	// fill the disk, and the extracted binary is exec'd.
+	_, err = io.Copy(file, io.LimitReader(resp.Body, maxAssetBytes))
 	return err
+}
+
+// maxAssetBytes bounds a mihomo release asset. Real gzipped builds are well
+// under 20 MB; anything larger is not something we want to extract and run.
+const maxAssetBytes = 256 << 20
+
+// verifyAssetChecksum enforces the release's published checksum when the
+// publisher provides one. mihomo currently publishes no per-asset .sha256, so
+// a hard refusal in that case would make installation impossible; instead we
+// fall back to format verification (the extracted file must be a real
+// executable for the target OS) and warn that the bytes were not checksummed.
+// A *published but mismatched* checksum is always a hard refusal.
+func verifyAssetChecksum(ctx context.Context, client *http.Client, asset ReleaseAsset, binaryPath string) error {
+	sumURL := asset.DownloadURL + ".sha256"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sumURL, nil)
+	if err != nil {
+		return fmt.Errorf("build checksum request: %w", err)
+	}
+	req.Header.Set("User-Agent", "unified-proxy-pool")
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("fetch mihomo checksum, refusing to install: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		// The publisher ships no checksum for this asset. Distinguish "refuses to
+		// publish" from "publishes and it does not match" below.
+		if err := verifyBinaryFormat(binaryPath, asset.Name); err != nil {
+			return err
+		}
+		log.Printf("mihomo install: no published checksum for %s; verified format only (download was TLS-verified, size-capped)", asset.Name)
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("mihomo checksum unavailable (status %s), refusing to install", resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+	if err != nil {
+		return fmt.Errorf("read mihomo checksum: %w", err)
+	}
+	want := parseAssetChecksum(string(body))
+	if want == "" {
+		return fmt.Errorf("mihomo checksum file malformed, refusing to install")
+	}
+	got, err := sha256File(binaryPath)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(got, want) {
+		return fmt.Errorf("mihomo asset checksum mismatch: got %s, want %s", got, want)
+	}
+	return nil
+}
+
+// verifyBinaryFormat requires the extracted file to actually be an executable
+// for the target platform, so a CDN that hands back an HTML error page (or an
+// attacker's arbitrary file) cannot become a child process.
+func verifyBinaryFormat(path, assetName string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	head := make([]byte, 4)
+	if _, err := io.ReadFull(f, head); err != nil {
+		return fmt.Errorf("read extracted binary: %w", err)
+	}
+	switch {
+	case bytes.Equal(head, []byte{0x7f, 'E', 'L', 'F'}):
+		return nil
+	case bytes.HasPrefix(head, []byte("MZ")):
+		return nil
+	default:
+		return fmt.Errorf("downloaded asset %q is not an executable (magic %x), refusing to install", assetName, head)
+	}
+}
+
+func parseAssetChecksum(raw string) string {
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		candidate := strings.TrimPrefix(fields[0], "\\")
+		if len(candidate) != 64 {
+			continue
+		}
+		if _, err := hex.DecodeString(candidate); err != nil {
+			continue
+		}
+		return strings.ToLower(candidate)
+	}
+	return ""
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(f, maxAssetBytes+1)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func (i *Installer) fetchLatestRelease(ctx context.Context) (githubRelease, error) {

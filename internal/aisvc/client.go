@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -27,6 +29,10 @@ type Options struct {
 	UserMsg   string // content that fills {{.Content}}
 	Timeout   time.Duration
 	MaxTokens int
+	// AllowPrivateEndpoint permits loopback/link-local/private AI URLs. Off by
+	// default: the endpoint is caller-supplied and the route is reachable from
+	// the internet with an ai:write token, so a private target is an SSRF read.
+	AllowPrivateEndpoint bool
 }
 
 type chatRequest struct {
@@ -72,6 +78,14 @@ func Call(ctx context.Context, opts Options) (string, error) {
 	}
 	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
 		return "", fmt.Errorf("AI URL 必须是 http(s):// 开头")
+	}
+	// The caller supplies this URL and the route is reachable without a LAN
+	// gate, so an ai:write token is an SSRF read primitive: the panel dials
+	// whatever host the caller names and the API key travels with it. Refuse
+	// loopback / link-local / private targets unless the caller explicitly
+	// opted into serving the public internet.
+	if !opts.AllowPrivateEndpoint && isPrivateEndpoint(endpoint) {
+		return "", fmt.Errorf("AI URL 不能指向内网/回环/链路本地地址（请在面板开启公网访问或改用公网地址）")
 	}
 
 	prompt := defaultByName(opts.PromptKey)
@@ -125,11 +139,9 @@ func Call(ctx context.Context, opts Options) (string, error) {
 		return "", fmt.Errorf("read AI response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		msg := string(raw)
-		if len(msg) > 300 {
-			msg = msg[:300]
-		}
-		return "", fmt.Errorf("AI endpoint status %d: %s", resp.StatusCode, msg)
+		// Do not echo the body: it comes from a caller-chosen host and up to 300
+		// bytes of any internal service's response would be handed back.
+		return "", fmt.Errorf("AI endpoint status %d", resp.StatusCode)
 	}
 
 	var parsed chatResponse
@@ -152,4 +164,30 @@ func firstNonEmptyStr(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// isPrivateEndpoint reports whether a URL points at the panel's own machine or
+// its link-local range. Used to stop the AI-search endpoint being aimed at the
+// mihomo controller, a cloud metadata service, or anything else on the LAN.
+func isPrivateEndpoint(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return true
+	}
+	host := u.Hostname()
+	if host == "" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsPrivate() || ip.IsMulticast() || ip.IsUnspecified()
+	}
+	hostname := strings.ToLower(host)
+	for _, name := range []string{"localhost", "metadata.google.internal"} {
+		if hostname == name {
+			return true
+		}
+	}
+	// A bare name with no dots resolves against the panel's own search domains.
+	return !strings.Contains(hostname, ".")
 }

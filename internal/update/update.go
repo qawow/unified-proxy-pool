@@ -329,5 +329,13 @@ func (s *Service) doGet(ctx context.Context, client *http.Client, raw string) ([
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("http %d from %s", resp.StatusCode, raw)
 	}
+	// The URL we fetched is the release we pinned. A 301 to a *different host*
+	// over plain http is a downgrade the operator never consented to — the body
+	// is verified separately, but the transport should not have been silently
+	// demoted either.
+	if req.URL.Scheme == "https" && resp.Request.URL.Scheme != "https" {
+		return nil, fmt.Errorf("refusing https→%s downgrade for %s (redirected to %s)",
+			resp.Request.URL.Scheme, raw, resp.Request.URL)
+	}
 	return io.ReadAll(io.LimitReader(resp.Body, 80<<20))
 }

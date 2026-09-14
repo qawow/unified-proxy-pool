@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -398,37 +399,50 @@ func (s *Service) runtimeMembersForPool(ctx context.Context, pool models.ProxyPo
 	}
 
 	var result []models.RuntimeNode
+	orphans := 0
 	for _, ref := range refs {
 		if !ref.Enabled {
 			continue
 		}
 		copies := memberCopiesForStrategy(pool.Strategy, ref.Weight)
+		var node models.RuntimeNode
+		var found bool
 		switch ref.SourceType {
 		case "manual":
-			node, err := s.manualNodes.NodeBySource(ctx, ref.SourceNodeID)
-			if err == nil {
-				for range copies {
-					result = append(result, node)
-				}
+			if n, err := s.manualNodes.NodeBySource(ctx, ref.SourceNodeID); err == nil {
+				node, found = n, true
 			}
 		case freproxies.SourceTypeFree:
 			if s.free == nil {
+				orphans++
 				continue
 			}
-			node, err := s.free.RuntimeNodeByID(ctx, ref.SourceNodeID)
-			if err == nil {
-				for range copies {
-					result = append(result, node)
-				}
+			if n, err := s.free.RuntimeNodeByID(ctx, ref.SourceNodeID); err == nil {
+				node, found = n, true
 			}
 		default:
-			node, err := s.subscriptions.NodeBySource(ctx, ref.SourceNodeID)
-			if err == nil {
-				for range copies {
-					result = append(result, node)
-				}
+			if n, err := s.subscriptions.NodeBySource(ctx, ref.SourceNodeID); err == nil {
+				node, found = n, true
 			}
 		}
+		if !found {
+			// A member whose source node is gone. Deletions cascade now, but a
+			// row written before that fix — or a node dropped by a sync on an
+			// older binary — still lands here, and silently shrinking the pool
+			// is how an empty pool ends up falling back to a bare egress.
+			orphans++
+			if _, err := s.store.DB.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE pool_id = ? AND source_type = ? AND source_node_id = ?`,
+				pool.ID, ref.SourceType, ref.SourceNodeID); err != nil {
+				log.Printf("pools: failed to reap orphaned member %s/%d: %v", ref.SourceType, ref.SourceNodeID, err)
+			}
+			continue
+		}
+		for range copies {
+			result = append(result, node)
+		}
+	}
+	if orphans > 0 {
+		log.Printf("pools: pool %d had %d member(s) pointing at a missing node; reaped", pool.ID, orphans)
 	}
 	return result, nil
 }

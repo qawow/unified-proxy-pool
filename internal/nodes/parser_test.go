@@ -2,6 +2,7 @@ package nodes
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 )
 
@@ -106,11 +107,37 @@ proxies:
     password: secret
 `
 	nodes, errs := ParseRawNodes(raw)
-	if len(errs) != 0 {
-		t.Fatalf("ParseRawNodes() errs = %v", errs)
+	// The bad node is still skipped, but its rejection is now reported instead
+	// of vanishing with FailedCount=0 and an empty last_error.
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "bad") {
+		t.Fatalf("ParseRawNodes() errs = %v, want the bad node reported", errs)
 	}
 	if len(nodes) != 1 || nodes[0].DisplayName != "good" {
 		t.Fatalf("got %+v, want only the valid ss node", nodes)
+	}
+}
+
+// TestParseSSWithTransportQuery is the regression test for the share-link
+// transport clobbering the proxy type: an ss URL carrying ?type=ws used to write
+// type:"ws" into the normalized map, and mihomo then rejected the whole config.
+func TestParseSSWithTransportQuery(t *testing.T) {
+	raw := "ss://aes-256-gcm:secret@1.2.3.4:8388/?type=ws&path=%2Fray&host=example.com#wsnode"
+	node, err := ParseNodeURI(raw)
+	if err != nil {
+		t.Fatalf("ParseNodeURI() error = %v", err)
+	}
+	if got := node.Normalized["type"]; got != "ss" {
+		t.Fatalf("normalized type = %#v, want \"ss\" (transport must not clobber the protocol)", got)
+	}
+	if got := node.Normalized["network"]; got != "ws" {
+		t.Fatalf("normalized network = %#v, want \"ws\"", got)
+	}
+	wsOpts, ok := node.Normalized["ws-opts"].(map[string]any)
+	if !ok {
+		t.Fatalf("ws-opts missing or wrong type: %#v", node.Normalized["ws-opts"])
+	}
+	if got := wsOpts["path"]; got != "/ray" {
+		t.Fatalf("ws-opts.path = %#v, want \"/ray\"", got)
 	}
 }
 

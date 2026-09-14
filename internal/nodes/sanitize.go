@@ -280,8 +280,87 @@ func dropNonMapOpts(payload map[string]any) {
 		if !ok || raw == nil {
 			continue
 		}
-		if _, isMap := raw.(map[string]any); !isMap {
+		sub, isMap := raw.(map[string]any)
+		if !isMap {
 			delete(payload, key)
+			continue
+		}
+		sanitizeNestedOpts(key, sub)
+	}
+}
+
+// nestedOptFieldTypes are the fields inside a *-opts map whose type mihomo's
+// struct decode checks. The outer map being a map was never enough:
+// `ws-opts: {headers: "foo"}` (needs map[string]string) or
+// `ws-opts: {path: [a]}` (needs string) still aborted the whole config parse.
+var nestedOptFieldTypes = map[string]map[string]string{
+	"ws-opts": {
+		"path":                    "string",
+		"host":                    "string",
+		"headers":                 "map",
+		"max-early-data":          "int",
+		"early-data-header-name":  "string",
+		"v2ray-http-upgrade":      "bool",
+		"v2ray-http-upgrade-path": "string",
+	},
+	"ws-opts-path": {},
+	"grpc-opts": {
+		"grpc-service-name": "string",
+	},
+	"h2-opts": {
+		"host": "seq",
+		"path": "seq",
+	},
+	"http-opts": {
+		"method":  "string",
+		"path":    "seq",
+		"headers": "map",
+	},
+	"sniffing": {},
+}
+
+// sanitizeNestedOpts coerces or drops wrong-typed values one level inside an
+// opts map. Unknown keys are left alone: mihomo ignores extras for most opts,
+// and over-deleting would silently discard valid config.
+func sanitizeNestedOpts(parentKey string, sub map[string]any) {
+	spec := nestedOptFieldTypes[parentKey]
+	if spec == nil {
+		return
+	}
+	for field, kind := range spec {
+		raw, ok := sub[field]
+		if !ok || raw == nil {
+			continue
+		}
+		switch kind {
+		case "string":
+			if _, ok := raw.(string); !ok {
+				delete(sub, field)
+			}
+		case "int":
+			if _, ok := raw.(int); !ok {
+				if _, ok := raw.(float64); !ok {
+					delete(sub, field)
+				}
+			}
+		case "bool":
+			if _, ok := raw.(bool); !ok {
+				delete(sub, field)
+			}
+		case "seq":
+			switch raw.(type) {
+			case []string, []any:
+				// fine
+			default:
+				delete(sub, field)
+			}
+		case "map":
+			switch raw.(type) {
+			case map[string]any, map[string]string:
+				// fine
+			default:
+				delete(sub, field)
+			}
 		}
 	}
 }

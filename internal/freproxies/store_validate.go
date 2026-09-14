@@ -52,7 +52,10 @@ func selectValidateRaw(items []Proxy, limit int64, now time.Time, cooldown time.
 			recent = append(recent, p)
 		}
 	}
-	sort.Slice(never, func(i, j int) bool { return never[i].Addr < never[j].Addr })
+	// Oldest-first, not address-first: sorting by Addr means every batch starts
+	// at the lexically smallest unchecked addresses, which compounds the
+	// per-source bias of the old lexicographic raw trim.
+	sort.Slice(never, func(i, j int) bool { return never[i].CreatedAt.Before(never[j].CreatedAt) })
 	sort.Slice(due, func(i, j int) bool { return due[i].LastCheck.Before(due[j].LastCheck) })
 	out := append(never, due...)
 	if int64(len(out)) >= limit {

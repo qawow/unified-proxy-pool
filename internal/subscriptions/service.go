@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -238,11 +239,29 @@ func (s *Service) Update(ctx context.Context, id int64, req UpsertRequest) (mode
 }
 
 func (s *Service) Delete(ctx context.Context, id int64) error {
-	_, err := s.store.DB.ExecContext(ctx, `DELETE FROM subscriptions WHERE id = ?`, id)
-	if err == nil {
-		s.events.Publish("subscriptions.deleted", map[string]int64{"id": id})
+	// subscription_nodes has no ON DELETE CASCADE in the schema either, so a
+	// deleted subscription left its nodes and their pool memberships behind.
+	tx, err := s.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return err
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_pool_members
+		WHERE source_type = 'subscription' AND source_node_id IN (
+			SELECT id FROM subscription_nodes WHERE subscription_id = ?)`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM subscription_nodes WHERE subscription_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM subscriptions WHERE id = ?`, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.events.Publish("subscriptions.deleted", map[string]int64{"id": id})
+	return nil
 }
 
 func (s *Service) Toggle(ctx context.Context, id int64) (models.Subscription, error) {
@@ -369,9 +388,20 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 		return SyncOutcome{}, err
 	}
 	result := ParseSubscriptionContent(string(body))
-	if len(result.Nodes) == 0 {
+	// Count what the country filter will drop before the empty check, so a
+	// subscription whose every node is CN-blocked reports "N nodes blocked"
+	// instead of "no nodes parsed" while quietly deleting them all.
+	blocked := 0
+	for _, item := range result.Nodes {
+		if geoip.Active().BlockedNode(item.Server, item.DisplayName) {
+			blocked++
+		}
+	}
+	if len(result.Nodes) == 0 || blocked == len(result.Nodes) {
 		msg := "no nodes parsed from subscription"
-		if len(result.Errors) > 0 {
+		if blocked > 0 {
+			msg = fmt.Sprintf("all %d node(s) rejected by the country filter", blocked)
+		} else if len(result.Errors) > 0 {
 			msg = errorSummary(result.Errors)
 		}
 		err := errors.New(msg)
@@ -403,7 +433,7 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 	matchedIDs := make(map[int64]struct{}, len(existingNodes))
 	for _, item := range result.Nodes {
 		if geoip.Active().BlockedNode(item.Server, item.DisplayName) {
-			continue
+			continue // counted above so the outcome can report it
 		}
 		normalizedJSON := nodes.NormalizeJSON(item.Normalized)
 		fingerprint := subscriptionNodeFingerprint(item.Protocol, item.Server, item.Port, normalizedJSON)
@@ -447,6 +477,11 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM subscription_nodes WHERE id = ? AND subscription_id = ?`, item.ID, sub.ID); err != nil {
 			return SyncOutcome{}, err
 		}
+		// Same cascade as manual node deletion: the pool member must not
+		// outlive the node it points at.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE source_type = 'subscription' AND source_node_id = ?`, item.ID); err != nil {
+			return SyncOutcome{}, err
+		}
 		deleted++
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE subscriptions SET last_sync_at = ?, last_sync_status = ?, last_error = ?, etag = ?, last_modified = ?, updated_at = ?
@@ -465,6 +500,9 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 		FailedCount:  len(result.Errors),
 		Errors:       stringifyErrors(result.Errors),
 	}
+	if blocked > 0 {
+		outcome.Errors = append(outcome.Errors, fmt.Sprintf("%d node(s) rejected by the country filter", blocked))
+	}
 	s.events.Publish("subscriptions.synced", map[string]any{"subscription_id": id, "outcome": outcome})
 	s.mu.Lock()
 	hooks := append([]func(context.Context, int64, []int64){}, s.afterSyncHooks...)
@@ -475,7 +513,19 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 			if hook == nil {
 				continue
 			}
-			go hook(context.Background(), sub.ID, nodeIDs)
+			// Recovered: a panic in an after-sync hook (the latency-probe
+			// trigger is one) used to take down the whole panel, and
+			// context.Background() dropped cancellation and tracing.
+			go func(h func(context.Context, int64, []int64)) {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("subscriptions: after-sync hook panicked: %v", r)
+					}
+				}()
+				hookCtx, cancel := context.WithTimeout(s.rootCtx(ctx), 2*time.Minute)
+				defer cancel()
+				h(hookCtx, sub.ID, nodeIDs)
+			}(hook)
 		}
 	}
 	return outcome, nil
@@ -898,21 +948,48 @@ func (s *Service) doWithRetry(req *http.Request, retryCount int, client *http.Cl
 	return nil, lastErr
 }
 
+// syncWorkers bounds concurrent subscription syncs. Without it, every due
+// subscription syncs at once on startup (or after a network outage), all
+// opening write transactions on the same SQLite file.
+const syncWorkers = 4
+
 func (s *Service) runDueSyncs(ctx context.Context) {
 	items, err := s.List(ctx)
 	if err != nil {
 		return
 	}
 	now := time.Now().UTC()
+	var due []int64
 	for _, item := range items {
-		if !shouldSyncSubscription(item, now) {
-			continue
+		if shouldSyncSubscription(item, now) {
+			due = append(due, item.ID)
 		}
-		id := item.ID
+	}
+	if len(due) == 0 {
+		return
+	}
+	jobs := make(chan int64)
+	var wg sync.WaitGroup
+	for i := 0; i < syncWorkers && i < len(due); i++ {
+		wg.Add(1)
 		go func() {
-			_, _ = s.Sync(ctx, id)
+			defer wg.Done()
+			for id := range jobs {
+				_, _ = s.Sync(ctx, id)
+			}
 		}()
 	}
+	for _, id := range due {
+		select {
+		case jobs <- id:
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return
+		}
+	}
+	close(jobs)
+	wg.Wait()
 }
 
 func shouldSyncSubscription(item models.Subscription, now time.Time) bool {
@@ -926,6 +1003,15 @@ func shouldSyncSubscription(item models.Subscription, now time.Time) bool {
 		return true
 	}
 	return !item.LastSyncAt.Add(time.Duration(item.SyncIntervalSec) * time.Second).After(now)
+}
+
+// rootCtx derives a background context for fire-and-forget work when no request
+// context is available; it still has a deadline so the goroutine cannot linger.
+func (s *Service) rootCtx(parent context.Context) context.Context {
+	if parent != nil && parent.Done() != nil {
+		return parent
+	}
+	return context.Background()
 }
 
 // DisableBlocked permanently deletes subscription nodes the country filter rejects.
@@ -957,6 +1043,7 @@ func (s *Service) DisableBlocked(ctx context.Context) (int, error) {
 		if _, err := s.store.DB.ExecContext(ctx, `DELETE FROM subscription_nodes WHERE id = ?`, id); err != nil {
 			return n, err
 		}
+		_, _ = s.store.DB.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE source_type = 'subscription' AND source_node_id = ?`, id)
 		n++
 	}
 	return n, nil

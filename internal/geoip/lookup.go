@@ -84,8 +84,11 @@ type Service struct {
 }
 
 var defaultHostURLs = []string{
-	"http://ip-api.com/json/%s?fields=status,country,countryCode,query,message",
-	"http://ipwho.is/%s?fields=success,country,country_code,ip",
+	// HTTPS: the response names which country a proxy egresses from, and on
+	// plain http any on-path observer can rewrite the country to bypass the
+	// CN filter that gates whether a node is used at all.
+	"https://ip-api.com/json/%s?fields=status,country,countryCode,query,message",
+	"https://ipwho.is/%s?fields=success,country,country_code,ip",
 }
 
 func New(cache Cache) *Service {

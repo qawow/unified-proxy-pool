@@ -155,7 +155,14 @@ func (a *App) Router() (http.Handler, error) {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
 
-	r.Get("/api/health", a.handleHealth)
+	// Unauthenticated liveness probe for container orchestrators: it answers
+	// "is the process up" and nothing else. The pool-stats version lives at
+	// /api/public/health behind requireLAN — exposing counts, backend and
+	// proxy liveness to the internet was a full sidestep of that gate, and an
+	// unauthenticated SQLite-load vector.
+	r.Get("/api/healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]bool{"ok": true}})
+	})
 
 	r.Route("/api/auth", func(r chi.Router) {
 		r.Post("/login", a.handleLogin)
@@ -309,7 +316,7 @@ func (a *App) Router() (http.Handler, error) {
 		scriptAPI.With(a.auth.RequireAuthOrToken(a.tokens, apitoken.ScopeChannelsWrite)).
 			Post("/api/channels/report", a.handleChannelReport)
 		scriptAPI.With(aiWrite).Post("/api/ai-search", a.handleAISearch)
-		scriptAPI.With(a.auth.RequireAuthOrToken(a.tokens, apitoken.ScopeProxiesRead)).
+		scriptAPI.With(a.auth.RequireAuthOrToken(a.tokens, apitoken.ScopeAIWrite)).
 			Get("/api/ai-prompts", a.handleAIPromptsList)
 		scriptAPI.With(aiWrite).Put("/api/ai-prompts", a.handleAIPromptUpsert)
 		scriptAPI.With(aiWrite).Delete("/api/ai-prompts", a.handleAIPromptDelete)

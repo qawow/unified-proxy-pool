@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -173,8 +175,9 @@ type ChainOptions struct {
 	RateLimitBPS         int64    `json:"rate_limit_bps"`
 	MaxParallelDial      int      `json:"max_parallel_dial"`
 	// ExitVia is a fixed VPS hop: socks5://user:pass@host:1080 or http://host:port.
-	// Mode exit (default) = last hop, destination sees the VPS IP.
-	// Mode entry = first hop, destination still sees the free-proxy IP.
+	// Mode exit = last hop, the destination sees the VPS IP.
+	// Mode entry = first hop, the destination still sees the free-proxy IP.
+	// Empty is the documented default: empty and "exit" behave identically.
 	ExitVia     string `json:"exit_via,omitempty"`
 	ExitViaMode string `json:"exit_via_mode,omitempty"`
 }
@@ -718,19 +721,31 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, chain bool) {
 // has its own AuthRequired/Username/Password in ChainOptions; those used to be
 // collected by the panel and then ignored, leaving :7893 wide open while the UI
 // claimed otherwise.
+//
+// "Auth required" with both fields empty is treated as *unconfigured*, not as
+// "accept anything": subtle.ConstantTimeCompare("", "") == 1, so honouring that
+// state would let any client authenticate with empty credentials — and
+// allowIP() skips the private-net fallback whenever auth is "on", turning one
+// mis-toggle into an internet-facing open relay.
 func (s *Server) credsFor(chain bool) (required bool, user, pass string) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if chain {
 		o := s.chainOpts
-		if o.AuthRequired || o.Username != "" || o.Password != "" {
+		if o.AuthRequired && o.Username != "" && o.Password != "" {
+			return true, o.Username, o.Password
+		}
+		if o.Username != "" && o.Password != "" {
 			return true, o.Username, o.Password
 		}
 	}
 	if s.forceAuth {
+		if s.cfg.Username == "" || s.cfg.Password == "" {
+			return false, "", ""
+		}
 		return true, s.cfg.Username, s.cfg.Password
 	}
-	if s.cfg.Username != "" || s.cfg.Password != "" {
+	if s.cfg.Username != "" && s.cfg.Password != "" {
 		return true, s.cfg.Username, s.cfg.Password
 	}
 	return false, "", ""
@@ -752,10 +767,6 @@ func (s *Server) checkUserPass(chain bool, user, pass string) bool {
 	return okUser && okPass
 }
 
-func (s *Server) pickUpstream(ctx context.Context) (freproxies.Proxy, error) {
-	return s.free.PickValidated(ctx, "")
-}
-
 // dialViaWithFailover tries several free proxies until one connects.
 func (s *Server) dialViaWithFailover(ctx context.Context, target string) (net.Conn, freproxies.Proxy, error) {
 	return s.dialViaWithFailoverClient(ctx, target, clientIPFrom(ctx))
@@ -765,7 +776,17 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 	s.mu.RLock()
 	stickyOn := s.stickyEnabled && s.sticky != nil
 	sticky := s.sticky
+	dialBudget := time.Duration(s.chainOpts.DialTimeoutMS) * time.Millisecond
 	s.mu.RUnlock()
+	if dialBudget <= 0 {
+		dialBudget = 8 * time.Second
+	}
+	// This ctx is runCtx (no deadline); the 30s conn deadline set in handle does
+	// no I/O during upstream selection. Without a bound, a degraded pool/VPS
+	// held sockets and a goroutine for minutes per request.
+	dialCtx, cancel := context.WithTimeout(ctx, dialBudget)
+	defer cancel()
+
 	channel := s.channelFor(target)
 	if stickyOn && clientIP != "" {
 		if addr, proto, ok := sticky.GetProxy(clientIP); ok {
@@ -782,14 +803,14 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 					// Fail closed, same as the main path below.
 					return nil, freproxies.Proxy{}, werr
 				}
-				if conn, err := dialProxyChainPool(ctx, wired, target, s.getViaPool()); err == nil {
+				if conn, err := dialProxyChainPool(dialCtx, wired, target, s.getViaPool()); err == nil {
 					s.recordChannel(channel, addr, true, 0, "", time.Since(start).Milliseconds())
 					return conn, lastHop(wired, up), nil
 				}
 			}
 		}
 	}
-	res, err := s.free.Pick(ctx, freproxies.PickOptions{N: 8, Channel: channel})
+	res, err := s.free.Pick(dialCtx, freproxies.PickOptions{N: 8, Channel: channel})
 	if err != nil {
 		return nil, freproxies.Proxy{}, err
 	}
@@ -804,7 +825,7 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 			// a VPS front is in place.
 			return nil, freproxies.Proxy{}, werr
 		}
-		conn, err := dialProxyChainPool(ctx, wired, target, s.getViaPool())
+		conn, err := dialProxyChainPool(dialCtx, wired, target, s.getViaPool())
 		if err == nil {
 			if stickyOn && clientIP != "" {
 				sticky.PutProxy(clientIP, up.Addr, up.Protocol)
@@ -815,7 +836,12 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 			s.recordChannel(channel, up.Addr, true, 0, "", time.Since(start).Milliseconds())
 			return conn, lastHop(wired, up), nil
 		}
+		// Parent-deadline exhaustion is a budget matter, not this proxy's
+		// verdict; keep it as lastErr but skip the scoring below.
 		lastErr = err
+		if errors.Is(err, context.DeadlineExceeded) && dialCtx.Err() != nil {
+			continue
+		}
 		// A dead front node must stop the loop, not walk it: exit mode surfaces
 		// the dead VPS as a failed CONNECT at `up`, and scoring `up` for it
 		// walks the whole pool down one proxy per request.
@@ -829,7 +855,7 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 		// per request. Only penalise `up` when `up` is what failed.
 		blame, ok := culpritHop(err)
 		if !ok || blame.Addr == up.Addr {
-			_ = s.free.Store().MarkValidated(ctx, up.Addr, 0, false)
+			_ = s.free.Store().MarkValidated(dialCtx, up.Addr, 0, false)
 			// Global score already took the hit above; this records that the failure
 			// happened against *this* destination, which is what scopes the ban.
 			s.recordChannel(channel, up.Addr, false, 0, errTag(err), 0)
@@ -874,17 +900,23 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 	if dialTO <= 0 {
 		dialTO = 8 * time.Second
 	}
-	dialCtx, cancel := context.WithTimeout(ctx, dialTO)
-	defer cancel()
 
 	channel := s.channelFor(target)
 
 	var pool []freproxies.Proxy
 	if s.free != nil && s.free.Hot() != nil {
-		pool = s.free.Hot().PickDistinct(hopsN*8, opts.PreferDistinctRegion, opts.EntryProto, opts.ExitProto, opts.EntryRegion, opts.ExitRegion)
+		// The hot cache snapshot is NOT pre-filtered — filterCandidates is the
+		// documented single choke point for blacklist / country / disabled-source
+		// exclusions, and dialing straight off PickDistinct bypassed all three.
+		// An auto-disabled source's proxies were therefore excluded from
+		// single-hop picks forever yet served as chain hops indefinitely.
+		raw := s.free.Hot().PickDistinct(hopsN*8, opts.PreferDistinctRegion, opts.EntryProto, opts.ExitProto, opts.EntryRegion, opts.ExitRegion)
+		pool = s.free.FilterCandidates(raw, channel)
 	}
 	if len(pool) < hopsN {
-		more, err := s.free.Pick(dialCtx, freproxies.PickOptions{N: hopsN * 8, Channel: channel})
+		pickCtx, pickCancel := context.WithTimeout(ctx, dialTO)
+		more, err := s.free.Pick(pickCtx, freproxies.PickOptions{N: hopsN * 8, Channel: channel})
+		pickCancel()
 		if err == nil {
 			pool = append(pool, more.Items...)
 		}
@@ -898,6 +930,12 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 
 	var lastErr error
 	for attempt := 0; attempt < tries; attempt++ {
+		// Each attempt gets its own budget. A single dialCtx shared across
+		// FailoverTries meant one slow first chain exhausted it, and attempts
+		// 2..6 then failed instantly with deadline-exceeded — each blaming a
+		// *different* rotated entry proxy and evicting healthy proxies from the
+		// hot pool for a budget exhaustion that was never their failure.
+		dialCtx, cancel := context.WithTimeout(ctx, dialTO)
 		start := (attempt * hopsN) % len(pool)
 		rotated := append(append([]freproxies.Proxy{}, pool[start:]...), pool[:start]...)
 		var hops []freproxies.Proxy
@@ -911,6 +949,7 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 			}
 		}
 		if len(hops) < 1 {
+			cancel()
 			continue
 		}
 		// apply entry/exit proto soft preference by swap if possible
@@ -923,11 +962,19 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 		if werr != nil {
 			// Fail closed: exit_via is set but unusable — do not dial the pool
 			// direct, the panel claims a VPS front is in place.
+			cancel()
 			return nil, nil, werr
 		}
 		conn, err := dialProxyChainPool(dialCtx, wired, target, s.getViaPool())
+		cancel()
 		if err == nil {
 			return conn, wired, nil
+		}
+		// A parent-deadline expiry is a budget exhaustion, not a proxy verdict:
+		// blaming whichever hop happened to be dialling evicts healthy proxies.
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() != nil {
+			lastErr = err
+			continue
 		}
 		lastErr = err
 		// Stop early when the failure is really the front node's: with a dead
@@ -935,6 +982,7 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 		// would be mis-blamed on the hop that spoke the CONNECT).
 		if via, ok := s.viaConfig(); ok {
 			if fe := frontFailure(via, err); fe != nil {
+				cancel()
 				return nil, nil, fe
 			}
 		}
@@ -1074,6 +1122,13 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 		if !strings.Contains(target, ":") {
 			target += ":443"
 		}
+		// The client picks the destination. Without a refuse-list a client behind
+		// the panel could point the proxy at the panel's own mux port, the LAN
+		// router, or any link-local address, i.e. use it as a generic internal
+		// scanner. The panel exists to proxy *public* destinations.
+		if err := refuseEgressTarget(client, target, req.Method); err != nil {
+			return err
+		}
 		up, _, err := s.openUpstream(ctx, target, chain)
 		if err != nil {
 			_, _ = io.WriteString(client, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
@@ -1103,6 +1158,9 @@ func (s *Server) handleHTTP(ctx context.Context, client net.Conn, br *bufio.Read
 		} else {
 			host += ":80"
 		}
+	}
+	if err := refuseEgressTarget(client, host, req.Method); err != nil {
+		return err
 	}
 	upConn, exit, err := s.openUpstream(ctx, host, chain)
 	if err != nil {
@@ -1216,6 +1274,102 @@ func parseBasicProxyAuth(h string) (string, string, bool) {
 	return parts[0], parts[1], true
 }
 
+// refuseLoopbackEgress, when true, also blocks loopback destinations. It is
+// off by default because the panel's own probes and the channel e2e tests
+// legitimately reach loopback origins — and the panel usually listens on a
+// public/LAN address anyway, so the port list is the protection that matters.
+// Set UPP_REFUSE_LOOPBACK_EGRESS=1 to also forbid loopback egress.
+var refuseLoopbackEgress = os.Getenv("UPP_REFUSE_LOOPBACK_EGRESS") == "1"
+
+// refusedEgressPorts are the ports a client must never reach *through* the
+// proxy. 17891 is the panel's own probe mixed port, 7891 the mux the panel
+// itself serves — a client that CONNECTs there gets the panel's admin surface,
+// and through a chain hop the request would appear to come from a pool proxy.
+var refusedEgressPorts = map[int]bool{
+	17891: true, // probe mixed port
+	7891:  true, // panel mux / admin API
+	3080:  true, // web GUI
+}
+
+// refuseEgressTarget blocks clients from tunneling to the panel itself, and
+// from link-local/unspecified addresses. The destination is chosen by the
+// caller, so this is the difference between "proxy to the internet" and
+// "generic internal network scanner with proxy credentials".
+func refuseEgressTarget(client net.Conn, target, method string) error {
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		host, portStr = target, ""
+	}
+	if port, perr := strconv.Atoi(portStr); perr == nil && refusedEgressPorts[port] {
+		writeRefused(client, method)
+		return fmt.Errorf("egress to panel port %d refused", port)
+	}
+	// Resolve here rather than relying on the upstream dial: the proxy chain
+	// may be a remote VPS, which would resolve the name differently, but the
+	// intent of the rule is clear from the literal target either way.
+	if ip := net.ParseIP(host); ip != nil {
+		if reason, bad := isRefusedIP(ip); bad {
+			writeRefused(client, method)
+			return fmt.Errorf("egress to %s refused: %s", host, reason)
+		}
+		return nil
+	}
+	// A name that resolves locally to a refused range is still refused.
+	if addrs, lerr := net.LookupHost(host); lerr == nil {
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil {
+				if reason, bad := isRefusedIP(ip); bad {
+					writeRefused(client, method)
+					return fmt.Errorf("egress to %s (%s) refused: %s", host, ip, reason)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func isRefusedIP(ip net.IP) (string, bool) {
+	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return "link-local", true
+	}
+	if ip.IsUnspecified() {
+		return "unspecified", true
+	}
+	if refuseLoopbackEgress && ip.IsLoopback() {
+		return "loopback", true
+	}
+	return "", false
+}
+
+func writeRefused(client net.Conn, method string) {
+	if strings.EqualFold(method, http.MethodConnect) {
+		_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	} else {
+		_, _ = io.WriteString(client, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	}
+}
+
+// refuseSocks5Target applies the same refuse-list as the HTTP paths, replying in
+// SOCKS5 terms so a refused client gets a clean error rather than a hang.
+func refuseSocks5Target(client net.Conn, target string) error {
+	host, portStr, err := net.SplitHostPort(target)
+	if err != nil {
+		return nil
+	}
+	port, perr := strconv.Atoi(portStr)
+	if perr == nil && refusedEgressPorts[port] {
+		_, _ = client.Write([]byte{0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return fmt.Errorf("egress to panel port %d refused", port)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if reason, bad := isRefusedIP(ip); bad {
+			_, _ = client.Write([]byte{0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			return fmt.Errorf("egress to %s refused: %s", host, reason)
+		}
+	}
+	return nil
+}
+
 func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn, br *bufio.Reader, chain bool, finished *bool) error {
 	// methods
 	hdr := make([]byte, 2)
@@ -1316,6 +1470,12 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn, br *bufio.Re
 	port := int(portBuf[0])<<8 | int(portBuf[1])
 	target := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 
+	// Same refuse-list as HTTP CONNECT, but reported in the SOCKS5 reply code:
+	// 0x02 = connection not allowed by ruleset.
+	if err := refuseSocks5Target(client, target); err != nil {
+		return err
+	}
+
 	// SOCKS5 carries opaque bytes, so like CONNECT the dial result is the only
 	// signal available here; channel attribution happened inside openUpstream.
 	up, _, err := s.openUpstream(ctx, target, chain)
@@ -1337,6 +1497,13 @@ func (s *Server) handleSOCKS5(ctx context.Context, client net.Conn, br *bufio.Re
 	return relayTraffic(client, up, ch, finished, s.throttleFor(chain))
 }
 
+// relayIdleTimeout bounds how long a tunnel may sit with no traffic in either
+// direction. CONNECT cleared every deadline on the tunnel before handing it to
+// the relay, so a client that opens a tunnel and walks away held the upstream
+// socket (a pool proxy!) and a goroutine open indefinitely — and the chain hop
+// stays allocated until the pool proxy or the client gives up.
+const relayIdleTimeout = 10 * time.Minute
+
 func relayTraffic(client, upstream net.Conn, channel string, finished *bool, t *throttle) error {
 	// 入站已在 handle 中 BeginInbound；此处记出站并在结束后成对释放
 	if finished != nil {
@@ -1344,6 +1511,11 @@ func relayTraffic(client, upstream net.Conn, channel string, finished *bool, t *
 	}
 	client = throttled(client, t)
 	traffic.Default.BeginOutbound(channel)
+	// A read deadline on both ends is what makes an idle tunnel end: either side
+	// stalling past the timeout breaks the read, and BidirectionalRelay closes
+	// both. A live tunnel renews its own deadline on every Read.
+	client = &deadlineConn{Conn: client, timeout: relayIdleTimeout}
+	upstream = &deadlineConn{Conn: upstream, timeout: relayIdleTimeout}
 	up, down, err := traffic.BidirectionalRelay(client, upstream)
 	ok := err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed)
 	traffic.Default.EndConn(channel, ok, up, down, true)
@@ -1351,4 +1523,16 @@ func relayTraffic(client, upstream net.Conn, channel string, finished *bool, t *
 		return err
 	}
 	return nil
+}
+
+// deadlineConn sets a fresh read deadline before every Read so that inactivity,
+// not the total lifetime, is what closes the tunnel.
+type deadlineConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *deadlineConn) Read(p []byte) (int, error) {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Read(p)
 }

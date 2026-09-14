@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +83,11 @@ func TestInstallerInstallExtractsGzipAsset(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(payload)
 		case "/assets/" + assetName:
 			_, _ = w.Write(archive.Bytes())
+		case "/assets/" + assetName + ".sha256":
+			// The installer now enforces the published checksum, so the test
+			// server has to publish one that matches the extracted binary.
+			h := sha256.Sum256([]byte("linux-binary"))
+			fmt.Fprintf(w, "%x  mihomo\n", h)
 		default:
 			http.NotFound(w, r)
 		}
@@ -151,6 +159,9 @@ func TestInstallerInstallExtractsZipAsset(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(payload)
 		case "/assets/" + assetName:
 			_, _ = w.Write(archive.Bytes())
+		case "/assets/" + assetName + ".sha256":
+			h := sha256.Sum256([]byte("windows-binary"))
+			fmt.Fprintf(w, "%x  mihomo.exe\n", h)
 		default:
 			http.NotFound(w, r)
 		}
@@ -181,5 +192,99 @@ func TestInstallerInstallExtractsZipAsset(t *testing.T) {
 	}
 	if string(data) != "windows-binary" {
 		t.Fatalf("installed binary content = %q", string(data))
+	}
+}
+
+// TestInstallerRefusesChecksumMismatch is the regression test for the
+// download-and-exec path: before the checksum was enforced, anything serving
+// the asset URL could put an arbitrary binary on disk for the manager to run.
+func TestInstallerRefusesChecksumMismatch(t *testing.T) {
+	const assetName = "mihomo-linux-amd64-v1.19.23.gz"
+	var archive bytes.Buffer
+	gzipWriter := gzip.NewWriter(&archive)
+	if _, err := gzipWriter.Write([]byte("linux-binary")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	_ = gzipWriter.Close()
+
+	baseURL := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tag_name": "v1.19.23",
+				"assets": []map[string]any{
+					{"name": assetName, "browser_download_url": baseURL + "/assets/" + assetName},
+				},
+			})
+		case "/assets/" + assetName:
+			_, _ = w.Write(archive.Bytes())
+		case "/assets/" + assetName + ".sha256":
+			// A checksum that does not match the extracted binary.
+			fmt.Fprintln(w, "0000000000000000000000000000000000000000000000000000000000000000  mihomo")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	baseURL = server.URL
+
+	tempDir := t.TempDir()
+	installer := NewInstallerWithOptions(InstallerOptions{
+		HTTPClient:    server.Client(),
+		ReleaseAPIURL: server.URL + "/latest",
+		InstallDir:    filepath.Join(tempDir, "bin"),
+		SelectionPath: filepath.Join(tempDir, "mihomo-binary.txt"),
+		HostOS:        "linux",
+		HostArch:      "amd64",
+	})
+	if _, err := installer.Install(context.Background(), ""); err == nil ||
+		!strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("Install() error = %v, want checksum mismatch", err)
+	}
+}
+
+// TestInstallerRefusesMissingChecksum covers the "no checksum published" case:
+// the hardening is only real if absence is a refusal rather than a skip.
+func TestInstallerRefusesMissingChecksum(t *testing.T) {
+	const assetName = "mihomo-linux-amd64-v1.19.23.gz"
+	var archive bytes.Buffer
+	gzipWriter := gzip.NewWriter(&archive)
+	if _, err := gzipWriter.Write([]byte("linux-binary")); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	_ = gzipWriter.Close()
+
+	baseURL := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"tag_name": "v1.19.23",
+				"assets": []map[string]any{
+					{"name": assetName, "browser_download_url": baseURL + "/assets/" + assetName},
+				},
+			})
+		case "/assets/" + assetName:
+			_, _ = w.Write(archive.Bytes())
+		default:
+			http.NotFound(w, r) // no .sha256 route at all
+		}
+	}))
+	defer server.Close()
+	baseURL = server.URL
+
+	tempDir := t.TempDir()
+	installer := NewInstallerWithOptions(InstallerOptions{
+		HTTPClient:    server.Client(),
+		ReleaseAPIURL: server.URL + "/latest",
+		InstallDir:    filepath.Join(tempDir, "bin"),
+		SelectionPath: filepath.Join(tempDir, "mihomo-binary.txt"),
+		HostOS:        "linux",
+		HostArch:      "amd64",
+	})
+	if _, err := installer.Install(context.Background(), ""); err == nil ||
+		!strings.Contains(err.Error(), "refusing to install") {
+		t.Fatalf("Install() error = %v, want refusal", err)
 	}
 }

@@ -2,6 +2,8 @@ package pools
 
 import (
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 
 	"unified-proxy-pool/internal/models"
@@ -160,6 +162,10 @@ func buildProxyGroup(pool models.ProxyPool, groupName string, memberNames []stri
 	if adv.GroupType != "" {
 		groupType = strings.TrimSpace(adv.GroupType)
 	}
+	// A bogus group type aborts parsing of the whole config; reject it here.
+	if _, ok := mihomoGroupTypes[groupType]; !ok {
+		groupType = "select"
+	}
 	if adv.LBStrategy != "" {
 		lbStrategy = strings.TrimSpace(adv.LBStrategy)
 	}
@@ -214,12 +220,137 @@ func buildProxyGroup(pool models.ProxyPool, groupName string, memberNames []stri
 	}
 
 	for k, v := range adv.Extra {
-		if k == "" || k == "name" || k == "proxies" {
+		// `extra` is raw operator JSON injected straight into the mihomo
+		// proxy-group YAML, so a wrong-typed value (interval: "abc") or a bogus
+		// group type fatals the whole config parse — the exact class the proxy
+		// sanitizer exists to stop, and the one place it was bypassed. Whitelist
+		// the keys mihomo's proxy-group actually understands and coerce them to
+		// the type mihomo's struct decode requires.
+		clean, ok := sanitizeGroupExtra(k, v)
+		if !ok {
 			continue
 		}
-		group[k] = v
+		group[k] = clean
 	}
 	return group
+}
+
+// groupExtraTypes are the mihomo proxy-group fields an operator may reasonably
+// want to set via `extra`, mapped to the Go type the YAML decoder expects. Keys
+// not listed here are dropped rather than emitted blind.
+var groupExtraTypes = map[string]string{
+	"type": "string", "strategy": "string", "url": "string",
+	"interval": "int", "tolerance": "int", "timeout": "int",
+	"lazy": "bool", "disable-udp": "bool", "hidden": "bool",
+	"filter": "string", "exclude-filter": "string",
+	"include-all": "bool", "include-all-proxies": "bool", "include-all-groups": "bool",
+	"expected-status": "string", "max-failed-times": "int",
+	"fallback": "seq", "use": "seq", "interface-name": "string",
+	"routing-mark": "int", "udp": "bool",
+}
+
+// mihomoGroupTypes are the proxy-group types mihomo actually initializes.
+var mihomoGroupTypes = map[string]struct{}{
+	"select": {}, "url-test": {}, "fallback": {}, "load-balance": {},
+	"relay": {}, "selector": {}, "": {},
+}
+
+// sanitizeGroupExtra validates one `extra` entry against what mihomo's typed
+// YAML decode will accept. Returns the value to emit and whether the key is
+// allowed at all.
+func sanitizeGroupExtra(k string, v any) (any, bool) {
+	kind, ok := groupExtraTypes[strings.ToLower(strings.TrimSpace(k))]
+	if !ok {
+		return nil, false
+	}
+	switch kind {
+	case "string":
+		s, err := stringifyGroupValue(v)
+		if err != nil {
+			return nil, false
+		}
+		return s, true
+	case "int":
+		n, err := intifyGroupValue(v)
+		if err != nil {
+			return nil, false
+		}
+		return n, true
+	case "bool":
+		b, err := boolifyGroupValue(v)
+		if err != nil {
+			return nil, false
+		}
+		return b, true
+	case "seq":
+		if v == nil {
+			return nil, false
+		}
+		switch t := v.(type) {
+		case []string:
+			if len(t) == 0 {
+				return nil, false
+			}
+			return t, true
+		case []any:
+			out := make([]string, 0, len(t))
+			for _, item := range t {
+				s, err := stringifyGroupValue(item)
+				if err != nil {
+					return nil, false
+				}
+				out = append(out, s)
+			}
+			if len(out) == 0 {
+				return nil, false
+			}
+			return out, true
+		default:
+			return nil, false
+		}
+	}
+	return nil, false
+}
+
+func stringifyGroupValue(v any) (string, error) {
+	switch t := v.(type) {
+	case string:
+		return t, nil
+	case bool:
+		return "", fmt.Errorf("expected string, got bool")
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64), nil
+	default:
+		return "", fmt.Errorf("expected string, got %T", v)
+	}
+}
+
+func intifyGroupValue(v any) (int, error) {
+	switch t := v.(type) {
+	case float64:
+		return int(t), nil
+	case int:
+		return t, nil
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(t))
+		if err != nil {
+			return 0, err
+		}
+		return n, nil
+	default:
+		return 0, fmt.Errorf("expected int, got %T", v)
+	}
+}
+
+func boolifyGroupValue(v any) (bool, error) {
+	switch t := v.(type) {
+	case bool:
+		return t, nil
+	case string:
+		return strconv.ParseBool(strings.TrimSpace(t))
+	default:
+		return false, fmt.Errorf("expected bool, got %T", v)
+	}
 }
 
 func strategyDisplayName(pool models.ProxyPool) string {

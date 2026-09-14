@@ -448,6 +448,28 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
 // amplifier.
 var reportRecheckSlots = make(chan struct{}, 8)
 
+// queueReportRecheck schedules the panel's own probe of an address reported by
+// an unauthenticated caller. The caller's verdict is never persisted; the probe
+// decides. Shared by /api/public/report and /api/public/channels/report.
+func (a *App) queueReportRecheck(addr string) bool {
+	if a.free == nil || addr == "" {
+		return false
+	}
+	select {
+	case reportRecheckSlots <- struct{}{}:
+		go func() {
+			defer func() { <-reportRecheckSlots }()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, _ = a.free.TestProxy(ctx, addr, a.freeCfg.FreeValidateURL,
+				time.Duration(a.freeCfg.FreeValidateTimeoutMS)*time.Millisecond)
+		}()
+		return true
+	default:
+		return false
+	}
+}
+
 // handlePublicReport takes a *hint* that an address changed state. The caller's
 // verdict is deliberately not persisted: this endpoint needs no credentials, so
 // honouring `ok:true` would let anyone on the LAN promote an address they
@@ -476,19 +498,7 @@ func (a *App) handlePublicReport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: "addr must be host:port"})
 		return
 	}
-	queued := false
-	select {
-	case reportRecheckSlots <- struct{}{}:
-		queued = true
-		go func() {
-			defer func() { <-reportRecheckSlots }()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_, _ = a.free.TestProxy(ctx, addr, a.freeCfg.FreeValidateURL,
-				time.Duration(a.freeCfg.FreeValidateTimeoutMS)*time.Millisecond)
-		}()
-	default:
-	}
+	queued := a.queueReportRecheck(addr)
 	writeJSON(w, http.StatusAccepted, apiResponse{
 		Success: true,
 		Data:    map[string]bool{"accepted": true, "recheck_queued": queued},

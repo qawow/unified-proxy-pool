@@ -1,3 +1,95 @@
+## Unreleased — 2026-09-15 · 安全与正确性大扫除
+
+四路审计（订阅/节点/池、directproxy/探测、Web 安全、代理池/爬虫）后的全面修复。约 60 处发现，
+**行为有变化的地方标了「影响」。**
+
+### 安全
+- **空密码不再绕过代理认证**：`directproxy` 的 `credsFor` 现在要求用户名与密码**同时**非空才开启
+  `required=true`。以前配了用户名、密码留空时，`forceAuth` 返回 `(false,"","")`，
+  任何不带凭证的请求都能直接用 —— 等于把 :7892/:7893 开成了公开代理（影响：此前空密码部署会立刻要求补密码）。
+- **未认证上报不再能写死结论**：`/api/public/` 下的渠道上报现在记 `OK:false` 并触发排队复查，
+  不再直接把调用方的判定写进 `MarkValidated`。LAN 脚本说「这个代理死了」不再等于面板信了它。
+- **健康检查端点收敛**：`/api/health` → `/api/healthz`，只返回 `{"ok":true}`；
+  增强版健康信息仍在 LAN 网段保护下的 `/api/public/health`。
+- **LAN 信任列表拒绝通配 CIDR**：`0.0.0.0/0`、`::/0` 以前会被当作「信任全部来源」接受，
+  现在显式拒绝并记录日志；IPv4-mapped IPv6（`::ffff:192.168.x.x`）现在正确识别为内网。
+- **AI 搜索 SSRF 收敛**：`aisvc` 新增 `AllowPrivateEndpoint` 开关，默认拒绝回环/链路本地/私网/组播
+  目标与裸主机名，只有面板主动开放（`public_open`）时才允许私网端点；
+  非 200 响应不再把最多 300 字节的外部响应体回显给前端。
+- **mihomo 安装器校验下载**：`verifyAssetChecksum` 下载发布版自带的 `<asset>.sha256 并强制比对，
+  缺失/格式错/不匹配一律**拒绝安装**；下载加上 256MiB 上限。
+  mihomo 目前并不发布逐资产校验值，此路径降级为「校验文件格式必须是真实可执行文件（ELF/PE）
+  并明确警告未做哈希校验」，而不是无校验直接落盘执行（影响：安装失败信息更明确）。
+- **`/api/public/submit` 拒绝私网目标**：未认证提交方不能把 LAN 地址塞进代理池 ——
+  校验器会去探测它、链式流量会去拨它。命中时返回 400 并说明原因（影响：此前提交 `192.168.x.x` 的脚本会收到 400）。
+- **出口目标拒绝清单**：HTTP CONNECT / 明文 HTTP / SOCKS5 三条路径现在都拒绝指向面板自身端口
+  （7891 mux、3080 面板、17891 探测混合端口）与链路本地/未指定地址。
+  持有代理凭证的客户端不再能把代理当成内网扫描器（影响：此前可经代理 CONNECT 到面板管理端口）。
+  回环目标默认放行（探测与渠道 e2e 测试要用），`UPP_REFUSE_LOOPBACK_EGRESS=1` 可一并拒绝。
+- **会话 Cookie 支持 Secure**：`UPP_SECURE_COOKIE=1` 时管理会话带 `Secure`，HTTPS 部署下不再被明文嗅探。
+- **更新器拒绝 https→http 降级**：拉取新版本二进制时若被重定向到明文 http，直接拒绝。
+- **geoip 查询走 HTTPS**：国家判定决定了节点是否被使用，明文查询可被在路径上改写绕过 CN 过滤。
+
+### 订阅 / 节点链路
+- **池成员孤儿不再静默缩小池子**：`runtimeMembersForPool` 以前在源节点已删时静默跳过该成员，
+  现在删除这条悬空成员行并记录日志。节点删除现在级联清理 `proxy_pool_members`
+  （手工节点删除、订阅同步删除、订阅整删三条路径都补上了）。
+- **`strategy_advanced_json` 的 `extra` 不再盲写**：这是直接注入 mihomo proxy-group YAML 的运算符 JSON，
+  以前任何键/任何类型都原样写进去 —— 一个 `interval: "abc"` 就能让整个配置解析失败。
+  现在按 mihomo 实际接受的字段做白名单 + 类型强制；`type` 也校验为已知组类型，非法时回落 `select`。
+- **嵌套 opts 类型校验**：`ws-opts`、`grpc-opts`、`h2-opts`、`http-opts` 内部字段现在按类型校验
+  （`headers` 必须是 map、`path`/`host` 必须是字符串），错的删掉而不是让整个配置解析失败。
+- **坏节点不再静默消失**：YAML 导入以前对坏条目 `continue` 且什么都不报，
+  节点以 `FailedCount=0`、空 `last_error` 消失，运维只看到「成功」。
+  现在拒绝原因随成功节点一起返回；`bufio.Scanner` 的 `scanner.Err()` 也被检查
+  （超过 1MiB 缓冲的行以前会让解析静默停在半路）。
+- **ss 分享链的 `?type=ws` 不再覆盖协议**：SIP002 查询参数里的 `type` 是*传输*不是*协议*，
+  以前 `copyQuery` 会把 `type:"ss"` 覆盖成 `type:"ws"`，mihomo 随后因未知代理类型拒绝整个配置
+  （影响：带 ws/grpc 传输的 ss 链接此前导入即失效）。
+- **`nodes.Update` 拒绝多节点载荷**：编辑单个节点的接口以前只取 `parsed[0]`、丢弃其余且不告知。
+- **节点名按 rune 截断**：以前按字节切片，多字节名字会被切成半个字符存进 YAML。
+- **同步并发受限**：`runDueSyncs` 以前对所有到期订阅同时起 goroutine，全部在同一个 SQLite 文件上开写事务；
+  现在固定 4 个 worker 并尊重 ctx 取消。
+- **after-sync hook 加 recover 与超时**：hook panic 以前会带崩整个面板，且 `context.Background()` 丢失取消。
+- **geoip 全拦的订阅会说明原因**：以前所有节点都被国家过滤挡掉时报「no nodes parsed」，
+  同时把它们全删了；现在报「N 个节点被国家过滤拒绝」并写进 outcome.Errors。
+
+### directproxy / 拨号
+- **每次尝试独立拨号预算**：链式 `FailoverTries` 以前共享一个 `dialCtx`，第一次慢链路耗尽预算后，
+  第 2..6 次尝试立刻以 deadline-exceeded 失败 —— 每次都归因到**不同的**轮换入口代理，
+  把健康代理从热池里逐个踢出去（影响：池子会在一次慢拨号后莫名其妙变空）。
+- **单跳拨号加上预算**：`:7892` 的 `dialViaWithFailover` 以前用的是无截止的 runCtx，
+  退化的池子/VPS 会每请求占着 socket 和 goroutine 好几分钟。
+- **父截止不再被记成代理的错**：归因前检查 `ctx.Err()`，预算耗尽不再扣分。
+- **前置活性复查说代理协议**：`viaReachable` 以前只测 TCP 连通 —— 一个接受了连接但拒绝代理握手
+  （凭证轮换、407、SOCKS5 认证失败）的 VPS 被判成「活着」，误归因继续洗池。
+  现在按协议完成 SOCKS5 握手 + CONNECT 或 HTTP CONNECT 2xx。
+- **中继空闲超时**：CONNECT 建立后清掉了所有截止时间，客户端开了隧道就走开的话，
+  上游 socket（一个池内代理！）和 goroutine 会无限期挂着。现在双向 10 分钟读超时，
+  活跃流量每次 Read 自动续期。
+- **`ParseViaProxy` 校验端口与凭证对**：非数字/越界端口以前被 `Atoi` 静默吞成 0；
+  有用户名但密码为空现在明确报错而不是发半个凭证对。
+- 删掉未使用的 `pickUpstream`。
+
+### 代理池质量
+- **raw 队列改成真 FIFO**：ZSET 分数以前用时间戳字符串，是**字典序**排序 ——
+  `1699999999` 排在 `1700000000` 后面，老代理反而先被淘汰。现在用纳秒时间戳。
+- **ZCard 失败 fail-closed**：`room := 0`，而不是假设有空位继续写。
+- **`MarkValidated` 原子化**：meta 写入与 zset 移动放进同一个 pipeline。
+- **`Overview.RedisOK` 反映真实健康**：`redisOK && store.Healthy()`，Redis 报错或内存库故障都能看到。
+- **geo worker 持久化地区**：`applyRegionToHost` 用 `ListFilter` 查主机现有节点再写回。
+- `SaveGroup` / `DeleteGroup` / `SaveSourceYield` / `SaveScraperStat` 现在都会 `markDirty`，
+  快照不会漏掉这些改动；`pickRNG` 改成包级加锁源，不再每次 pick 新建一个 `rand`。
+- **IPv6 地址规范化**：`net.ParseIP(...).String()` 统一格式，避免同一地址因文本形式不同重复入池。
+
+### 测试
+- 新增回归测试：mihomo 校验和不匹配/缺失拒绝安装、出口拒绝清单（HTTP 与 SOCKS5）、
+  ss 分享链传输参数、私网目标提交拒绝、YAML 坏条目上报。
+- `TestParseYAMLSkipsBadSSKeepsGood` 更新：坏节点仍被跳过，但拒绝原因现在会被上报。
+- 前端 `tsc --noEmit` 通过。
+
+---
+
 ## Unreleased — 2026-09-11 · 探测经前置节点
 
 把校验探测接到和客户端流量同一条路上，并补上 exit 模式下残留的误归因漏洞；CI 消除 Node 20 弃用告警。
