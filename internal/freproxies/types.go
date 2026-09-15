@@ -12,6 +12,56 @@ const (
 	ScoreMin  = 0
 )
 
+// Quality scoring.
+//
+// MarkValidated used to write a flat ScoreMax on every success, so keyScored
+// could not rank the pool at all and picks fell back to random sampling within
+// it (see the ZRandMember comment in store.go). A 3-second proxy and a
+// 100-millisecond proxy were indistinguishable at the score level. These turn
+// the latency reading into a continuous quality score.
+const (
+	// qualityScorePerMS is how much latency costs: 100ms keeps 98, 1s keeps 80,
+	// 3s keeps 40.
+	qualityScorePerMS = 50
+	// qualityFloor keeps a slow-but-working proxy reachable. The per-pick
+	// weight already decays with latency, so the floor only has to stop the
+	// score from signalling "dead".
+	qualityFloor = 20
+)
+
+// qualityScore maps a latency reading onto [qualityFloor, ScoreMax]. Negative
+// or zero latency (clock skew, an instant cached hit) reads as fully healthy.
+func qualityScore(latencyMS int64) float64 {
+	if latencyMS <= 0 {
+		return ScoreMax
+	}
+	score := float64(ScoreMax) - float64(latencyMS)/float64(qualityScorePerMS)
+	if score < qualityFloor {
+		score = qualityFloor
+	}
+	if score > ScoreMax {
+		score = ScoreMax
+	}
+	return score
+}
+
+// smoothLatency damps single-sample jitter with an exponential moving average.
+// A proxy that is fast for hours should not plummet in weight because one probe
+// hit a slow route, and a proxy recovering from a slow spell should not jump to
+// the top on one good reading.
+func smoothLatency(prev, next int64) int64 {
+	if prev <= 0 {
+		return next
+	}
+	return int64(0.7*float64(prev) + 0.3*float64(next))
+}
+
+// blendScore eases a live proxy toward a new quality reading instead of
+// jumping straight to it. Same reasoning as smoothLatency, applied to score.
+func blendScore(prev, quality float64) float64 {
+	return 0.7*prev + 0.3*quality
+}
+
 // IP family identifiers used by Proxy.IPFamily and ListFilter.Family.
 const (
 	FamilyIPv4    = "ipv4"
@@ -258,6 +308,45 @@ func BuiltinGroups() []ProxyGroup {
 		{Name: "socks5", Label: "SOCKS5", Builtin: true, Rule: GroupRule{Protocols: []string{"socks5"}}},
 		{Name: "validated", Label: "已验证", Builtin: true, Rule: GroupRule{OnlyOK: true}},
 	}
+}
+
+// QualityBuckets is the validated pool spread across the quality scale. It is
+// the honest health read: a healthy pool clusters in the high buckets, while a
+// pool that survives only on slow proxies sags into the low ones. Buckets are
+// labelled by score range so the panel can render them without knowing the
+// numeric scale.
+type QualityBuckets struct {
+	Buckets   []ScoreBucket `json:"buckets"`
+	Total     int64         `json:"total"`
+	AvgScore  float64       `json:"avg_score"`
+	UpdatedAt string        `json:"updated_at"`
+}
+
+// ScoreBucket is one quality range. High is what the pool wants to be made of.
+type ScoreBucket struct {
+	Label string  `json:"label"` // "81-100", "61-80", ...
+	Min   float64 `json:"min"`
+	Max   float64 `json:"max"`
+	Count int64   `json:"count"`
+}
+
+// qualityBucketEdges partitions [0, ScoreMax] into the ranges the panel shows.
+// Five even bands over a 0-100 scale.
+var qualityBucketEdges = [][2]float64{
+	{0, 20}, {21, 40}, {41, 60}, {61, 80}, {81, 100},
+}
+
+// bucketForScore returns the edge range a score falls into.
+func bucketForScore(score float64) [2]float64 {
+	for _, e := range qualityBucketEdges {
+		if score >= e[0] && score <= e[1] {
+			return e
+		}
+	}
+	if score < 0 {
+		return qualityBucketEdges[0]
+	}
+	return qualityBucketEdges[len(qualityBucketEdges)-1]
 }
 
 type ValidatorQueues struct {

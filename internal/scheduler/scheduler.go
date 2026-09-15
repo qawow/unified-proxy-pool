@@ -42,6 +42,25 @@ func (s *Scheduler) SetNetLoad(n *netload.Sampler) {
 	s.netload = n
 }
 
+// validateBatchSize picks how many proxies one batch tests. The point of
+// scaling it with load is throughput, not politeness — the concurrency limiter
+// already handles politeness. A bigger batch amortises the fixed cost of
+// listing from Redis and reporting, and it is what lets an idle box clear the
+// whole raw queue inside one pass instead of leaving the tail unvalidated.
+func validateBatchSize(n *netload.Sampler) int64 {
+	base := int64(600)
+	if n == nil {
+		return base
+	}
+	lvl := n.Level()
+	if lvl.Reason != "" {
+		// Narrow while yielding, so a batch finishes and hands the link back
+		// instead of overlapping the backoff with more in-flight probes.
+		return int64(250)
+	}
+	return base
+}
+
 func (s *Scheduler) SetIntervalProvider(p IntervalProvider) {
 	s.intervals = p
 }
@@ -155,7 +174,13 @@ func (s *Scheduler) validateOnce(ctx context.Context) {
 	deadline := time.Now().Add(7 * time.Minute)
 	left := 0
 	for {
-		left = s.validator.ValidateBatch(runCtx, 400)
+		// A 4000-entry raw pool at 400 a batch needs ten batches; the old fixed
+		// 400 left a third of the pool unvalidated when the 7-minute deadline
+		// arrived, and the slow-validated ones never got their second chance.
+		// The size scales with the measured load: idle runs wide and drains the
+		// queue, busy runs narrow so each batch finishes before yielding.
+		size := validateBatchSize(s.netload)
+		left = s.validator.ValidateBatch(runCtx, size)
 		if left <= 0 || runCtx.Err() != nil || time.Now().After(deadline) {
 			break
 		}

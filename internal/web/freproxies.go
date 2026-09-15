@@ -65,6 +65,23 @@ func (a *App) handleNetLoad(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
+// handleQualitySnapshot reports how the pool's validated proxies are spread
+// across the quality scale. With continuous scoring the shape of this
+// distribution is the honest health read on the pool: a healthy pool clusters
+// high, a pool full of slow-but-alive proxies sags toward the floor.
+func (a *App) handleQualitySnapshot(w http.ResponseWriter, r *http.Request) {
+	if a.free == nil {
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{}})
+		return
+	}
+	snap, err := a.free.Store().QualitySnapshot(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: snap})
+}
+
 func (a *App) handleFreeProxyList(w http.ResponseWriter, r *http.Request) {
 	if a.free == nil {
 		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: freproxies.ListResult{Items: []freproxies.Proxy{}}})

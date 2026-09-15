@@ -231,6 +231,7 @@ func (a *App) Router() (http.Handler, error) {
 
 			api.Get("/overview", a.handleOverview)
 			api.Get("/netload", a.handleNetLoad)
+			api.Get("/quality", a.handleQualitySnapshot)
 			api.Get("/proxies", a.handleFreeProxyList)
 			api.Get("/proxies/random", a.handleFreeProxyRandom)
 			api.Get("/proxies/count", a.handleFreeProxyCount)

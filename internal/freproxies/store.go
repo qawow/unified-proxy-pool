@@ -22,11 +22,13 @@ import (
 
 const (
 	keyScored = "upp:proxies:scored"
-	// keyChecked orders validated proxies by last check time. keyScored is
-	// ordered by quality score, but MarkValidated always writes ScoreMax, so
-	// ranges over it fell back to lexicographic address order: the same handful
-	// of addresses were re-checked and served forever while the rest of the pool
-	// was never revisited.
+	// keyChecked orders validated proxies by last check time. It exists because
+	// keyScored used to be useless for revalidation: MarkValidated wrote a flat
+	// ScoreMax, so a range over keyScored fell back to lexicographic address
+	// order and the same handful of addresses were re-checked forever while the
+	// rest of the pool was never revisited. MarkValidated now writes a
+	// continuous quality score derived from EMA latency, so keyScored ranks the
+	// pool properly; keyChecked is still what rotates revalidation fairly.
 	keyChecked    = "upp:proxies:checked"
 	keyRaw        = "upp:proxies:raw"
 	keyRetry      = "upp:proxies:retry"
@@ -85,6 +87,9 @@ type Store interface {
 	RegionTop(ctx context.Context, limit int) ([]RegionCount, error)
 	Queues(ctx context.Context) (ValidatorQueues, error)
 	AvgScore(ctx context.Context) (float64, error)
+	// QualitySnapshot buckets validated proxies by score so the panel can show
+	// whether the pool is genuinely healthy or just full of slow survivors.
+	QualitySnapshot(ctx context.Context) (QualityBuckets, error)
 	UpdateRegion(ctx context.Context, addr, region string) error
 	SaveGroup(ctx context.Context, g ProxyGroup) error
 	ListGroups(ctx context.Context) ([]ProxyGroup, error)
@@ -411,10 +416,19 @@ func (s *redisStore) MarkValidated(ctx context.Context, addr string, latencyMS i
 	now := time.Now().UTC()
 	p.LastCheck = now
 	p.UpdatedAt = now
-	p.LatencyMS = latencyMS
+	wasLive := p.Validated
+	p.LatencyMS = smoothLatency(p.LatencyMS, latencyMS)
 	if ok {
 		p.Validated = true
-		p.Score = ScoreMax
+		// A flat ScoreMax made every validated proxy identical at the score
+		// level; now the score tracks the EMA latency, eased toward for proxies
+		// that were already live so one slow probe cannot halve their standing.
+		quality := qualityScore(p.LatencyMS)
+		if wasLive {
+			p.Score = blendScore(p.Score, quality)
+		} else {
+			p.Score = quality
+		}
 		p.FailCount = 0
 		pipe := s.rdb.Pipeline()
 		pipe.ZRem(ctx, keyRaw, addr)
@@ -430,7 +444,6 @@ func (s *redisStore) MarkValidated(ctx context.Context, addr string, latencyMS i
 		_, err = pipe.Exec(ctx)
 		return err
 	}
-	wasLive := p.Validated
 	p.FailCount++
 	p.Score = p.Score - 1
 	if p.Score < ScoreMin {
@@ -511,9 +524,11 @@ func (s *redisStore) RandomN(ctx context.Context, protocol string, n int) ([]Pro
 	if fetch > 128 {
 		fetch = 128
 	}
-	// ZRandMember, not ZRevRange: every validated proxy scores ScoreMax, so a
-	// range returned the same lexicographic window on every call and the rest of
-	// the pool was never handed out.
+	// ZRandMember, not ZRevRange: a fixed range would hand out the same window
+	// on every call and starve the rest of the pool. With continuous quality
+	// scores now in keyScored the window is still sampled at random for
+	// fairness, then ranked by latency below so the fastest of the sampled set
+	// is served first.
 	members, err := s.rdb.ZRandMember(ctx, keyScored, int(fetch)).Result()
 	if err != nil {
 		return nil, err
@@ -1039,6 +1054,40 @@ func (s *redisStore) AvgScore(ctx context.Context) (float64, error) {
 	return sum / float64(len(members)), nil
 }
 
+func (s *redisStore) QualitySnapshot(ctx context.Context) (QualityBuckets, error) {
+	members, err := s.rdb.ZRangeWithScores(ctx, keyScored, 0, -1).Result()
+	if err != nil {
+		return QualityBuckets{}, err
+	}
+	out := QualityBuckets{
+		Buckets:   make([]ScoreBucket, 0, len(qualityBucketEdges)),
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	for _, e := range qualityBucketEdges {
+		out.Buckets = append(out.Buckets, ScoreBucket{
+			Label: fmt.Sprintf("%g-%g", e[0], e[1]),
+			Min:   e[0],
+			Max:   e[1],
+		})
+	}
+	var sum float64
+	for _, z := range members {
+		sum += z.Score
+		edge := bucketForScore(z.Score)
+		for i := range out.Buckets {
+			if out.Buckets[i].Min == edge[0] {
+				out.Buckets[i].Count++
+				break
+			}
+		}
+	}
+	out.Total = int64(len(members))
+	if out.Total > 0 {
+		out.AvgScore = sum / float64(out.Total)
+	}
+	return out, nil
+}
+
 func (s *redisStore) UpdateRegion(ctx context.Context, addr, region string) error {
 	p, err := s.Get(ctx, addr)
 	if err != nil {
@@ -1258,10 +1307,16 @@ func (s *memoryStore) MarkValidated(ctx context.Context, addr string, latencyMS 
 	now := time.Now().UTC()
 	p.LastCheck = now
 	p.UpdatedAt = now
-	p.LatencyMS = latencyMS
+	wasLive := p.Validated
+	p.LatencyMS = smoothLatency(p.LatencyMS, latencyMS)
 	if ok {
 		p.Validated = true
-		p.Score = ScoreMax
+		quality := qualityScore(p.LatencyMS)
+		if wasLive {
+			p.Score = blendScore(p.Score, quality)
+		} else {
+			p.Score = quality
+		}
 		p.FailCount = 0
 		delete(s.raw, addr)
 		delete(s.retry, addr)
@@ -1270,7 +1325,6 @@ func (s *memoryStore) MarkValidated(ctx context.Context, addr string, latencyMS 
 		s.markDirty()
 		return nil
 	}
-	wasLive := p.Validated
 	p.FailCount++
 	p.Score--
 	if p.Score <= 0 {
@@ -1611,6 +1665,39 @@ func (s *memoryStore) AvgScore(ctx context.Context) (float64, error) {
 		sum += s.proxies[addr].Score
 	}
 	return sum / float64(len(s.scored)), nil
+}
+
+func (s *memoryStore) QualitySnapshot(ctx context.Context) (QualityBuckets, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := QualityBuckets{
+		Buckets:   make([]ScoreBucket, 0, len(qualityBucketEdges)),
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	for _, e := range qualityBucketEdges {
+		out.Buckets = append(out.Buckets, ScoreBucket{
+			Label: fmt.Sprintf("%g-%g", e[0], e[1]),
+			Min:   e[0],
+			Max:   e[1],
+		})
+	}
+	var sum float64
+	for addr := range s.scored {
+		score := s.proxies[addr].Score
+		sum += score
+		edge := bucketForScore(score)
+		for i := range out.Buckets {
+			if out.Buckets[i].Min == edge[0] {
+				out.Buckets[i].Count++
+				break
+			}
+		}
+	}
+	out.Total = int64(len(s.scored))
+	if out.Total > 0 {
+		out.AvgScore = sum / float64(out.Total)
+	}
+	return out, nil
 }
 
 func (s *memoryStore) UpdateRegion(ctx context.Context, addr, region string) error {
