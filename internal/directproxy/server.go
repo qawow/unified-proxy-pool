@@ -817,15 +817,26 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 	upstreams := res.Items
 	var lastErr error
 	for _, up := range upstreams {
+		// Each candidate gets its own budget, derived from the parent context
+		// rather than from dialCtx: a derived deadline can never exceed the
+		// parent's remaining time, so hanging every attempt off dialCtx would
+		// still let the first slow proxy eat the whole budget and leave the
+		// rest instantly expired. The chain path fixes this the same way. This
+		// is what made a pool of 1s+ survivors evict its own working proxies:
+		// each one was scored dead for a budget exhaustion that was never its
+		// failure.
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, dialBudget)
 		start := time.Now()
 		wired, werr := s.withVia([]freproxies.Proxy{up})
 		if werr != nil {
+			attemptCancel()
 			// Fail closed: exit_via is set but unusable. Do not dial `up` at
 			// all — that would send the client out bare while the panel claims
 			// a VPS front is in place.
 			return nil, freproxies.Proxy{}, werr
 		}
-		conn, err := dialProxyChainPool(dialCtx, wired, target, s.getViaPool())
+		conn, err := dialProxyChainPool(attemptCtx, wired, target, s.getViaPool())
+		attemptCancel()
 		if err == nil {
 			if stickyOn && clientIP != "" {
 				sticky.PutProxy(clientIP, up.Addr, up.Protocol)
@@ -839,7 +850,7 @@ func (s *Server) dialViaWithFailoverClient(ctx context.Context, target, clientIP
 		// Parent-deadline exhaustion is a budget matter, not this proxy's
 		// verdict; keep it as lastErr but skip the scoring below.
 		lastErr = err
-		if errors.Is(err, context.DeadlineExceeded) && dialCtx.Err() != nil {
+		if errors.Is(err, context.DeadlineExceeded) && (attemptCtx.Err() != nil || dialCtx.Err() != nil) {
 			continue
 		}
 		// A dead front node must stop the loop, not walk it: exit mode surfaces
