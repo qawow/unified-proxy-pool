@@ -25,6 +25,7 @@ import (
 	"unified-proxy-pool/internal/freproxies"
 	"unified-proxy-pool/internal/geoip"
 	"unified-proxy-pool/internal/mihomo"
+	"unified-proxy-pool/internal/netload"
 	"unified-proxy-pool/internal/nodes"
 	"unified-proxy-pool/internal/pools"
 	"unified-proxy-pool/internal/probe"
@@ -178,9 +179,14 @@ func Run() {
 
 	poolSvc.SetFreeService(freeSvc)
 	sourcestats.Default.Attach(store)
+	// Start the network-load sampler before the validator runs, so its first
+	// reading is a real one instead of an empty window.
+	netload.Default.Start(rootCtx)
 	valSvc := validator.New(cfg, freeSvc)
 	valSvc.SetDB(store)
+	valSvc.SetNetLoad(netload.Default)
 	sched := scheduler.New(cfg, freeSvc, valSvc)
+	sched.SetNetLoad(netload.Default)
 	sched.SetIntervalProvider(func(ctx context.Context) (scrapeSec, validateSec int) {
 		st, err := settingsSvc.Get(ctx)
 		if err != nil {

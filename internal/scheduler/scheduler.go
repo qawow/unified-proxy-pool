@@ -9,6 +9,7 @@ import (
 
 	"unified-proxy-pool/internal/config"
 	"unified-proxy-pool/internal/freproxies"
+	"unified-proxy-pool/internal/netload"
 	"unified-proxy-pool/internal/validator"
 )
 
@@ -23,6 +24,7 @@ type Scheduler struct {
 	validating bool
 
 	intervals IntervalProvider
+	netload   *netload.Sampler
 	// last run unix for dynamic interval
 	lastScrapeUnix   atomic.Int64
 	lastValidateUnix atomic.Int64
@@ -32,6 +34,12 @@ type Scheduler struct {
 
 func New(cfg config.App, free *freproxies.Service, val *validator.Service) *Scheduler {
 	return &Scheduler{cfg: cfg, free: free, validator: val}
+}
+
+// SetNetLoad wires the sampler used to pause validation while the network is
+// busy. nil keeps the old fixed-interval behaviour.
+func (s *Scheduler) SetNetLoad(n *netload.Sampler) {
+	s.netload = n
 }
 
 func (s *Scheduler) SetIntervalProvider(p IntervalProvider) {
@@ -150,6 +158,20 @@ func (s *Scheduler) validateOnce(ctx context.Context) {
 		left = s.validator.ValidateBatch(runCtx, 400)
 		if left <= 0 || runCtx.Err() != nil || time.Now().After(deadline) {
 			break
+		}
+		// The network is busy: hold the next slice for a moment so validation
+		// yields the uplink between batches instead of running 400-wide slices
+		// back to back through a whole 7-minute pass. The watcher inside
+		// ValidateBatch already trimmed the concurrency; this is the second
+		// half of the same idea — pause the pace, not just the width.
+		if s.netload != nil {
+			if reason, busy := s.netload.Level().Busy(); busy {
+				log.Printf("validator holding next batch: %s", reason)
+				select {
+				case <-runCtx.Done():
+				case <-time.After(3 * time.Second):
+				}
+			}
 		}
 		// Next slice of the same pass, without waiting for validate_interval.
 	}

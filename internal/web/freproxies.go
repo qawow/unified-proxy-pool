@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unified-proxy-pool/internal/netload"
 
 	"github.com/go-chi/chi/v5"
 
@@ -48,6 +49,20 @@ func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTrafficStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: traffic.Get(r.Context())})
+}
+
+// handleNetLoad reports how busy the panel's own network path is and what the
+// adaptive throttling is currently doing about it. This is the answer to "why
+// is validation slow right now" — usually: someone is using the proxies.
+func (a *App) handleNetLoad(w http.ResponseWriter, r *http.Request) {
+	lvl := netload.Default.Level()
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
+		"level":                lvl,
+		"busy":                 lvl.Reason != "",
+		"egress_bytes_per_sec": lvl.EgressBytesPerSec,
+		"client_conns":         lvl.ClientConns,
+		"score":                lvl.Score,
+	}})
 }
 
 func (a *App) handleFreeProxyList(w http.ResponseWriter, r *http.Request) {

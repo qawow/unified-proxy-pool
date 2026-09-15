@@ -12,6 +12,7 @@ import (
 	"unified-proxy-pool/internal/config"
 	"unified-proxy-pool/internal/db"
 	"unified-proxy-pool/internal/freproxies"
+	"unified-proxy-pool/internal/netload"
 	"unified-proxy-pool/internal/sourcestats"
 	"unified-proxy-pool/internal/webhook"
 )
@@ -58,6 +59,7 @@ type Service struct {
 	sourceBatch  map[string][2]int
 	rawTotal     int
 	rawUnchecked int
+	netload      *netload.Sampler
 }
 
 var liveMu sync.RWMutex
@@ -179,6 +181,17 @@ func (s *Service) LastBatch() BatchSummary {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.lastBatch
+}
+
+// SetNetLoad wires the adaptive-throttling sampler. nil is valid and disables
+// adaptation, leaving the fixed settings concurrency in place.
+func (s *Service) SetNetLoad(sampler *netload.Sampler) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.netload = sampler
+	s.mu.Unlock()
 }
 
 // LastSourceBatch is this-round ok/fail per source (skips like blocked-country omitted).
@@ -322,7 +335,16 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 		" urls="+strconv.Itoa(len(urls)), "", 0)
 	defer DefaultLogs.SetRunning(false)
 
-	sem := make(chan struct{}, concurrency)
+	// The concurrency from settings is a ceiling, not a constant. netload
+	// watches the real traffic this box is doing and tightens the semaphore
+	// when clients are actively using the proxies or the link is saturated,
+	// so validating a 4000-entry pool cannot crowd out the traffic the
+	// panel exists to serve.
+	sem := netload.NewSem(concurrency)
+	if s.netload != nil {
+		stop := s.netload.Watch(ctx, sem, concurrency)
+		defer stop()
+	}
 	var wg sync.WaitGroup
 	var okCount, failCount int
 	var mu sync.Mutex
@@ -330,10 +352,15 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 	for _, p := range batch {
 		p := p
 		wg.Add(1)
-		sem <- struct{}{}
+		if err := sem.Acquire(ctx); err != nil {
+			// The batch ran out of time before this proxy was tested; record
+			// nothing, the same as the ErrCheckAborted path below.
+			wg.Done()
+			continue
+		}
 		go func() {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer sem.Release()
 			// One call, one persisted verdict. Looping TestProxyOpts per URL made
 			// each attempt mutate the store, so a proxy could be deleted by URL 1
 			// and re-created with the wrong protocol by URL 2.

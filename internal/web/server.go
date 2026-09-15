@@ -230,6 +230,7 @@ func (a *App) Router() (http.Handler, error) {
 			api.Post("/cfscan/apply", a.handleCFScanApply)
 
 			api.Get("/overview", a.handleOverview)
+			api.Get("/netload", a.handleNetLoad)
 			api.Get("/proxies", a.handleFreeProxyList)
 			api.Get("/proxies/random", a.handleFreeProxyRandom)
 			api.Get("/proxies/count", a.handleFreeProxyCount)
