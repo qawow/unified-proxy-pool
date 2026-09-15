@@ -145,6 +145,24 @@ func DefaultSources() []Crawler {
 		PlainText("prxchk-http", gh("prxchk/proxy-list/main/http.txt"), "http", false, true),
 		PlainText("prxchk-socks4", gh("prxchk/proxy-list/main/socks4.txt"), "socks4", false, true),
 
+		// ---- found 2026-09-15 via ./scripts/discover-sources.sh ----
+		// ADDS is the honest gain after subtracting what higher-ranked new
+		// sources already cover; Thordata/awesome-free-proxy-list looked good
+		// (auto-verified daily by GitHub Actions) but scored MOSTLY-DUP across
+		// all four protocol files and is not worth the fetch cost.
+		// officialputuid/KangProxy: 14k commits, refreshed very often.
+		// https.txt is the largest single gain of this round (6411 total).
+		// Labelled http: these are HTTP proxies that also carry CONNECT, which
+		// is what the validator probes for either way.
+		PlainText("officialputuid-https", gh("officialputuid/KangProxy/main/https/https.txt"), "http", false, true),
+		PlainText("officialputuid-http", gh("officialputuid/KangProxy/main/http/http.txt"), "http", false, true),
+		PlainText("officialputuid-socks5", gh("officialputuid/KangProxy/main/socks5/socks5.txt"), "socks5", false, true),
+		// VPSLabCloud: updated every 15 minutes; files carry a 3-line comment
+		// header that the plaintext parser skips. socks4_all and http_ssl
+		// scored MOSTLY-DUP/REDUNDANT, so only the two distinct lists are here.
+		PlainText("vpslabcloud-http", gh("VPSLabCloud/VPSLab-Free-Proxy-List/main/http_all.txt"), "http", false, true),
+		PlainText("vpslabcloud-socks5", gh("VPSLabCloud/VPSLab-Free-Proxy-List/main/socks5_all.txt"), "socks5", false, true),
+
 		// ---- JSON / API style (jhao / webspider) ----
 		//
 		// These must be JSONSource, not RegexSource. They publish host and port

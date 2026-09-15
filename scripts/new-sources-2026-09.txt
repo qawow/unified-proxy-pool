@@ -1,0 +1,20 @@
+# 2026-09-15 新发现的候选源，全部已手工 curl 实测有真实 IP:port 产出。
+# 喂给 discover 测真正增量（这些清单互相镜像，总数大不代表有新地址）。
+
+# ---- Thordata/awesome-free-proxy-list：GitHub Actions 每日自动校验 ----
+https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/http.txt
+https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/https.txt
+https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/socks4.txt
+https://raw.githubusercontent.com/Thordata/awesome-free-proxy-list/main/proxies/socks5.txt
+
+# ---- VPSLabCloud/VPSLab-Free-Proxy-List：每 15 分钟更新，文件带 3 行注释头 ----
+https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/http_all.txt
+https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/http_ssl.txt
+https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/socks4_all.txt
+https://raw.githubusercontent.com/VPSLabCloud/VPSLab-Free-Proxy-List/main/socks5_all.txt
+
+# ---- officialputuid/KangProxy：1.4 万次提交，更新极频繁 ----
+https://raw.githubusercontent.com/officialputuid/KangProxy/main/http/http.txt
+https://raw.githubusercontent.com/officialputuid/KangProxy/main/https/https.txt
+https://raw.githubusercontent.com/officialputuid/KangProxy/main/socks4/socks4.txt
+https://raw.githubusercontent.com/officialputuid/KangProxy/main/socks5/socks5.txt
