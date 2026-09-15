@@ -267,13 +267,31 @@ func Run() {
 	probeSvc.Start(rootCtx)
 	subSvc.StartScheduler(rootCtx)
 
+	cfSvc := cfscan.New(store, broker)
+	// Default the scan to the panel's own proxy exit. Without this, a CF 优选
+	// scan dials :443 directly from the panel host — and on a network that
+	// blocks outbound 443 (the common case this feature is asked about) every
+	// single IP reports closed and the feature looks dead. The request can
+	// still override with an explicit proxy_url, including "none" to scan
+	// direct.
+	cfSvc.SetProxyResolver(func(ctx context.Context) string {
+		if direct == nil {
+			return ""
+		}
+		st := direct.Status()
+		if !st.Running {
+			return ""
+		}
+		return st.ClientHTTP
+	})
+
 	webApp, err := web.New(authSvc, settingsSvc, nodeSvc, subSvc, poolSvc, probeSvc, mihomoMgr, mihomoInstaller, broker, freeSvc, sched, direct, scraperSvc, cfg, requestShutdown, web.FeatureDeps{
 		Blacklist:   blStore,
 		Audit:       auditStore,
 		Tokens:      tokenStore,
 		TrafficHist: trafficHistStore,
 		Channels:    channels,
-		CFScan:      cfscan.New(store, broker),
+		CFScan:      cfSvc,
 	})
 	if err != nil {
 		log.Fatalf("build web app: %v", err)

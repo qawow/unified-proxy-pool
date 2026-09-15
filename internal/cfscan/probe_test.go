@@ -15,6 +15,11 @@ import (
 	"time"
 )
 
+// directDial is the zero-proxy dialer used by the probe tests.
+func directDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	return (&net.Dialer{}).DialContext(ctx, network, addr)
+}
+
 func TestTLSProbeHitsLocalCFTrace(t *testing.T) {
 	ln := serveTLSTrace(t, "fl=99f\ncolo=LAX\nsliver=a\n")
 	defer ln.Close()
@@ -23,7 +28,7 @@ func TestTLSProbeHitsLocalCFTrace(t *testing.T) {
 	fmt.Sscanf(port, "%d", &p)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	h, ok := tlsCFProbe(ctx, "127.0.0.1", p, "speed.cloudflare.com", 2*time.Second, 2*time.Second)
+	h, ok := tlsCFProbe(ctx, "127.0.0.1", p, "speed.cloudflare.com", 2*time.Second, 2*time.Second, directDial)
 	if !ok {
 		t.Fatal("expected hit")
 	}
@@ -40,7 +45,7 @@ func TestTLSProbeRejectsPlainHTTP(t *testing.T) {
 	fmt.Sscanf(port, "%d", &p)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, ok := tlsCFProbe(ctx, "127.0.0.1", p, "speed.cloudflare.com", 2*time.Second, 2*time.Second); ok {
+	if _, ok := tlsCFProbe(ctx, "127.0.0.1", p, "speed.cloudflare.com", 2*time.Second, 2*time.Second, directDial); ok {
 		t.Fatal("nginx body must not count as CF")
 	}
 }

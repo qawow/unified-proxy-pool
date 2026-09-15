@@ -32,9 +32,8 @@ type Hit struct {
 	LastSeen  string `json:"last_seen"`
 }
 
-func tcpOpen(ctx context.Context, ip string, port int, timeout time.Duration) bool {
-	d := net.Dialer{Timeout: timeout}
-	c, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
+func tcpOpen(ctx context.Context, ip string, port int, timeout time.Duration, dial dialFunc) bool {
+	c, err := dial(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
 	if err != nil {
 		return false
 	}
@@ -42,9 +41,14 @@ func tcpOpen(ctx context.Context, ip string, port int, timeout time.Duration) bo
 	return true
 }
 
-func tlsCFProbe(ctx context.Context, ip string, port int, sni string, handshake, read time.Duration) (Hit, bool) {
-	d := &net.Dialer{Timeout: handshake}
-	raw, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
+// dialFunc is the net.Dialer shape plus any proxy-backed dialer. cfscan needs
+// to reach :443, and the panel's own network may block direct 443 while the
+// proxy pool can still get there — so the scan dials through a proxy when one
+// is configured, and directly otherwise.
+type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+func tlsCFProbe(ctx context.Context, ip string, port int, sni string, handshake, read time.Duration, dial dialFunc) (Hit, bool) {
+	raw, err := dial(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
 	if err != nil {
 		return Hit{}, false
 	}

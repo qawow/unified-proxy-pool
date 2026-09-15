@@ -3,6 +3,7 @@ package cfscan
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,6 +23,11 @@ type Status struct {
 	Error      string `json:"error,omitempty"`
 	StartedAt  string `json:"started_at,omitempty"`
 	FinishedAt string `json:"finished_at,omitempty"`
+	// ViaProxy names the proxy the scan is routed through, or "" when direct.
+	// Scanning direct on a network that blocks outbound :443 yields zero open
+	// ports and looks like a broken feature; this field is how the operator
+	// tells the two apart.
+	ViaProxy string `json:"via_proxy,omitempty"`
 }
 
 type RunRequest struct {
@@ -30,19 +36,39 @@ type RunRequest struct {
 	TLSConc      int    `json:"tls_conc"`
 	TCPTimeoutMS int    `json:"tcp_timeout_ms"`
 	TLSTimeoutMS int    `json:"tls_timeout_ms"`
+	// ProxyURL routes both scan phases through a proxy. Empty means scan
+	// directly. This exists because the panel's own network may block outbound
+	// :443 (which is exactly what a CF 优选 scan targets), while the proxy pool
+	// can still reach it — without this the scan reports 0 open on every IP and
+	// the feature looks broken when it is the network that is broken.
+	ProxyURL string `json:"proxy_url"`
 }
+
+// ProxyResolver supplies the proxy to scan through when the request does not
+// name one. The panel wires this to its own proxy exit so "scan via pool" is
+// one click instead of a URL hunt.
+type ProxyResolver func(ctx context.Context) string
 
 type Service struct {
 	store  *db.Store
 	events *events.Broker
 
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	st     Status
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	st      Status
+	resolve ProxyResolver
 }
 
 func New(store *db.Store, broker *events.Broker) *Service {
 	return &Service{store: store, events: broker}
+}
+
+// SetProxyResolver wires the default scan proxy. nil disables the default and
+// leaves scans direct unless the request names a proxy.
+func (s *Service) SetProxyResolver(r ProxyResolver) {
+	s.mu.Lock()
+	s.resolve = r
+	s.mu.Unlock()
 }
 
 func (s *Service) Status() Status {
@@ -126,6 +152,23 @@ func (s *Service) Start(req RunRequest) error {
 		tlsTO = 4000 * time.Millisecond
 	}
 
+	// Resolve the proxy once, before the run starts: failing to build the
+	// dialer must fail the request loudly, not silently turn every probe into
+	// a miss halfway through the TCP phase.
+	proxyURL := req.ProxyURL
+	if strings.TrimSpace(proxyURL) == "" {
+		s.mu.Lock()
+		r := s.resolve
+		s.mu.Unlock()
+		if r != nil {
+			proxyURL = r(context.Background())
+		}
+	}
+	dial, err := buildDialer(proxyURL)
+	if err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	if s.st.Running {
 		s.mu.Unlock()
@@ -134,9 +177,10 @@ func (s *Service) Start(req RunRequest) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.st = Status{Running: true, Phase: "tcp", Total: len(ips), StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	s.st.ViaProxy = proxyURL
 	s.mu.Unlock()
 
-	go s.run(ctx, ips, tcpConc, tlsConc, tcpTO, tlsTO)
+	go s.run(ctx, ips, tcpConc, tlsConc, tcpTO, tlsTO, dial)
 	return nil
 }
 
@@ -146,7 +190,7 @@ type errString string
 
 func (e errString) Error() string { return string(e) }
 
-func (s *Service) run(ctx context.Context, ips []string, tcpConc, tlsConc int, tcpTO, tlsTO time.Duration) {
+func (s *Service) run(ctx context.Context, ips []string, tcpConc, tlsConc int, tcpTO, tlsTO time.Duration, dial dialFunc) {
 	defer func() {
 		s.mu.Lock()
 		s.st.Running = false
@@ -161,12 +205,12 @@ func (s *Service) run(ctx context.Context, ips []string, tcpConc, tlsConc int, t
 		}
 	}()
 
-	open := s.scanTCP(ctx, ips, tcpConc, tcpTO)
+	open := s.scanTCP(ctx, ips, tcpConc, tcpTO, dial)
 	if ctx.Err() != nil {
 		return
 	}
 	s.setPhase("tls")
-	s.scanTLS(ctx, open, tlsConc, tlsTO)
+	s.scanTLS(ctx, open, tlsConc, tlsTO, dial)
 }
 
 func (s *Service) setPhase(p string) {
@@ -175,7 +219,7 @@ func (s *Service) setPhase(p string) {
 	s.mu.Unlock()
 }
 
-func (s *Service) scanTCP(ctx context.Context, ips []string, conc int, timeout time.Duration) []string {
+func (s *Service) scanTCP(ctx context.Context, ips []string, conc int, timeout time.Duration, dial dialFunc) []string {
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
 	var openMu sync.Mutex
@@ -192,7 +236,7 @@ func (s *Service) scanTCP(ctx context.Context, ips []string, conc int, timeout t
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			ok := tcpOpen(ctx, ip, 443, timeout)
+			ok := tcpOpen(ctx, ip, 443, timeout, dial)
 			d := int(done.Add(1))
 			if ok {
 				n := int(nopen.Add(1))
@@ -214,7 +258,7 @@ func (s *Service) scanTCP(ctx context.Context, ips []string, conc int, timeout t
 	return open
 }
 
-func (s *Service) scanTLS(ctx context.Context, ips []string, conc int, handshake time.Duration) {
+func (s *Service) scanTLS(ctx context.Context, ips []string, conc int, handshake time.Duration, dial dialFunc) {
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
 	var done atomic.Int64
@@ -236,7 +280,7 @@ func (s *Service) scanTLS(ctx context.Context, ips []string, conc int, handshake
 				if ctx.Err() != nil {
 					break
 				}
-				got, ok := tlsCFProbe(ctx, ip, 443, sni, handshake, readTO)
+				got, ok := tlsCFProbe(ctx, ip, 443, sni, handshake, readTO, dial)
 				if ok {
 					h, hit = got, true
 					break
