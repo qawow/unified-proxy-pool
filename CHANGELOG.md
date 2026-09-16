@@ -1,3 +1,31 @@
+## Unreleased — 2026-09-15 · CF 优选可用化：扫描走代理出口 + 修隧道残留字节
+
+CF 优选扫描在「面板本机出站 443 被墙」的部署上 0 命中——扫描目标正是 :443，
+而本机恰好连不上 443（实测 1.1.1.1:443 BLOCKED、:80 OPEN）。功能本身没坏，
+是扫描走的网络不通。另外发现两个会直接导致功能不可用的代码缺陷。
+
+### 修复
+- **扫描走代理出口**：`RunRequest.proxy_url` 把 TCP/TLS 两个阶段都路由到代理；
+  支持 SOCKS5 与 HTTP CONNECT。面板默认把自己的 direct proxy 出口（7892）作为
+  默认扫描代理（`SetProxyResolver`），请求里可用 `proxy_url:"none"` 改回直连。
+- **修 CONNECT 响应残留字节**（致命）：原来逐字节读到第一个 `\r\n` 就 break，
+  空行 `\r\n` 留在流里，随后 TLS 握手第一个字节读到 0x0d 直接失败——
+  隧道是通的，但**一个命中都不会有**。现在读到响应头结束（兼容 LF-only 服务端）。
+- **修 CONNECT 握手无超时**（挂起）：TCP 阶段的 ctx 只有 cancel 没有 deadline，
+  代理若接受 TCP 不回 CONNECT 会永久挂起，泄漏 goroutine 与扫描信号量、卡死扫描。
+  现在握手固定 15s 上限。
+- 状态透出 `via_proxy`，直连 vs 走代理一目了然，「0 命中」时能分清是功能坏了
+  还是网络不通。
+
+### 测试
+- 新增 `TestScanE2EViaHTTPConnectProxy`：本地 TLS trace 服务 + HTTP CONNECT 代理
+  的端到端链路（TCP 探测 → 隧道 → TLS 握手 → trace 解析）。
+  **已验证能抓住残留字节 bug**（回退修复→"tunnel bytes are corrupted"，恢复→通过）。
+- 新增拨号器测试：直连可用、快捷词（pool/chain）必须报错而非静默直连、
+  坏 URL 必须报错、CONNECT 200/407 语义、扫描阶段确实全部经过拨号器。
+
+---
+
 ## Unreleased — 2026-09-15 · 修复单跳出口「一次性预算」：慢代理吃掉全部拨号预算
 
 **这是代理出口成功率 1.3% 的机制性根因。**
