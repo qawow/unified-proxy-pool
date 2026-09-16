@@ -367,15 +367,19 @@ type ValidatorQueues struct {
 	LastBatchRecheck int              `json:"last_batch_recheck"`
 	LastBatchAt      *time.Time       `json:"last_batch_at,omitempty"`
 	LastBatchMS      int64            `json:"last_batch_ms"`
-	Running          bool             `json:"running"`
-	BatchSize        int              `json:"batch_size"`
-	BatchDone        int              `json:"batch_done"`
-	LifetimeOK       int64            `json:"lifetime_ok"`
-	LifetimeFail     int64            `json:"lifetime_fail"`
-	LifetimeBatches  int64            `json:"lifetime_batches"`
-	RawUnchecked     int              `json:"raw_unchecked"`
-	RawScanLeft      int              `json:"raw_scan_left"`
-	History          []BatchHistory   `json:"history,omitempty"`
+	// LastFailReasons breaks a batch's failures down by class. The answer to
+	// "500/500 failed, why": all-timeouts is the network or the validate URL,
+	// all-refused is dead proxies, all-tls is interception.
+	LastFailReasons map[string]int `json:"last_fail_reasons,omitempty"`
+	Running         bool           `json:"running"`
+	BatchSize       int            `json:"batch_size"`
+	BatchDone       int            `json:"batch_done"`
+	LifetimeOK      int64          `json:"lifetime_ok"`
+	LifetimeFail    int64          `json:"lifetime_fail"`
+	LifetimeBatches int64          `json:"lifetime_batches"`
+	RawUnchecked    int            `json:"raw_unchecked"`
+	RawScanLeft     int            `json:"raw_scan_left"`
+	History         []BatchHistory `json:"history,omitempty"`
 }
 
 type BatchHistory struct {

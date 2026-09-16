@@ -1,3 +1,25 @@
+## Unreleased — 2026-09-16 · 校验可观测性：失败原因不再被丢弃
+
+生产日志里 100 条失败信息**全部**是 "proxy validation failed"，
+没有「超时/拒绝/握手失败」之分。一批 508 个只过 1 个时，这个缺失让
+「代理死了」和「网络坏了」完全无法区分。
+
+### 修复
+- **失败原因随错误链传播**：`TestProxyURLs` 原来返回固定的
+  `fmt.Errorf("proxy validation failed")`，把探测的真实 checkErr 丢了。现在包装为
+  `proxy validation failed: %w`，保留原因。
+- **分类器扩展**：`classifyValidateErr` 新增 `tls`（握手/证书失败——代理能连上但
+  TLS 被拦截，看起来像全网死代理）、`aborted`，并理顺 timeout 与 connect 的边界。
+- **批次级失败分布**：`BatchSummary.fail_reasons` 与 `/api/validator/queues` 的
+  `last_fail_reasons` 暴露按类别的失败计数。500/500 失败时一眼看出是
+  全 timeout（网络/校验URL问题）还是全 refused（代理真死）还是全 tls（被拦截）。
+
+### 测试
+- 新增 `internal/validator` 分类测试：9 类错误归类、**包装链仍按原因归类**
+  （这是本轮修复的关键——前缀不能淹没原因）、nil 安全。
+
+---
+
 ## Unreleased — 2026-09-15 · CF 优选可用化：扫描走代理出口 + 修隧道残留字节
 
 CF 优选扫描在「面板本机出站 443 被墙」的部署上 0 命中——扫描目标正是 :443，

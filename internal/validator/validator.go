@@ -24,6 +24,11 @@ type BatchSummary struct {
 	Recheck  int `json:"recheck"`
 	Duration time.Duration
 	At       time.Time `json:"at"`
+	// FailReasons breaks the failures down by class. A batch that fails 500/500
+	// is uninterpretable without it: all-timeouts says the network or the
+	// validate URL is the problem, all-refused says the proxies are gone,
+	// all-tls says something is intercepting the probes.
+	FailReasons map[string]int `json:"fail_reasons,omitempty"`
 }
 
 type Progress struct {
@@ -216,9 +221,21 @@ func classifyValidateErr(err error) string {
 	switch {
 	case strings.Contains(msg, "blocked country"):
 		return "blocked_country"
-	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline"):
+	case strings.Contains(msg, "aborted"):
+		return "aborted"
+	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline") || strings.Contains(msg, "i/o timeout"):
 		return "timeout"
-	case strings.Contains(msg, "connect") || strings.Contains(msg, "refused") || strings.Contains(msg, "no route"):
+	case strings.Contains(msg, "refused") || strings.Contains(msg, "no route") || strings.Contains(msg, "unreachable"):
+		// "connect: connection refused" is the signature of a proxy that is up
+		// but not serving; distinct from a timeout, which means it is gone or
+		// the route is blocked.
+		return "connect"
+	case strings.Contains(msg, "tls") || strings.Contains(msg, "handshake") || strings.Contains(msg, "certificate"):
+		// A proxy that connects but cannot complete a TLS handshake is often a
+		// MITM or a half-open port — worth its own bucket, since a pool full of
+		// these looks like a dead network when only TLS is broken.
+		return "tls"
+	case strings.Contains(msg, "connect"):
 		return "connect"
 	default:
 		return "fail"
@@ -349,6 +366,7 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 	var okCount, failCount int
 	var mu sync.Mutex
 	sourceBatch := map[string][2]int{}
+	failReasons := map[string]int{}
 	for _, p := range batch {
 		p := p
 		wg.Add(1)
@@ -406,6 +424,9 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 				pair := sourceBatch[p.Source]
 				pair[1]++
 				sourceBatch[p.Source] = pair
+				if failReasons != nil {
+					failReasons[kind]++
+				}
 			}
 			s.mu.Lock()
 			s.batchOK = okCount
@@ -420,6 +441,9 @@ func (s *Service) ValidateBatch(ctx context.Context, limit int64) int {
 	finished := BatchSummary{
 		OK: okCount, Fail: failCount, Raw: len(raw), Recheck: len(scored),
 		Duration: elapsed, At: time.Now().UTC(),
+	}
+	if failCount > 0 {
+		finished.FailReasons = failReasons
 	}
 	s.mu.Lock()
 	s.lastBatch = finished

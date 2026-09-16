@@ -779,6 +779,13 @@ func (s *Service) TestProxyURLs(ctx context.Context, addr string, validateURLs [
 	}
 	var latency int64
 	okResult := false
+	// lastCheckErr carries the most recent probe failure. Without it the
+	// returned error is a bare "proxy validation failed" and every downstream
+	// — the validator log, classifyValidateErr, the operator reading the panel
+	// — cannot tell a timeout from a refused connection from a TLS handshake
+	// failure. On a pool failing 99% a batch, that distinction is the whole
+	// difference between "these proxies are dead" and "my network is broken".
+	var lastCheckErr error
 	for _, u := range validateURLs {
 		if ctx.Err() != nil {
 			break
@@ -789,6 +796,9 @@ func (s *Service) TestProxyURLs(ctx context.Context, addr string, validateURLs [
 		var checkErr error
 		latency, okResult, checkErr = checkHTTPProxyPlan(attemptCtx, p, u, timeout, plan)
 		cancel()
+		if checkErr != nil {
+			lastCheckErr = checkErr
+		}
 		if okResult {
 			s.noteProbeFront(false)
 			break
@@ -834,7 +844,7 @@ func (s *Service) TestProxyURLs(ctx context.Context, addr string, validateURLs [
 	updated, err := s.store.Get(ctx, addr)
 	if err != nil {
 		if !okResult {
-			return p, fmt.Errorf("proxy validation failed")
+			return p, validationFailed(lastCheckErr)
 		}
 		return p, err
 	}
@@ -842,7 +852,7 @@ func (s *Service) TestProxyURLs(ctx context.Context, addr string, validateURLs [
 		s.publish("validate.finished", map[string]any{"addr": addr, "ok": okResult, "latency_ms": latency, "region": region})
 	}
 	if !okResult {
-		return updated, fmt.Errorf("proxy validation failed")
+		return updated, validationFailed(lastCheckErr)
 	}
 	return updated, nil
 }
@@ -851,6 +861,18 @@ func (s *Service) TestProxyURLs(ctx context.Context, addr string, validateURLs [
 func (s *Service) NotifyValidateBatch(okCount, failCount int) {
 	s.publish("validate.batch", map[string]any{"ok": okCount, "fail": failCount})
 }
+
+// validationFailed wraps the probe's real failure so callers can classify it.
+// A nil cause still reads as a plain failure, so nothing regresses when a URL
+// list is empty or every URL was skipped by a cancelled context.
+func validationFailed(cause error) error {
+	if cause == nil {
+		return errValidationFailed
+	}
+	return fmt.Errorf("proxy validation failed: %w", cause)
+}
+
+var errValidationFailed = errors.New("proxy validation failed")
 
 func (s *Service) Queues(ctx context.Context) (ValidatorQueues, error) {
 	return s.store.Queues(ctx)

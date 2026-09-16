@@ -813,6 +813,7 @@ func (a *App) handleValidatorQueues(w http.ResponseWriter, r *http.Request) {
 	item.LastBatchRaw = b.Raw
 	item.LastBatchRecheck = b.Recheck
 	item.LastBatchMS = b.Duration.Milliseconds()
+	item.LastFailReasons = b.FailReasons
 	if !b.At.IsZero() {
 		t := b.At
 		item.LastBatchAt = &t
