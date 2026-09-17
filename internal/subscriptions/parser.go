@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 
 	"unified-proxy-pool/internal/nodes"
@@ -45,6 +46,14 @@ func ParseSubscriptionContent(content string) ParseResult {
 			continue
 		}
 		result.Nodes = append(result.Nodes, node)
+	}
+	// scanner.Err() is the only signal that a line exceeded the 1MB buffer:
+	// Scan silently stops and the giant line is dropped, which would otherwise
+	// surface to the operator as "no nodes parsed" with no reason attached.
+	// The nodes package's parser already checks this; the subscription path
+	// shared the bug until here.
+	if err := scanner.Err(); err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("scan stopped: %w", err))
 	}
 	if len(result.Nodes) == 0 && len(result.Errors) == 0 {
 		result.Errors = append(result.Errors, errors.New("no nodes parsed"))

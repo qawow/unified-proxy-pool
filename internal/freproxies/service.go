@@ -875,10 +875,9 @@ func (s *Service) NotifyValidateBatch(okCount, failCount int) {
 // A nil cause still reads as a plain failure, so nothing regresses when a URL
 // list is empty or every URL was skipped by a cancelled context.
 func validationFailed(cause error) error {
-	if cause == nil {
-		return errValidationFailed
-	}
-	return fmt.Errorf("proxy validation failed: %w", cause)
+	// MUTATION: drop the cause; downstream classification degrades to "fail"
+	_ = cause
+	return errValidationFailed
 }
 
 var errValidationFailed = errors.New("proxy validation failed")
