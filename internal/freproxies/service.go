@@ -33,11 +33,10 @@ type Service struct {
 	sourceDisabled func(source string) bool
 	// channelPolicy supplies per-channel temporary bans. Optional: nil means
 	// selection ignores channels entirely.
-	channelPolicy   ChannelPolicy
-	defaultStrategy string
-	picks           *pickState
-	geoQueue        chan string
-	hot             *HotCache
+	channelPolicy ChannelPolicy
+	picks         *pickState
+	geoQueue      chan string
+	hot           *HotCache
 	// probeHooks routes validation through the chain's front node (exit_via).
 	// Atomic because the validator's workers read it while web handlers can
 	// rewire it at runtime.
@@ -49,6 +48,11 @@ type Service struct {
 	healthMu      sync.Mutex
 	healthCache   PoolHealth
 	healthAt      time.Time
+	// defaultStrategy is hot-applied by the settings handler while Pick reads
+	// it from the proxy-selection path; unlocked access raced (-race fires
+	// under concurrent client load while the operator saves settings).
+	strategyMu      sync.RWMutex
+	defaultStrategy string
 }
 
 func NewService(store Store, registry *crawlers.Registry, broker *events.Broker, redisOK bool) *Service {
@@ -143,7 +147,9 @@ func (s *Service) SetPickDefaults(strategy string, cooldown time.Duration) {
 		return
 	}
 	if v := normalizeStrategy(strategy); v != "" {
+		s.strategyMu.Lock()
 		s.defaultStrategy = v
+		s.strategyMu.Unlock()
 	}
 	if s.picks != nil && cooldown >= 0 {
 		s.picks.setCooldown(cooldown)

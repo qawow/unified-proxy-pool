@@ -177,7 +177,9 @@ func (s *Service) Pick(ctx context.Context, opt PickOptions) (PickResult, error)
 		opt.N = 1
 	}
 	if opt.Strategy == "" {
+		s.strategyMu.RLock()
 		opt.Strategy = s.defaultStrategy
+		s.strategyMu.RUnlock()
 	}
 
 	var banned map[string]time.Time

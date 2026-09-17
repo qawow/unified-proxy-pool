@@ -8,19 +8,24 @@ import (
 	"time"
 )
 
-// pickRNG is a single locked source shared by every selection. Creating a fresh
-// rand.New(rand.NewSource(now.UnixNano())) per pick meant two concurrent picks
-// within the same nanosecond drew identical seeds — same shuffle, same weighted
-// draw, and a pool that looked round-robined but wasn't.
-var pickRNG = func() func() *rand.Rand {
-	var mu sync.Mutex
-	src := rand.NewSource(time.Now().UnixNano())
-	return func() *rand.Rand {
-		mu.Lock()
-		defer mu.Unlock()
-		return rand.New(src)
-	}
-}()
+// pickRand draws under a single locked source. Two hazards had to both be
+// closed: a fresh rand.New(rand.NewSource(now.UnixNano())) per pick gave
+// concurrent picks within the same nanosecond identical seeds (same shuffle,
+// same weighted draw — a pool that looked round-robined but wasn't), and
+// sharing one source while locking only the *construction* left the concurrent
+// reads racing (the -race detector fires in weightedSample). The draw itself
+// is what has to hold the lock, so the caller runs its random work inside it.
+var (
+	pickMu  sync.Mutex
+	pickSrc = rand.NewSource(time.Now().UnixNano())
+)
+
+// withRand runs f against the shared source while holding the lock.
+func withRand(f func(r *rand.Rand)) {
+	pickMu.Lock()
+	defer pickMu.Unlock()
+	f(rand.New(pickSrc))
+}
 
 // Selection strategies. These mirror chanpolicy's constants; freproxies does not
 // import that package so the dependency stays one-way (app wires them together).
@@ -334,25 +339,29 @@ func (s *Service) applyStrategy(items []Proxy, opt PickOptions) []Proxy {
 	}
 
 	var out []Proxy
-	rng := pickRNG()
-	switch opt.strategy() {
-	case StrategyRandom:
-		out = append([]Proxy(nil), items...)
-		rng.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
-		if n < len(out) {
-			out = out[:n]
+	// The whole random draw runs under the source lock: shuffling or sampling
+	// outside it races on the shared source, and the strategy selection itself
+	// reads no shared state, so only the RNG work needs to be inside.
+	withRand(func(rng *rand.Rand) {
+		switch opt.strategy() {
+		case StrategyRandom:
+			out = append([]Proxy(nil), items...)
+			rng.Shuffle(len(out), func(i, j int) { out[i], out[j] = out[j], out[i] })
+			if n < len(out) {
+				out = out[:n]
+			}
+		case StrategyRR:
+			key := opt.Channel
+			if key == "" {
+				key = "_global"
+			}
+			out = rrSelect(items, n, key, s.picks)
+		case StrategyP2C:
+			out = p2cSample(items, n, recent, rng)
+		default:
+			out = weightedSample(items, n, recent, rng)
 		}
-	case StrategyRR:
-		key := opt.Channel
-		if key == "" {
-			key = "_global"
-		}
-		out = rrSelect(items, n, key, s.picks)
-	case StrategyP2C:
-		out = p2cSample(items, n, recent, rng)
-	default:
-		out = weightedSample(items, n, recent, rng)
-	}
+	})
 	s.picks.markServed(out, now)
 	return out
 }

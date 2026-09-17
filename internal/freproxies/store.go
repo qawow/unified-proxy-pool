@@ -1065,7 +1065,7 @@ func (s *redisStore) QualitySnapshot(ctx context.Context) (QualityBuckets, error
 	}
 	for _, e := range qualityBucketEdges {
 		out.Buckets = append(out.Buckets, ScoreBucket{
-			Label: fmt.Sprintf("%g-%g", e[0], e[1]),
+			Label: bucketLabel(e),
 			Min:   e[0],
 			Max:   e[1],
 		})
@@ -1676,7 +1676,7 @@ func (s *memoryStore) QualitySnapshot(ctx context.Context) (QualityBuckets, erro
 	}
 	for _, e := range qualityBucketEdges {
 		out.Buckets = append(out.Buckets, ScoreBucket{
-			Label: fmt.Sprintf("%g-%g", e[0], e[1]),
+			Label: bucketLabel(e),
 			Min:   e[0],
 			Max:   e[1],
 		})

@@ -1,6 +1,7 @@
 package freproxies
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"time"
@@ -335,22 +336,41 @@ type ScoreBucket struct {
 }
 
 // qualityBucketEdges partitions [0, ScoreMax] into the ranges the panel shows.
-// Five even bands over a 0-100 scale.
+// Five even bands over a 0-100 scale. The Max of each band is the *exclusive*
+// upper bound (the last band closes at 100): scores are continuous floats —
+// blendScore is an EMA, so 20.5 is a routine value — and the old closed ranges
+// {0,20},{21,40},… left every value in the open gaps (20,21), (40,41) matching
+// no band and falling through to the TOP bucket, silently counting the worst
+// proxies as the best in the panel's quality read.
 var qualityBucketEdges = [][2]float64{
-	{0, 20}, {21, 40}, {41, 60}, {61, 80}, {81, 100},
+	{0, 21}, {21, 41}, {41, 61}, {61, 81}, {81, 100},
+}
+
+// bucketLabel renders an edge as the human-facing range the panel shows. The
+// exclusive upper bound is one less than the raw edge so a band reads "0-20"
+// rather than "0-20.999" or "0-21" (which would overlap the next band's label).
+func bucketLabel(e [2]float64) string {
+	max := e[1]
+	if max < ScoreMax {
+		max--
+	}
+	return fmt.Sprintf("%g-%g", e[0], max)
 }
 
 // bucketForScore returns the edge range a score falls into.
 func bucketForScore(score float64) [2]float64 {
-	for _, e := range qualityBucketEdges {
-		if score >= e[0] && score <= e[1] {
-			return e
-		}
-	}
 	if score < 0 {
 		return qualityBucketEdges[0]
 	}
-	return qualityBucketEdges[len(qualityBucketEdges)-1]
+	last := qualityBucketEdges[len(qualityBucketEdges)-1]
+	for _, e := range qualityBucketEdges {
+		// Closed below, open above — except the last band, which is closed, so
+		// a score of exactly 100 still lands there.
+		if score >= e[0] && (score < e[1] || e == last) {
+			return e
+		}
+	}
+	return last
 }
 
 type ValidatorQueues struct {

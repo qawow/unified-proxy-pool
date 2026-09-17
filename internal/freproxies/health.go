@@ -58,8 +58,11 @@ const (
 // staleness mean nothing for a number that changes per batch; a full Redis
 // scan per poll means a lot.
 func (s *Service) Health(ctx context.Context) PoolHealth {
+	// An empty pool is cached too. That is the state the panel polls hardest
+	// (operator refreshing the page, waiting on the first batch), and excluding
+	// it meant every poll during a dry spell scanned the full validated set.
 	s.healthMu.Lock()
-	if time.Since(s.healthAt) < healthTTL && s.healthCache.Available > 0 {
+	if time.Since(s.healthAt) < healthTTL && !s.healthAt.IsZero() {
 		cp := s.healthCache
 		s.healthMu.Unlock()
 		return cp
