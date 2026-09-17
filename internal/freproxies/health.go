@@ -3,6 +3,7 @@ package freproxies
 import (
 	"context"
 	"sort"
+	"time"
 )
 
 // PoolHealth is the exit pool translated into something an operator can act on.
@@ -51,7 +52,34 @@ const (
 // Health evaluates the exit pool. It reads the validated set plus the current
 // validator queues, and never fails: a pool that cannot be read reports empty
 // rather than erroring, because the panel needs something to show.
+//
+// Result is cached briefly: this scans the whole validated set, and the panel
+// polls both this endpoint and the overview, which embeds it. Seconds of
+// staleness mean nothing for a number that changes per batch; a full Redis
+// scan per poll means a lot.
 func (s *Service) Health(ctx context.Context) PoolHealth {
+	s.healthMu.Lock()
+	if time.Since(s.healthAt) < healthTTL && s.healthCache.Available > 0 {
+		cp := s.healthCache
+		s.healthMu.Unlock()
+		return cp
+	}
+	s.healthMu.Unlock()
+
+	h := s.healthUncached(ctx)
+
+	s.healthMu.Lock()
+	s.healthCache = h
+	s.healthAt = time.Now()
+	s.healthMu.Unlock()
+	return h
+}
+
+// healthTTL matches the overview's cache window: a batch reshapes the pool on
+// the scale of minutes, so seconds of staleness costs nothing.
+const healthTTL = 3 * time.Second
+
+func (s *Service) healthUncached(ctx context.Context) PoolHealth {
 	h := PoolHealth{}
 
 	validated, err := s.store.ListValidated(ctx, 5000)

@@ -151,6 +151,10 @@ type Overview struct {
 	Traffic          any              `json:"traffic,omitempty"`
 	ChannelBans      int              `json:"channel_bans"`
 	ChannelCount     int              `json:"channel_count"`
+	// PoolHealth is the exit pool as a verdict. The counts above answer "how
+	// many"; this answers "is that any good" — which is what a person opening
+	// the panel actually wants to know.
+	PoolHealth *PoolHealth `json:"pool_health,omitempty"`
 }
 
 type RegionCount struct {

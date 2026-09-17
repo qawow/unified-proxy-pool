@@ -46,6 +46,9 @@ type Service struct {
 	overviewMu    sync.Mutex
 	overviewCache Overview
 	overviewAt    time.Time
+	healthMu      sync.Mutex
+	healthCache   PoolHealth
+	healthAt      time.Time
 }
 
 func NewService(store Store, registry *crawlers.Registry, broker *events.Broker, redisOK bool) *Service {
@@ -326,6 +329,12 @@ func (s *Service) Overview(ctx context.Context) (Overview, error) {
 		},
 		LANIPs:    lanIPs,
 		PanelHint: panelHint,
+	}
+	// The pool verdict rides along with the counts it is computed from, so the
+	// home page shows "25 validated" and "usable, but nothing fast" as one
+	// thought instead of two numbers the operator has to interpret.
+	if h := s.Health(ctx); h.Available > 0 || h.RawPending > 0 {
+		ov.PoolHealth = &h
 	}
 	s.overviewMu.Lock()
 	s.overviewCache = ov
