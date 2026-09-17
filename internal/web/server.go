@@ -235,6 +235,7 @@ func (a *App) Router() (http.Handler, error) {
 			api.Get("/proxies", a.handleFreeProxyList)
 			api.Get("/proxies/random", a.handleFreeProxyRandom)
 			api.Get("/proxies/count", a.handleFreeProxyCount)
+			api.Get("/pool/health", a.handlePoolHealth)
 			api.Get("/proxies/groups", a.handleProxyGroupList)
 			api.Post("/proxies/groups", a.handleProxyGroupSave)
 			api.Put("/proxies/groups/{name}", a.handleProxyGroupUpdate)

@@ -82,6 +82,19 @@ func (a *App) handleQualitySnapshot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: snap})
 }
 
+// handlePoolHealth is the exit pool in plain terms. The counts a person can
+// already see need interpreting: 25 validated at a 1.1s median is "usable but
+// slow", not "25 proxies, must be fine". This hands the panel the verdict, the
+// latency shape behind it, and the one thing worth doing.
+func (a *App) handlePoolHealth(w http.ResponseWriter, r *http.Request) {
+	if a.free == nil {
+		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"status": "disabled"}})
+		return
+	}
+	h := a.free.Health(r.Context())
+	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: h})
+}
+
 func (a *App) handleFreeProxyList(w http.ResponseWriter, r *http.Request) {
 	if a.free == nil {
 		writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: freproxies.ListResult{Items: []freproxies.Proxy{}}})
