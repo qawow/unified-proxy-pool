@@ -138,7 +138,7 @@ func (p *viaPool) dialReady(ctx context.Context) (net.Conn, error) {
 	proto := strings.ToLower(p.hop.Protocol)
 	switch proto {
 	case "socks5", "socks":
-		if err := socks5Handshake(raw, p.hop.Username, p.hop.Password); err != nil {
+		if err := socks5Handshake(ctx, raw, p.hop.Username, p.hop.Password); err != nil {
 			_ = raw.Close()
 			return nil, err
 		}

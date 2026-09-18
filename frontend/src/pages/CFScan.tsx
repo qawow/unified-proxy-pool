@@ -4,7 +4,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { StatCard } from "@/components/StatCard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Field, Select, Textarea } from "@/components/ui/input";
+import { Field, Input, Select, Textarea } from "@/components/ui/input";
 import { useToast } from "@/hooks/useToast";
 import type { ManualNode } from "@/types";
 
@@ -17,6 +17,7 @@ type Status = {
   tls_done?: number;
   hits?: number;
   error?: string;
+  via_proxy?: string;
 };
 
 type Hit = {
@@ -35,6 +36,8 @@ export function CFScanPage() {
   const [hits, setHits] = useState<Hit[]>([]);
   const [nodes, setNodes] = useState<ManualNode[]>([]);
   const [nodeId, setNodeId] = useState("");
+  const [route, setRoute] = useState<"auto" | "direct" | "custom">("auto");
+  const [customProxy, setCustomProxy] = useState("");
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -65,7 +68,10 @@ export function CFScanPage() {
   const run = async () => {
     setBusy(true);
     try {
-      await endpoints.cfscan.run({ targets });
+      // "auto" leaves proxy_url empty so the backend uses its default exit;
+      // "none" is the explicit direct route the backend understands.
+      const proxy_url = route === "auto" ? "" : route === "direct" ? "none" : customProxy.trim();
+      await endpoints.cfscan.run({ targets, proxy_url });
       toast("扫描已开始", "success");
       void load();
     } catch (e) {
@@ -129,8 +135,28 @@ export function CFScanPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             <Textarea rows={12} value={targets} onChange={(e) => setTargets(e.target.value)} />
+            <div className="grid gap-2 sm:grid-cols-2">
+              <Field label="探测线路">
+                <Select value={route} onChange={(e) => setRoute(e.target.value as "auto" | "direct" | "custom")}>
+                  <option value="auto">默认出口（面板代理，运行时）</option>
+                  <option value="direct">直连（本机网络）</option>
+                  <option value="custom">自定义代理 URL…</option>
+                </Select>
+              </Field>
+              {route === "custom" && (
+                <Field label="代理 URL">
+                  <Input
+                    placeholder="http://user:pass@host:port 或 socks5://…"
+                    value={customProxy}
+                    onChange={(e) => setCustomProxy(e.target.value)}
+                  />
+                </Field>
+              )}
+            </div>
             <p className="text-xs text-muted-foreground">
               原理：对开放 443 的 IP 用 speed.cloudflare.com SNI 握手并 GET /cdn-cgi/trace，出现 colo=/fl= 即视为可当 CF 优选 IP。请自备 IP/CIDR，不要扫整个公网。
+              {st.via_proxy ? ` 当前线路：${st.via_proxy}` : st.phase ? " 当前线路：直连" : ""}
+              {st.phase === "done" && (st.tcp_open ?? 0) === 0 && st.total ? " 本轮 0 个开放——若走直连，本机网络可能封了出站 443，换「默认出口」再试。" : ""}
             </p>
             <div className="flex flex-wrap gap-2">
               <Button onClick={() => void run()} disabled={busy || st.running}>

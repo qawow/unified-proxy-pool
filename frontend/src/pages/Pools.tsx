@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input, Select, Textarea } from "@/components/ui/input";
 import { useToast } from "@/hooks/useToast";
-import { formatLatency, formatTime } from "@/lib/utils";
+import { copyText, formatLatency, formatTime } from "@/lib/utils";
 import type { PoolMember, PoolMemberView, ProxyPool, StrategyAdvanced, StrategyTemplate } from "@/types";
 
 const STRATEGY_OPTIONS = [
@@ -71,6 +71,20 @@ function strategyDesc(value?: string) {
   return STRATEGY_OPTIONS.find((s) => s.value === value)?.desc || "";
 }
 
+// Custom pools are reached through the panel's shared proxy port with the
+// pool's own credentials (HTTP CONNECT and SOCKS5 on the same address) — not
+// through the DirectProxy single/chain listeners (7892/7893), which are a
+// separate feature.
+function poolProxyURLs(pool: ProxyPool) {
+  const host = window.location.host;
+  const user = encodeURIComponent(pool.auth_username);
+  const pass = pool.auth_password_secret ? encodeURIComponent(pool.auth_password_secret) : "<密码>";
+  return {
+    http: `http://${user}:${pass}@${host}`,
+    socks5: `socks5://${user}:${pass}@${host}`,
+  };
+}
+
 function parseAdvanced(raw?: string): StrategyAdvanced {
   try {
     return (JSON.parse(raw || "{}") as StrategyAdvanced) || {};
@@ -111,6 +125,7 @@ export function PoolsPage() {
   const [jsonError, setJsonError] = useState("");
   const [pendingDelete, setPendingDelete] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [accessOpen, setAccessOpen] = useState<Set<number>>(new Set());
 
   const advanced = useMemo(() => parseAdvanced(form.strategy_advanced_json), [form.strategy_advanced_json]);
 
@@ -818,6 +833,20 @@ export function PoolsPage() {
                     <Button size="sm" variant="secondary" disabled={saving} onClick={() => void editPool(pool)}>
                       编辑
                     </Button>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() =>
+                        setAccessOpen((s) => {
+                          const next = new Set(s);
+                          if (next.has(pool.id)) next.delete(pool.id);
+                          else next.add(pool.id);
+                          return next;
+                        })
+                      }
+                    >
+                      接入
+                    </Button>
                     <Button size="sm" variant="secondary" onClick={() => void poolAction(pool.id, "publish")}>
                       发布
                     </Button>
@@ -828,6 +857,37 @@ export function PoolsPage() {
                       删除
                     </Button>
                   </div>
+                  {accessOpen.has(pool.id) && (
+                    <div className="mt-3 space-y-2 rounded-xl bg-muted/40 p-3 text-xs">
+                      <p className="font-medium">客户端接入（面板端口 + 池账号，保存后已自动发布）</p>
+                      {(
+                        [
+                          ["HTTP 代理", poolProxyURLs(pool).http],
+                          ["SOCKS5 代理", poolProxyURLs(pool).socks5],
+                        ] as const
+                      ).map(([label, url]) => (
+                        <div key={label} className="flex items-center gap-2">
+                          <span className="w-20 shrink-0 text-muted-foreground">{label}</span>
+                          <code className="min-w-0 flex-1 truncate rounded bg-background/60 px-2 py-1 font-mono">{url}</code>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={async () => {
+                              const ok = await copyText(url);
+                              toast(ok ? "已复制" : "复制失败，请手动复制", ok ? "success" : "error");
+                            }}
+                          >
+                            复制
+                          </Button>
+                        </div>
+                      ))}
+                      <p className="text-muted-foreground">
+                        用上面的地址填进客户端即可走这个池；账号即池的用户名/密码。注意与 7892/7893 的
+                        DirectProxy 单跳/链式是两个不同入口。{pool.auth_password_secret ? "" : "密码未回显时请换成表单里设置的密码。"}
+                      </p>
+                    </div>
+                  )}
                 </div>
               );
             })}

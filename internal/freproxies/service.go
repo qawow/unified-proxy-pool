@@ -831,7 +831,15 @@ func (s *Service) TestProxyURLs(ctx context.Context, addr string, validateURLs [
 	// Via-proxy geo is expensive (ip-api ~45/min). If we already know a
 	// country, trust it for this check; unknown region still goes through.
 	if okResult && geoip.Active().CheckExit && geoip.Normalize(region) == "" {
-		if exit := s.probeExitCountry(ctx, p, timeout); exit != "" {
+		// Entry mode: the geo probe must ride the same chain so it measures
+		// the candidate's real egress. Exit mode always egresses via the front
+		// — routing through the chain would stamp every candidate with the
+		// front's region — so probe the candidate directly instead.
+		var countryPlan *probePlan
+		if plan != nil && strings.EqualFold(plan.mode, "entry") {
+			countryPlan = plan
+		}
+		if exit := s.probeExitCountry(ctx, p, timeout, countryPlan); exit != "" {
 			region = exit
 		}
 	}

@@ -293,7 +293,7 @@ export const endpoints = {
       api<{ kind?: string; targets: string }>(`/api/cfscan/preset${kind ? `?kind=${encodeURIComponent(kind)}` : ""}`),
     status: () => api("/api/cfscan/status"),
     hits: () => api("/api/cfscan/hits"),
-    run: (body: { targets: string; tcp_conc?: number; tls_conc?: number }) =>
+    run: (body: { targets: string; tcp_conc?: number; tls_conc?: number; proxy_url?: string }) =>
       api("/api/cfscan/run", { method: "POST", body: JSON.stringify(body) }),
     stop: () => api("/api/cfscan/stop", { method: "POST" }),
     clear: () => api("/api/cfscan/clear", { method: "POST" }),

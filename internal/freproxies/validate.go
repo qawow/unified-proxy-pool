@@ -139,7 +139,13 @@ func isPlaintextURL(rawURL string) bool {
 	return !strings.EqualFold(u.Scheme, "https")
 }
 
-func fetchThrough(ctx context.Context, p Proxy, target string, timeout time.Duration, verifyTLS bool, plan *probePlan) (int64, bool, error) {
+// probeTransport builds the HTTP transport every proxy-borne request shares:
+// credentials for authenticated proxies, protocol-specific dialling (net/http
+// has no SOCKS4 support), and — when a front node is configured — routing
+// through the same chain client traffic takes. Validation and the
+// exit-country probe must use one builder; a separate copy already drifted
+// once (it dialled without credentials and spoke SOCKS5 to SOCKS4 hops).
+func probeTransport(p Proxy, timeout time.Duration, verifyTLS bool, plan *probePlan) *http.Transport {
 	proxyURL := &url.URL{
 		Scheme: "http",
 		Host:   p.Addr,
@@ -183,6 +189,11 @@ func fetchThrough(ctx context.Context, p Proxy, target string, timeout time.Dura
 			return netutil.DialSOCKS4(ctx, &net.Dialer{Timeout: timeout}, addr, dialAddr)
 		}
 	}
+	return transport
+}
+
+func fetchThrough(ctx context.Context, p Proxy, target string, timeout time.Duration, verifyTLS bool, plan *probePlan) (int64, bool, error) {
+	transport := probeTransport(p, timeout, verifyTLS, plan)
 	client := &http.Client{
 		Transport: transport,
 		Timeout:   timeout,

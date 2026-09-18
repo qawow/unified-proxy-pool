@@ -33,6 +33,14 @@ type Hit struct {
 }
 
 func tcpOpen(ctx context.Context, ip string, port int, timeout time.Duration, dial dialFunc) bool {
+	// The timeout argument used to be dropped: the scan-level ctx is
+	// cancel-only, so tcp_timeout_ms had no effect at all and every probe
+	// fell back to the dialer's own default (10s direct, up to 15s CONNECT).
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	c, err := dial(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
 	if err != nil {
 		return false
@@ -48,12 +56,27 @@ func tcpOpen(ctx context.Context, ip string, port int, timeout time.Duration, di
 type dialFunc func(ctx context.Context, network, addr string) (net.Conn, error)
 
 func tlsCFProbe(ctx context.Context, ip string, port int, sni string, handshake, read time.Duration, dial dialFunc) (Hit, bool) {
+	budget := handshake + read
+	if budget > 0 {
+		// Bound the whole probe — dial, handshake, write and response read —
+		// so a cancel-only scan ctx cannot strand a probe inside a silent
+		// proxy's SOCKS5 dial.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
 	raw, err := dial(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprintf("%d", port)))
 	if err != nil {
 		return Hit{}, false
 	}
 	defer raw.Close()
-	_ = raw.SetDeadline(time.Now().Add(handshake + read))
+	// HandshakeContext observes ctx, but the write and ReadAll after it do
+	// not. Closing the conn is the only reliable interrupt for a server (or
+	// proxy tunnel) that accepts the handshake then goes silent, so a Stop
+	// actually frees the scan slot instead of waiting out the deadline.
+	stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
+	defer stop()
+	_ = raw.SetDeadline(time.Now().Add(budget))
 	start := time.Now()
 	tc := tls.Client(raw, &tls.Config{
 		ServerName:         sni,

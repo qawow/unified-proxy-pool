@@ -16,31 +16,47 @@ import (
 	"unified-proxy-pool/internal/freproxies"
 )
 
+// bindTunnel bounds a proxy handshake by the earlier of ctx's deadline and
+// budget, and closes conn if ctx is cancelled mid-handshake — the fixed
+// deadlines alone let a silent hop hold a dial attempt for 8–12s past a
+// cancel, and even return success after the caller gave up. The returned
+// stop must be deferred (not run) so the handed-off conn survives a later
+// cancellation.
+func bindTunnel(ctx context.Context, conn net.Conn, budget time.Duration) (stop func() bool) {
+	dl := time.Now().Add(budget)
+	if cd, ok := ctx.Deadline(); ok && cd.Before(dl) {
+		dl = cd
+	}
+	_ = conn.SetDeadline(dl)
+	return context.AfterFunc(ctx, func() { _ = conn.Close() })
+}
+
 // tunnelThrough uses an already-connected proxy hop to open a tunnel to nextAddr.
 // protocol is the protocol of the hop we are currently speaking to.
-func tunnelThrough(conn net.Conn, hop freproxies.Proxy, nextAddr string) (net.Conn, error) {
+func tunnelThrough(ctx context.Context, conn net.Conn, hop freproxies.Proxy, nextAddr string) (net.Conn, error) {
 	proto := strings.ToLower(strings.TrimSpace(hop.Protocol))
 	switch proto {
 	case "socks4", "socks4a":
 		// SOCKS4 is a different handshake; speaking SOCKS5 to it fails on the
 		// greeting, so these hops could never carry traffic.
-		return socks4ConnectOver(conn, nextAddr)
+		return socks4ConnectOver(ctx, conn, nextAddr)
 	case "socks5", "socks":
 		if _, ok := conn.(*socksAuthed); !ok {
-			if err := socks5Handshake(conn, hop.Username, hop.Password); err != nil {
+			if err := socks5Handshake(ctx, conn, hop.Username, hop.Password); err != nil {
 				conn.Close()
 				return nil, err
 			}
 		}
-		return socks5ConnectCmd(conn, nextAddr)
+		return socks5ConnectCmd(ctx, conn, nextAddr)
 	default:
-		return httpConnectOver(conn, nextAddr, hop.Username, hop.Password)
+		return httpConnectOver(ctx, conn, nextAddr, hop.Username, hop.Password)
 	}
 }
 
 // socks4ConnectOver issues a SOCKS4/4a CONNECT on an already-open hop.
-func socks4ConnectOver(conn net.Conn, target string) (net.Conn, error) {
-	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
+func socks4ConnectOver(ctx context.Context, conn net.Conn, target string) (net.Conn, error) {
+	stop := bindTunnel(ctx, conn, 12*time.Second)
+	defer stop()
 	host, portText, err := net.SplitHostPort(target)
 	if err != nil {
 		conn.Close()
@@ -82,12 +98,17 @@ func socks4ConnectOver(conn net.Conn, target string) (net.Conn, error) {
 		conn.Close()
 		return nil, fmt.Errorf("socks4 connect status %#x", resp[1])
 	}
+	if err := ctx.Err(); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	_ = conn.SetDeadline(time.Time{})
 	return conn, nil
 }
 
-func httpConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error) {
-	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
+func httpConnectOver(ctx context.Context, conn net.Conn, target, user, pass string) (net.Conn, error) {
+	stop := bindTunnel(ctx, conn, 12*time.Second)
+	defer stop()
 	if !validHostname(hostOnly(target)) {
 		conn.Close()
 		return nil, fmt.Errorf("invalid CONNECT target")
@@ -113,6 +134,12 @@ func httpConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error)
 		conn.Close()
 		return nil, fmt.Errorf("chain CONNECT %s status %d", target, resp.StatusCode)
 	}
+	// A response racing a cancel must not become a live tunnel: AfterFunc
+	// runs on its own goroutine, so check ctx explicitly on the success path.
+	if err := ctx.Err(); err != nil {
+		conn.Close()
+		return nil, err
+	}
 	_ = conn.SetDeadline(time.Time{})
 	if br.Buffered() > 0 {
 		return &prefixConn{Conn: conn, r: br}, nil
@@ -120,8 +147,9 @@ func httpConnectOver(conn net.Conn, target, user, pass string) (net.Conn, error)
 	return conn, nil
 }
 
-func socks5Handshake(conn net.Conn, user, pass string) error {
-	_ = conn.SetDeadline(time.Now().Add(8 * time.Second))
+func socks5Handshake(ctx context.Context, conn net.Conn, user, pass string) error {
+	stop := bindTunnel(ctx, conn, 8*time.Second)
+	defer stop()
 	if user != "" {
 		if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
 			return err
@@ -159,8 +187,9 @@ func socks5Handshake(conn net.Conn, user, pass string) error {
 	return nil
 }
 
-func socks5ConnectCmd(conn net.Conn, target string) (net.Conn, error) {
-	_ = conn.SetDeadline(time.Now().Add(12 * time.Second))
+func socks5ConnectCmd(ctx context.Context, conn net.Conn, target string) (net.Conn, error) {
+	stop := bindTunnel(ctx, conn, 12*time.Second)
+	defer stop()
 	host, portStr, err := net.SplitHostPort(target)
 	if err != nil {
 		conn.Close()
@@ -201,6 +230,10 @@ func socks5ConnectCmd(conn net.Conn, target string) (net.Conn, error) {
 		err = fmt.Errorf("bad atyp %d", hdr[3])
 	}
 	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -248,7 +281,7 @@ func dialProxyChainPool(ctx context.Context, hops []freproxies.Proxy, target str
 	// Through hop i, reach hop i+1
 	for i := 0; i < len(hops)-1; i++ {
 		next := hops[i+1].Addr
-		conn, err = tunnelThrough(conn, hops[i], next)
+		conn, err = tunnelThrough(ctx, conn, hops[i], next)
 		if err != nil {
 			return nil, &chainDialError{Hop: hops[i], Err: err,
 				msg: fmt.Sprintf("chain hop %d (%s -> %s)", i, hops[i].Addr, next)}
@@ -256,7 +289,7 @@ func dialProxyChainPool(ctx context.Context, hops []freproxies.Proxy, target str
 	}
 	// Through last hop, reach final target
 	last := hops[len(hops)-1]
-	conn, err = tunnelThrough(conn, last, target)
+	conn, err = tunnelThrough(ctx, conn, last, target)
 	if err != nil {
 		return nil, &chainDialError{Hop: last, Err: err,
 			msg: fmt.Sprintf("chain exit %s -> %s", last.Addr, target)}

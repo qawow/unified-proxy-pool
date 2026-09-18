@@ -163,19 +163,19 @@ func viaReachable(via freproxies.Proxy) bool {
 	probeTarget := "www.example.com:80"
 	switch strings.ToLower(via.Protocol) {
 	case "socks5", "socks", "socks5h":
-		if err := socks5Handshake(c, via.Username, via.Password); err != nil {
+		if err := socks5Handshake(ctx, c, via.Username, via.Password); err != nil {
 			return false
 		}
 		// A server that negotiated auth but cannot CONNECT is not usable as a
 		// front, which is all we ever ask of it.
-		nc, err := socks5ConnectCmd(c, probeTarget)
+		nc, err := socks5ConnectCmd(ctx, c, probeTarget)
 		if err != nil {
 			return false
 		}
 		_ = nc.Close()
 		return true
 	case "socks4":
-		nc, err := socks4ConnectOver(c, probeTarget)
+		nc, err := socks4ConnectOver(ctx, c, probeTarget)
 		if err != nil {
 			return false
 		}
@@ -183,7 +183,7 @@ func viaReachable(via freproxies.Proxy) bool {
 		return true
 	default:
 		// http proxy: a CONNECT that returns 2xx proves it forwards.
-		nc, err := httpConnectOver(c, probeTarget, via.Username, via.Password)
+		nc, err := httpConnectOver(ctx, c, probeTarget, via.Username, via.Password)
 		if err != nil {
 			return false
 		}

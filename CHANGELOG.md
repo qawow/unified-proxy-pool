@@ -1,3 +1,60 @@
+## Unreleased — 2026-09-19b · 继续完善：CF 超时/HTTPS 代理 + 链式握手预算 + 克隆身份 + 接入指引
+
+### 修复
+- **CF `https://` 代理不再发明文 CONNECT**：原实现把 https 代理当 http 处理，
+  `Proxy-Authorization` 凭据直接以明文上线路。现在先在到代理的 TCP 上做
+  **验证证书的 TLS 握手**（ServerName=代理主机名），CONNECT 及凭据只在 TLS
+  内传输；证书验不过则在凭据出发前拒绝。
+- **CF 探测超时/取消真正生效**：`tcpOpen` 的 `timeout` 参数原先被丢弃——
+  `tcp_timeout_ms` 配置完全无效。现在每次探测派生 `WithTimeout`；CONNECT
+  交换取 min(ctx 截止, 15s 上限) 并绑取消关闭连接；TLS 探测整体预算覆盖
+  拨号+握手+读，取消即断开（`context.AfterFunc`）；扫描信号量获取也响应
+  Stop，不再被静默代理的槽位拖住。
+- **链式握手遵守 attempt ctx**：`tunnelThrough` 的 HTTP CONNECT / SOCKS5 /
+  SOCKS4 握手原来只有 8–12s 固定期限，`DialTimeoutMS` 和取消都不生效——
+  静默跳点能拖满期限，甚至取消后收到 200 还返回成功隧道。现在 ctx 穿进
+  每层握手（`bindTunnel`：min(父截止, 跳预算) + 取消关闭），成功路径显式
+  检查 `ctx.Err()`，取消后到达的 200 不再变成活隧道；via 前置探活与
+  viaPool 的握手同口径。
+- **出口国家查询补上认证与 SOCKS4**：country 探测原来用私有 transport，
+  不带用户名/密码、把 socks4 当 socks5 拨——存活验证能过的节点，国家探测
+  永远失败回落监听 Host 地域。现在与普通验证共享 `probeTransport`
+  （凭据/SOCKS4/前置链一套实现），TLS 校验保持开。entry 模式沿链测候选
+  真实出口；exit 模式出口恒为前置节点，直连测候选自身以免盖错地区。
+- **CF 克隆不再丢隐式域名语义**：`CloneWithServers` 只换 server——模板靠
+  `server` 隐式生成 SNI/WS Host 的节点（vless+ws+tls 最常见）克隆后 TLS
+  校验用 IP 或 Host 变 IP，直接失效。现在克隆前把隐式值冻结成显式字段
+  （`servername`+`sni` 双写、`ws-opts.headers.Host`、`h2-opts.host`），
+  显式覆盖保持不动；源 server 已是 IP 时无隐式域可加，原样放行。
+- **Token 创建不再丢完整值**：clipboard API 在局域网 HTTP 下缺失时，原代码
+  跳过复制仍提示成功且只露前 16 字符——Token 明文只返回一次，等于丢了。
+  现在完整值留在页面（可选中复制），复制走带兜底的 `copyText`；并接入已
+  有的列表/撤销接口，Token 可管理。
+- **CF 扫描线路可见可选**：页面原来只发 targets，`via_proxy` 从不显示，
+  也不能选直连/自定义——0 命中时分不清是 IP 不通还是直连被封 443。新增
+  线路选择（默认出口/直连/自定义 URL），状态回显实际线路，0 开放时提示
+  换默认出口。
+- **每池接入地址**：池卡片新增「接入」展开，给出可直接复制的
+  `http://user:pass@面板地址` 与 `socks5://…`——自定义池真实入口是面板
+  共享端口+池认证（HTTP CONNECT 与 SOCKS5 同端口），不是 7892/7893 的
+  DirectProxy，页面此前完全没告诉用户怎么连。
+
+### 测试
+- https 代理：首字节必须是 TLS ClientHello 而非 ASCII CONNECT；受信证书下
+  CONNECT+凭据走 TLS 且隧道可用；不受信证书在凭据发出前被拒。
+- `tcpOpen` 派生的 ctx 带配置期限；静默 CONNECT 代理在 cancel 后 <2s 返回；
+  握手后静默的 TLS 服务器在读阶段同样被 cancel 打断。
+- 链式握手：静默 CONNECT 在 cancel 后快速失败；cancel 后到达的 200 不算
+  成功；ctx 截止早于 12s 上限时以 ctx 为准；SOCKS5 CONNECT 同口径。
+- 国家探测 transport：认证代理收到 Proxy-Authorization；严格 SOCKS4 服务
+  收到 0x04 握手并完成 HTTP 请求（旧实现发 0x05 被断开）。
+- 克隆冻结：隐式 TLS+WS 冻结、显式覆盖保留、IP 源不加、非 TLS 不动、
+  trojan 默认 TLS；DB 层克隆断言 normalized_json 携带 servername/sni/Host
+  且模板原样。
+- 前端 `tsc --noEmit && vite build` 通过。
+
+---
+
 ## Unreleased — 2026-09-19 · 子代理审计修复：健康数据接线 + 成员误删 + 上下文生命周期
 
 三个只读子代理（UX/代理可靠性/订阅与测试）基于 HEAD 逐项核实后，本轮修复

@@ -227,12 +227,16 @@ func (s *Service) scanTCP(ctx context.Context, ips []string, conc int, timeout t
 	var done atomic.Int64
 	var nopen atomic.Int64
 	for _, ip := range ips {
-		if ctx.Err() != nil {
-			break
-		}
 		ip := ip
+		// Acquiring a slot must also stop on cancel: when every worker is
+		// wedged in a dead proxy the plain send would keep Stop waiting for
+		// a slot that never frees within the probe timeouts.
+		select {
+		case <-ctx.Done():
+			return open
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -265,12 +269,13 @@ func (s *Service) scanTLS(ctx context.Context, ips []string, conc int, handshake
 	var hits atomic.Int64
 	readTO := 5 * time.Second
 	for _, ip := range ips {
-		if ctx.Err() != nil {
-			break
-		}
 		ip := ip
+		select {
+		case <-ctx.Done():
+			return
+		case sem <- struct{}{}:
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()

@@ -6,7 +6,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input, Select } from "@/components/ui/input";
 import { useToast } from "@/hooks/useToast";
+import { copyText } from "@/lib/utils";
 import type { ChainOptions, ChannelPolicyConfig, DirectProxyStatus, MihomoStatus, Settings } from "@/types";
+
+type ApiToken = { id: number; name: string; prefix: string; scopes: string };
 
 function chainPathPreview(hops: number) {
   const n = Math.max(2, Math.min(4, hops || 2));
@@ -48,6 +51,8 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [passwordForm, setPasswordForm] = useState({ old_password: "", new_password: "" });
   const [tokenScopes, setTokenScopes] = useState("proxies:read");
+  const [createdToken, setCreatedToken] = useState("");
+  const [tokenList, setTokenList] = useState<ApiToken[]>([]);
   const [restartOpen, setRestartOpen] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [ver, setVer] = useState<{ commit?: string; short?: string; time?: string } | null>(null);
@@ -63,14 +68,16 @@ export function SettingsPage() {
 
   const load = useCallback(async () => {
     try {
-      const [s, status, dp] = await Promise.all([
+      const [s, status, dp, tokens] = await Promise.all([
         endpoints.settings.get(),
         endpoints.mihomo.status().catch(() => null),
         endpoints.directProxy.status().catch(() => null),
+        endpoints.tokens.list().catch(() => [] as ApiToken[]),
       ]);
       setSettings(s);
       setMihomo(status);
       setDirect(dp);
+      setTokenList(tokens);
       endpoints.system.version().then(setVer).catch(() => setVer(null));
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", "error");
@@ -984,9 +991,13 @@ export function SettingsPage() {
                   try {
                     const t = await endpoints.tokens.create("panel", tokenScopes);
                     if (t.token) {
-                      await navigator.clipboard?.writeText(t.token);
-                      toast(`已创建并复制 Token：${t.token.slice(0, 16)}…`, "success");
+                      // The plaintext is only returned once — keep it on
+                      // screen so a failed clipboard write never strands it.
+                      setCreatedToken(t.token);
+                      const copied = await copyText(t.token);
+                      toast(copied ? "已创建并复制 Token" : "已创建 Token，请手动复制", "success");
                     } else toast("已创建", "success");
+                    setTokenList(await endpoints.tokens.list().catch(() => [] as ApiToken[]));
                   } catch (e) {
                     toast(e instanceof Error ? e.message : "创建失败", "error");
                   }
@@ -994,6 +1005,55 @@ export function SettingsPage() {
               >
                 生成 Token
               </Button>
+              {createdToken && (
+                <div className="space-y-2 rounded-xl border border-amber-300/60 bg-amber-50/60 p-3 dark:border-amber-500/30 dark:bg-amber-500/10">
+                  <p className="text-xs font-medium text-amber-800 dark:text-amber-200">
+                    完整 Token 只显示这一次，请立即保存：
+                  </p>
+                  <div className="flex gap-2">
+                    <Input readOnly value={createdToken} onFocus={(e) => e.target.select()} className="font-mono text-xs" />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={async () => {
+                        const ok = await copyText(createdToken);
+                        toast(ok ? "已复制" : "复制失败，请手动选中复制", ok ? "success" : "error");
+                      }}
+                    >
+                      复制
+                    </Button>
+                    <Button type="button" variant="ghost" onClick={() => setCreatedToken("")}>
+                      已保存
+                    </Button>
+                  </div>
+                </div>
+              )}
+              {tokenList.length > 0 && (
+                <div className="space-y-1.5">
+                  {tokenList.map((t) => (
+                    <div key={t.id} className="flex items-center justify-between gap-2 rounded-xl bg-muted/40 px-3 py-2 text-xs">
+                      <span className="font-mono">{t.prefix}…</span>
+                      <span className="text-muted-foreground">{t.scopes}</span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={async () => {
+                          try {
+                            await endpoints.tokens.remove(t.id);
+                            setTokenList((list) => list.filter((x) => x.id !== t.id));
+                            toast("已撤销 Token", "success");
+                          } catch (e) {
+                            toast(e instanceof Error ? e.message : "撤销失败", "error");
+                          }
+                        }}
+                      >
+                        撤销
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <p className="text-xs text-muted-foreground">Bearer 头：Authorization: Bearer upp_xxx</p>
               <p className="text-xs text-muted-foreground">范围会被后端强制校验，只读 Token 不能入池或调 AI。</p>
             </CardContent>

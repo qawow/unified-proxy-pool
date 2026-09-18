@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -137,6 +138,12 @@ func (s *Service) CloneWithServers(ctx context.Context, srcID int64, servers []s
 		for k, v := range payload {
 			cp[k] = v
 		}
+		// Freeze implicit domain semantics before the swap: a node that
+		// relied on `server` for its TLS SNI or WS Host silently changes
+		// behaviour once server becomes a CF IP — the clone then fails
+		// certificate verification or lands on the wrong CF site. Explicit
+		// overrides stay untouched.
+		freezeCloneIdentity(cp, src.Server)
 		cp["server"] = ip
 		name := truncateDisplayName(src.DisplayName + "-" + ip)
 		cp["name"] = name
@@ -161,6 +168,58 @@ func (s *Service) CloneWithServers(ctx context.Context, srcID int64, servers []s
 		n++
 	}
 	return n, nil
+}
+
+// freezeCloneIdentity copies the implicit TLS SNI / transport Host a node
+// derives from its `server` into explicit fields, so CloneWithServers can
+// repoint server at a CF IP without losing the hostname TLS and the
+// Cloudflare router still expect. When the source server is already an IP
+// there is no implicit hostname to preserve, so nothing is added.
+func freezeCloneIdentity(cp map[string]any, srcServer string) {
+	srcServer = strings.TrimSpace(strings.Trim(srcServer, "[]"))
+	if srcServer == "" || net.ParseIP(srcServer) != nil {
+		return
+	}
+	typ := strings.ToLower(str(cp["type"]))
+	tlsish := false
+	if b, ok := cp["tls"].(bool); ok && b {
+		tlsish = true
+	}
+	if _, ok := cp["reality-opts"]; ok {
+		tlsish = true
+	}
+	switch typ {
+	case "trojan", "hysteria", "hysteria2", "tuic", "anytls":
+		// TLS-by-default protocols carry no tls flag.
+		tlsish = true
+	}
+	if tlsish {
+		// mihomo reads `servername` on vless/vmess and `sni` on
+		// trojan/hysteria2/tuic; unknown keys are ignored, so set both.
+		setIfAbsent(cp, "servername", srcServer)
+		setIfAbsent(cp, "sni", srcServer)
+	}
+	switch strings.ToLower(str(cp["network"])) {
+	case "ws":
+		opts := mapOpt(cp, "ws-opts")
+		headers, _ := opts["headers"].(map[string]any)
+		if headers == nil {
+			headers = map[string]any{}
+		}
+		setIfAbsent(headers, "Host", srcServer)
+		if len(headers) > 0 {
+			opts["headers"] = headers
+		}
+		if len(opts) > 0 {
+			cp["ws-opts"] = opts
+		}
+	case "h2":
+		opts := mapOpt(cp, "h2-opts")
+		setIfAbsent(opts, "host", []any{srcServer})
+		if len(opts) > 0 {
+			cp["h2-opts"] = opts
+		}
+	}
 }
 
 // truncateDisplayName caps a node name on a rune boundary. Slicing by byte

@@ -3,6 +3,7 @@ package cfscan
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -81,16 +82,38 @@ func httpConnectDialer(u *url.URL) dialFunc {
 	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		d := net.Dialer{Timeout: 10 * time.Second}
-		c, err := d.DialContext(ctx, network, target)
+		raw, err := d.DialContext(ctx, network, target)
 		if err != nil {
 			return nil, err
 		}
-		// The scan's ctx often has no deadline (the TCP phase runs under a
-		// cancel-only context), so a proxy that accepts the TCP connection and
-		// then never answers CONNECT would hang forever, leaking the goroutine
-		// and its slot in the scan's semaphore. Bound the handshake explicitly.
-		_ = c.SetDeadline(time.Now().Add(connectTimeout))
-		defer c.SetDeadline(time.Time{})
+		// Bound the whole proxy setup — optional TLS handshake plus the
+		// CONNECT exchange — by the earlier of the scan ctx's deadline and
+		// connectTimeout, and close the conn when the scan is stopped. The
+		// scan's ctx often has no deadline (the TCP phase runs cancel-only),
+		// so without this a silent proxy pins a scan slot for the full 15s —
+		// or, before this bound existed, forever.
+		dl := time.Now().Add(connectTimeout)
+		if cd, ok := ctx.Deadline(); ok && cd.Before(dl) {
+			dl = cd
+		}
+		_ = raw.SetDeadline(dl)
+		defer raw.SetDeadline(time.Time{})
+		stop := context.AfterFunc(ctx, func() { _ = raw.Close() })
+		defer stop()
+
+		var c net.Conn = raw
+		if strings.EqualFold(u.Scheme, "https") {
+			// HTTPS proxies get a verified TLS layer before CONNECT. The
+			// request may carry Proxy-Authorization credentials, which must
+			// never travel over plaintext or an unverified channel — the old
+			// code sent them in the clear.
+			tc := tls.Client(raw, proxyTLSConfig(u.Hostname()))
+			if err := tc.HandshakeContext(ctx); err != nil {
+				_ = raw.Close()
+				return nil, fmt.Errorf("https proxy %s TLS: %w", target, err)
+			}
+			c = tc
+		}
 
 		req := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\n"
 		if auth != "" {
@@ -98,7 +121,7 @@ func httpConnectDialer(u *url.URL) dialFunc {
 		}
 		req += "\r\n"
 		if _, err := c.Write([]byte(req)); err != nil {
-			_ = c.Close()
+			_ = raw.Close()
 			return nil, err
 		}
 		// Read the whole response header, through the blank line. Stopping at
@@ -109,7 +132,7 @@ func httpConnectDialer(u *url.URL) dialFunc {
 		b := make([]byte, 1)
 		for len(buf) < 256 {
 			if _, err := c.Read(b); err != nil {
-				_ = c.Close()
+				_ = raw.Close()
 				return nil, err
 			}
 			buf = append(buf, b[0])
@@ -119,11 +142,19 @@ func httpConnectDialer(u *url.URL) dialFunc {
 		}
 		line := strings.TrimSpace(firstLine(buf))
 		if !strings.Contains(line, " 200 ") {
-			_ = c.Close()
+			_ = raw.Close()
 			return nil, fmt.Errorf("CONNECT %s failed: %s", addr, line)
 		}
 		return c, nil
 	}
+}
+
+// proxyTLSConfig builds the TLS config used to reach an https:// CONNECT
+// proxy. Certificate verification stays enabled — CONNECT carries
+// credentials that must never cross an unverified channel. Tests may swap
+// in a pool trusting a local fixture.
+var proxyTLSConfig = func(hostname string) *tls.Config {
+	return &tls.Config{ServerName: hostname, MinVersion: tls.VersionTLS12}
 }
 
 // connectTimeout bounds a CONNECT handshake. Generous, because the scan's own
