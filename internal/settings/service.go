@@ -274,6 +274,11 @@ func validateSettings(item models.Settings) error {
 	if item.FailureRetryCount < 0 {
 		return errors.New("failure_retry_count must be zero or greater")
 	}
+	// Each retry adds a fetch attempt plus back-off; an unbounded count (e.g.
+	// 100) turned one subscription sync into ~30 minutes of blind retries.
+	if item.FailureRetryCount > 20 {
+		return errors.New("failure_retry_count must be at most 20")
+	}
 	if !config.IsAllowedLogLevel(item.LogLevel) {
 		return fmt.Errorf("log_level must be one of %s", strings.Join(config.AllowedLogLevels(), ", "))
 	}

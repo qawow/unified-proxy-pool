@@ -205,6 +205,14 @@ func (s *Service) enqueuePoolMemberLatencySweep(ctx context.Context) {
 			if !member.Enabled {
 				continue
 			}
+			switch member.SourceType {
+			case "manual", "subscription":
+				// free_proxy members are validated by the free-proxy pipeline,
+				// not this probe queue — enqueueing them here resolved their id
+				// against subscription_nodes and probed the wrong node.
+			default:
+				continue
+			}
 			key := fmt.Sprintf("%s:%d", member.SourceType, member.SourceNodeID)
 			if _, ok := seen[key]; ok {
 				continue
@@ -406,10 +414,17 @@ func (s *Service) shouldSkipProbe(ctx context.Context, sourceType string, source
 }
 
 func (s *Service) lookupRuntimeNode(ctx context.Context, sourceType string, sourceNodeID int64) (models.RuntimeNode, error) {
-	if sourceType == "manual" {
+	switch sourceType {
+	case "manual":
 		return s.manualNodes.NodeBySource(ctx, sourceNodeID)
+	case "subscription":
+		return s.subscriptions.NodeBySource(ctx, sourceNodeID)
+	default:
+		// e.g. free_proxy pool members: they must never fall through to the
+		// subscription store, where an id collision wrote probe results onto
+		// an unrelated subscription node.
+		return models.RuntimeNode{}, fmt.Errorf("unsupported probe source_type %q", sourceType)
 	}
-	return s.subscriptions.NodeBySource(ctx, sourceNodeID)
 }
 
 func (s *Service) applyProbeInventory(ctx context.Context, secret, logLevel string, inventory []models.RuntimeNode) error {
@@ -496,14 +511,17 @@ func (s *Service) measureDownloadSpeed(ctx context.Context, slotIndex int, targe
 }
 
 func (s *Service) updateResult(ctx context.Context, item task, latency *int64, speed *float64, status, errMsg string, isSpeed bool) error {
-	if item.SourceType == "manual" {
+	switch item.SourceType {
+	case "manual":
 		if err := s.manualNodes.UpdateProbeResult(ctx, item.SourceNodeID, latency, speed, status, errMsg, isSpeed); err != nil {
 			return err
 		}
-	} else {
+	case "subscription":
 		if err := s.subscriptions.UpdateProbeResult(ctx, item.SourceNodeID, latency, speed, status, errMsg, isSpeed); err != nil {
 			return err
 		}
+	default:
+		return fmt.Errorf("unsupported probe source_type %q", item.SourceType)
 	}
 	return s.store.ExecContext(ctx, `INSERT INTO probe_history (source_type, source_node_id, test_type, success, latency_ms, speed_mbps, error_message, tested_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -512,10 +530,14 @@ func (s *Service) updateResult(ctx context.Context, item task, latency *int64, s
 }
 
 func (s *Service) setStatus(ctx context.Context, sourceType string, sourceNodeID int64, status, errMsg string) error {
-	if sourceType == "manual" {
+	switch sourceType {
+	case "manual":
 		return s.manualNodes.SetTransientStatus(ctx, sourceNodeID, status, errMsg)
+	case "subscription":
+		return s.subscriptions.SetTransientStatus(ctx, sourceNodeID, status, errMsg)
+	default:
+		return fmt.Errorf("unsupported probe source_type %q", sourceType)
 	}
-	return s.subscriptions.SetTransientStatus(ctx, sourceNodeID, status, errMsg)
 }
 
 func runtimeNodeName(node models.RuntimeNode) string {

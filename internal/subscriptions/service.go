@@ -33,6 +33,7 @@ type Service struct {
 	settingsSvc    *settings.Service
 	events         *events.Broker
 	client         *http.Client
+	directClient   *http.Client
 	directProxyURL string
 	chainProxyURL  string
 	mu             sync.Mutex
@@ -99,6 +100,15 @@ func NewService(store *db.Store, settingsSvc *settings.Service, broker *events.B
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				Proxy:             http.ProxyFromEnvironment,
+				ForceAttemptHTTP2: false,
+				TLSClientConfig: &tls.Config{
+					MinVersion: tls.VersionTLS12,
+				},
+			},
+		},
+		directClient: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
 				ForceAttemptHTTP2: false,
 				TLSClientConfig: &tls.Config{
 					MinVersion: tls.VersionTLS12,
@@ -333,6 +343,11 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 	s.events.Publish("subscriptions.sync.started", map[string]any{"subscription_id": id})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sub.URL, nil)
 	if err != nil {
+		// A stored URL that fails here (rows saved before URL validation)
+		// must still mark the subscription failed — otherwise a scheduled
+		// sync leaves started-but-never-finished state and the UI shows the
+		// stale previous status forever.
+		s.failSync(ctx, sub.ID, err.Error())
 		return SyncOutcome{}, err
 	}
 	netutil.ApplySubscriptionHeaders(req.Header, sub.URL)
@@ -351,8 +366,7 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 
 	resp, err := s.doWithRetry(req, settingsRow.FailureRetryCount, s.clientFor(sub))
 	if err != nil {
-		_ = s.setSyncFailure(ctx, sub.ID, err.Error())
-		s.publishSyncFailure(sub.ID, err.Error())
+		s.failSync(ctx, sub.ID, err.Error())
 		return SyncOutcome{}, err
 	}
 	defer resp.Body.Close()
@@ -373,18 +387,17 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		err := fmt.Errorf("subscription fetch failed: %s", resp.Status)
-		_ = s.setSyncFailure(ctx, sub.ID, err.Error())
-		s.publishSyncFailure(sub.ID, err.Error())
+		s.failSync(ctx, sub.ID, err.Error())
 		return SyncOutcome{}, err
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
+		s.failSync(ctx, sub.ID, err.Error())
 		return SyncOutcome{}, err
 	}
 	if looksLikeHTML(string(body)) {
 		err := fmt.Errorf("subscription URL returned HTML, not a node list (check fetch_proxy / headers)")
-		_ = s.setSyncFailure(ctx, sub.ID, err.Error())
-		s.publishSyncFailure(sub.ID, err.Error())
+		s.failSync(ctx, sub.ID, err.Error())
 		return SyncOutcome{}, err
 	}
 	result := ParseSubscriptionContent(string(body))
@@ -405,8 +418,7 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 			msg = errorSummary(result.Errors)
 		}
 		err := errors.New(msg)
-		_ = s.setSyncFailure(ctx, sub.ID, err.Error())
-		s.publishSyncFailure(sub.ID, err.Error())
+		s.failSync(ctx, sub.ID, err.Error())
 		return SyncOutcome{}, err
 	}
 
@@ -431,12 +443,19 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 	var syncedNodeIDs []int64
 	created, updated := 0, 0
 	matchedIDs := make(map[int64]struct{}, len(existingNodes))
+	seenFingerprints := make(map[string]struct{}, len(result.Nodes))
 	for _, item := range result.Nodes {
 		if geoip.Active().BlockedNode(item.Server, item.DisplayName) {
 			continue // counted above so the outcome can report it
 		}
 		normalizedJSON := nodes.NormalizeJSON(item.Normalized)
 		fingerprint := subscriptionNodeFingerprint(item.Protocol, item.Server, item.Port, normalizedJSON)
+		// The same node listed twice in one payload used to INSERT twice —
+		// two rows with independent enabled/probe state coexisting forever.
+		if _, dup := seenFingerprints[fingerprint]; dup {
+			continue
+		}
+		seenFingerprints[fingerprint] = struct{}{}
 		if existing, ok := popStoredSubscriptionNode(existingByFingerprint[fingerprint], item.RawPayload); ok {
 			existingByFingerprint[fingerprint] = removeStoredSubscriptionNode(existingByFingerprint[fingerprint], existing.ID)
 			matchedIDs[existing.ID] = struct{}{}
@@ -566,6 +585,11 @@ func (s *Service) ListPoolCandidates(ctx context.Context) ([]models.PoolMemberVi
 		if err := rows.Scan(&item.SourceNodeID, &item.DisplayName, &item.Protocol, &item.Server, &item.Port, &item.Enabled, &item.LastStatus, &item.LastLatencyMS, &item.LastSpeedMbps, &item.SourceLabel); err != nil {
 			return nil, err
 		}
+		// Same country filter as AllRuntimeNodes: without it a node stored
+		// before the blocklist changed still showed up as a pool candidate.
+		if geoip.Active().BlockedNode(item.Server, item.DisplayName) {
+			continue
+		}
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -596,6 +620,19 @@ func (s *Service) SetTransientStatus(ctx context.Context, sourceNodeID int64, st
 	_, err := s.store.DB.ExecContext(ctx, `UPDATE subscription_nodes SET last_status = ?, last_error = ?, updated_at = ? WHERE id = ?`,
 		status, errMsg, time.Now().UTC(), sourceNodeID)
 	return err
+}
+
+// failSync records a failed sync. It detaches from the caller's ctx first:
+// when Sync is cancelled (request dropped, shutdown), writing last_error
+// with the dead ctx silently no-ops and the UI keeps the previous status
+// forever — a scheduled sync then looks "ok" while nothing works.
+func (s *Service) failSync(parent context.Context, id int64, message string) {
+	ctx, cancel := context.WithTimeout(s.rootCtx(parent), 5*time.Second)
+	defer cancel()
+	if err := s.setSyncFailure(ctx, id, message); err != nil {
+		log.Printf("subscriptions: persist sync failure for %d: %v", id, err)
+	}
+	s.publishSyncFailure(id, message)
 }
 
 func (s *Service) setSyncFailure(ctx context.Context, id int64, message string) error {
@@ -751,12 +788,36 @@ func (s *Service) normalizeUpsertRequest(ctx context.Context, req UpsertRequest)
 	req.Name = strings.TrimSpace(req.Name)
 	req.URL = strings.TrimSpace(req.URL)
 
+	// The URL used to be stored unchecked: an empty or non-http(s) value was
+	// accepted here and only failed at sync time with a raw transport error —
+	// or, when run by the scheduler, silently left the row looking "enabled"
+	// but never syncing.
+	u, err := url.Parse(req.URL)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return UpsertRequest{}, errors.New("url must be an http(s) subscription URL")
+	}
+
 	headersJSON, err := normalizeHeadersJSON(req.HeadersJSON)
 	if err != nil {
 		return UpsertRequest{}, err
 	}
 	req.HeadersJSON = headersJSON
 	req.FetchProxy = strings.TrimSpace(req.FetchProxy)
+
+	// fetch_proxy resolves to direct on ANY value it cannot parse — a typo
+	// like "driect" silently downgraded the fetch to a direct connection while
+	// the user believed it went through the pool. Reject values that are
+	// neither a known alias nor a parseable URL.
+	switch strings.ToLower(req.FetchProxy) {
+	case "", "none", "direct", "pool", "7892", "single", "chain", "7893":
+		// empty/none = direct; the rest are local-exit aliases resolved at
+		// fetch time.
+	default:
+		pu, err := url.Parse(req.FetchProxy)
+		if err != nil || pu.Scheme == "" || pu.Host == "" {
+			return UpsertRequest{}, errors.New("fetch_proxy must be empty, none, an alias (direct/pool/chain), or a proxy URL")
+		}
+	}
 
 	if req.SyncIntervalSec <= 0 {
 		st, err := s.settingsSvc.Get(ctx)
@@ -849,6 +910,12 @@ func needsStoredSubscriptionNodeUpdate(existing storedSubscriptionNode, next nod
 }
 
 func (s *Service) clientFor(sub models.Subscription) *http.Client {
+	// "none" is an explicit direct fetch — the default client honours
+	// HTTP(S)_PROXY env vars, which is a different answer than what the
+	// operator asked for.
+	if strings.EqualFold(strings.TrimSpace(sub.FetchProxy), "none") {
+		return s.directClient
+	}
 	proxyURL := s.resolveFetchProxy(sub.FetchProxy)
 	if proxyURL == nil {
 		return s.client
@@ -925,6 +992,13 @@ func (s *Service) doWithRetry(req *http.Request, retryCount int, client *http.Cl
 	}
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
+		// Back-off waits must observe ctx: a cancelled sync (request dropped,
+		// shutdown) used to keep sleeping out the whole retry schedule.
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		default:
+		}
 		cloned := req.Clone(req.Context())
 		resp, err := client.Do(cloned)
 		if err == nil {
@@ -932,7 +1006,9 @@ func (s *Service) doWithRetry(req *http.Request, retryCount int, client *http.Cl
 				_ = resp.Body.Close()
 				lastErr = fmt.Errorf("subscription fetch failed: %s", resp.Status)
 				if attempt < attempts-1 {
-					time.Sleep(time.Duration(attempt+1) * 400 * time.Millisecond)
+					if err := sleepOrDone(req.Context(), time.Duration(attempt+1)*400*time.Millisecond); err != nil {
+						return nil, err
+					}
 					continue
 				}
 				return nil, lastErr
@@ -941,10 +1017,23 @@ func (s *Service) doWithRetry(req *http.Request, retryCount int, client *http.Cl
 		}
 		lastErr = err
 		if attempt < attempts-1 {
-			time.Sleep(time.Duration(attempt+1) * 300 * time.Millisecond)
+			if err := sleepOrDone(req.Context(), time.Duration(attempt+1)*300*time.Millisecond); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return nil, lastErr
+}
+
+func sleepOrDone(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // syncWorkers bounds concurrent subscription syncs. Without it, every due
@@ -1038,15 +1127,29 @@ func (s *Service) DisableBlocked(ctx context.Context) (int, error) {
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
-	n := 0
-	for _, id := range ids {
-		if _, err := s.store.DB.ExecContext(ctx, `DELETE FROM subscription_nodes WHERE id = ?`, id); err != nil {
-			return n, err
-		}
-		_, _ = s.store.DB.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE source_type = 'subscription' AND source_node_id = ?`, id)
-		n++
+	if len(ids) == 0 {
+		return 0, nil
 	}
-	return n, nil
+	// Node and pool-member deletes must be one transaction: doing them
+	// separately (and swallowing the member delete's error) left orphan
+	// proxy_pool_members pointing at gone nodes.
+	tx, err := s.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE source_type = 'subscription' AND source_node_id = ?`, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM subscription_nodes WHERE id = ?`, id); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
 }
 
 func (s *Service) beginSync(id int64) bool {

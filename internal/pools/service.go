@@ -212,6 +212,13 @@ func (s *Service) UpdateMembers(ctx context.Context, poolID int64, members []Mem
 		if item.SourceType == "" || item.SourceNodeID == 0 {
 			continue
 		}
+		switch item.SourceType {
+		case "manual", "subscription", "free_proxy":
+		default:
+			// Any other string used to be persisted as-is: probes then
+			// resolved the id against the wrong node table.
+			return fmt.Errorf("unknown member source_type %q", item.SourceType)
+		}
 		item.Weight = normalizedMemberWeight(item.Weight)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO proxy_pool_members (pool_id, source_type, source_node_id, enabled, weight, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?)`, poolID, item.SourceType, item.SourceNodeID, boolToInt(item.Enabled), item.Weight, now, now); err != nil {

@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
-type ToastTone = "info" | "success" | "error";
+type ToastTone = "info" | "success" | "warning" | "error";
 
 type ToastItem = {
   id: number;
@@ -86,6 +86,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             className={cn(
               "pointer-events-auto cursor-pointer select-text rounded-2xl border px-3 py-2.5 text-sm shadow-lg backdrop-blur-md transition hover:brightness-[0.98] active:scale-[0.99]",
               item.tone === "success" && "border-success/30 bg-success-bg/95 text-success",
+              item.tone === "warning" && "border-amber-400/40 bg-amber-50/95 text-amber-700 dark:border-amber-500/30 dark:bg-amber-500/15 dark:text-amber-300",
               item.tone === "error" && "border-danger/30 bg-danger-bg/95 text-danger",
               item.tone === "info" && "border-white/60 bg-white/90 text-foreground dark:border-white/10 dark:bg-card/95",
             )}

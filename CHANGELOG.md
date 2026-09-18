@@ -1,3 +1,61 @@
+## Unreleased — 2026-09-19c · 订阅全量审计：URL 校验 + source_type 白名单 + 去重 + 前端同步 UX
+
+### 修复
+- **订阅 URL 入库即校验**：`normalizeUpsertRequest` 原不查 URL——空串、
+  `ftp://`、无 host 的值都能保存，只在同步时报原始传输错误，调度路径下
+  甚至静默（`NewRequest` 失败不不落 `last_error`）。现在 Create/Update
+  要求 http(s)+host；存量脏行同步失败也正确落 `failed`+`last_error`。
+- **`fetch_proxy` 拼错不再静默直连**：任何无法解析的值原样回退直连——
+  打错 `"driect"` 的用户以为走了代理实际没有。现在保存时校验（别名
+  direct/pool/7892/single/chain/7893/none 或合法 URL），前端 placeholder
+  补全别名并对可疑输入即时警告。`fetch_proxy=none` 改用不读环境变量的
+  直连 client（原默认 client 会走 `HTTP(S)_PROXY`）。
+- **混合订阅不再丢节点**：明文行 + base64 行混合的订阅原实现第一段解析
+  命中即返回，base64 行的节点全丢。现在逐行展开 base64（判定含 `://` 或
+  `proxies:` 才拼接），明文/base64/YAML 统一走一条解析路径；>1MB 行的
+  scanner 错误仍如实上报。
+- **同步载荷内重复节点去重**：同一节点在一个载荷里出现两次原样 INSERT
+  两次——两行永久共存、enabled/探测状态各自独立。现在按指纹去重；存量
+  重复行下次同步自动清理（多余行不被匹配即删除）。
+- **probe `source_type` 白名单**：`lookupRuntimeNode`/`updateResult`/
+  `setStatus` 原是 `manual else →subscription` 二分——`free_proxy` 池成员
+  （及任意未校验的 source_type）的 id 撞进 `subscription_nodes`，把探测
+  结果写到不相干节点并插错 source_type 的 probe_history。现在三处显式
+  switch 拒绝未知类型，后台 sweep 跳过 free_proxy（它由自己的验证管线
+  探测），`UpdateMembers` 也只收 manual/subscription/free_proxy。
+- **取消的同步也能写失败状态**：`setSyncFailure` 原用调用方 ctx——请求
+  被断/关闭时写库静默失败，UI 永远显示旧状态。新增 `failSync`：脱离取消
+  的 ctx（5s 预算）写库 + 发事件 + 写失败记日志。
+- **重试退避响应取消**：`doWithRetry` 的 `time.Sleep` 不查 ctx；配合
+  `failure_retry_count` 无上界（settings 只查 ≥0），设 100 就是约 30 分钟
+  盲睡。现在退避可被 ctx 打断，配置上限 20。
+- **订阅节点测试归属校验**：latency/speed handler 原忽略路径 `{id}`，任何
+  nodeID 都返回 queued；现在 `requireSubscriptionNode` 先验证节点属于
+  URL 里的订阅。`writeError` 增加 `ErrNoRows`/`ErrNodeNotFound` → 404。
+- **DisableBlocked 事务化**：节点+池成员删除原是两条独立语句且成员删除
+  `_ =` 吞错——失败一半就留孤儿 `proxy_pool_members`（手动/订阅两版同
+  病）。现在一个事务，错误如实返回。
+- **`ListPoolCandidates` 补 geoip 过滤**：名单变更后存量 blocked 节点
+  仍出现在选池 UI（`AllRuntimeNodes` 已过滤、候选列表没有），手动/订阅
+  两版同口径补齐。
+- **after-sync 探测丢弃可见**：>512 节点的订阅入队超限被 `_ =` 静默丢弃
+  ——现在统计丢弃数并记日志。
+- **前端同步 UX**：同步按钮 pending 态防连点（后端 "already running" 也
+  映射为友好提示）；同步结果 toast 补 `删除 N` 与首条解析错误（warning
+  级，新增 toast warning 样式）；详情页切订阅的过期响应不再覆盖新数据
+  （seq 守卫）；节点筛选与徽标统一 `effectiveStatus`（disabled 筛选项
+  此前永不命中）；节点操作 per-node pending 防重复入队。
+
+### 测试
+- URL/fetch_proxy 校验拒绝坏值放通好值；同步载荷重复节点去重为 1 行；
+  `failSync` 在已取消 ctx 下仍落 `failed`；`doWithRetry` 对已取消 ctx 立即
+  返回；混合明文+base64 订阅解析出全部节点；解析错误行截断 ~120 字符。
+- probe 对 `free_proxy` source_type 三处拒绝；`UpdateMembers` 拒绝未知
+  source_type 放通白名单。
+- 前端 `tsc --noEmit && vite build` 通过。
+
+---
+
 ## Unreleased — 2026-09-19b · 继续完善：CF 超时/HTTPS 代理 + 链式握手预算 + 克隆身份 + 接入指引
 
 ### 修复

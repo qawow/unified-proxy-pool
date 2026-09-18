@@ -344,6 +344,11 @@ func (s *Service) ListPoolCandidates(ctx context.Context) ([]models.PoolMemberVi
 		if err := rows.Scan(&item.SourceNodeID, &item.DisplayName, &item.Protocol, &item.Server, &item.Port, &item.Enabled, &item.LastStatus, &item.LastLatencyMS, &item.LastSpeedMbps); err != nil {
 			return nil, err
 		}
+		// Same country filter as AllRuntimeNodes: without it a node stored
+		// before the blocklist changed still showed up as a pool candidate.
+		if geoip.Active().BlockedNode(item.Server, item.DisplayName) {
+			continue
+		}
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -426,16 +431,33 @@ func (s *Service) DisableBlocked(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n := 0
+	var ids []int64
 	for _, item := range items {
-		if !geoip.Active().BlockedNode(item.Server, item.DisplayName) {
-			continue
+		if geoip.Active().BlockedNode(item.Server, item.DisplayName) {
+			ids = append(ids, item.ID)
 		}
-		if _, err := s.store.DB.ExecContext(ctx, `DELETE FROM manual_nodes WHERE id = ?`, item.ID); err != nil {
-			return n, err
-		}
-		_, _ = s.store.DB.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE source_type = 'manual' AND source_node_id = ?`, item.ID)
-		n++
 	}
-	return n, nil
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	// Node and pool-member deletes must be one transaction: doing them
+	// separately (and swallowing the member delete's error) left orphan
+	// proxy_pool_members pointing at gone nodes.
+	tx, err := s.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE source_type = 'manual' AND source_node_id = ?`, id); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM manual_nodes WHERE id = ?`, id); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
 }

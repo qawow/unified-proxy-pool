@@ -28,6 +28,7 @@ export function SubscriptionsPage() {
   const [search, setSearch] = useState("");
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState<Set<number>>(new Set());
 
   const load = useCallback(async () => {
     try {
@@ -90,16 +91,33 @@ export function SubscriptionsPage() {
       } else if (action === "toggle") {
         await endpoints.subscriptions.toggle(id);
       } else {
-        const out = (await endpoints.subscriptions.sync(id)) as {
-          created_count?: number;
-          updated_count?: number;
-          deleted_count?: number;
-          failed_count?: number;
-        } | null;
-        const created = out?.created_count ?? 0;
-        const updated = out?.updated_count ?? 0;
-        const failed = out?.failed_count ?? 0;
-        toast(`同步完成：新增 ${created}，更新 ${updated}，解析失败 ${failed}`, "success");
+        setSyncing((s) => new Set(s).add(id));
+        try {
+          const out = (await endpoints.subscriptions.sync(id)) as {
+            created_count?: number;
+            updated_count?: number;
+            deleted_count?: number;
+            failed_count?: number;
+            errors?: string[];
+          } | null;
+          const created = out?.created_count ?? 0;
+          const updated = out?.updated_count ?? 0;
+          const deleted = out?.deleted_count ?? 0;
+          const failed = out?.failed_count ?? 0;
+          const errs = out?.errors ?? [];
+          const summary = `同步完成：新增 ${created}，更新 ${updated}，删除 ${deleted}`;
+          if (failed > 0 || errs.length > 0) {
+            toast(`${summary}；${errs[0] || `${failed} 个节点解析失败`}`, "warning");
+          } else {
+            toast(summary, "success");
+          }
+        } finally {
+          setSyncing((s) => {
+            const next = new Set(s);
+            next.delete(id);
+            return next;
+          });
+        }
       }
       await load();
     } catch (error) {
@@ -127,9 +145,16 @@ export function SubscriptionsPage() {
                 <Input
                   value={form.fetch_proxy}
                   onChange={(e) => setForm({ ...form, fetch_proxy: e.target.value })}
-                  placeholder="空=直连；direct=单跳7892；chain=链式7893；或 socks5://user:pass@host:port"
+                  placeholder="空/none=直连；direct/pool/7892=单跳出口；chain/7893=链式；或 http(s)://、socks5:// 代理 URL"
                 />
               </Field>
+              {form.fetch_proxy.trim() !== "" &&
+                !["none", "direct", "pool", "7892", "single", "chain", "7893"].includes(form.fetch_proxy.trim().toLowerCase()) &&
+                !/^[a-z][a-z0-9+.-]*:\/\//i.test(form.fetch_proxy.trim()) && (
+                  <p className="-mt-2 text-xs text-amber-600 dark:text-amber-400">
+                    不是已知别名也不是 URL——后端会按无法解析处理并静默回退为直连，请检查拼写。
+                  </p>
+                )}
               <Field label="自定义请求头 JSON">
                 <Textarea
                   rows={4}
@@ -200,7 +225,9 @@ export function SubscriptionsPage() {
                   })}>
                     编辑
                   </Button>
-                  <Button size="sm" variant="secondary" onClick={() => onAction(item.id, "sync")}>同步</Button>
+                  <Button size="sm" variant="secondary" disabled={syncing.has(item.id)} onClick={() => onAction(item.id, "sync")}>
+                    {syncing.has(item.id) ? "同步中…" : "同步"}
+                  </Button>
                   <Button size="sm" variant="secondary" onClick={() => onAction(item.id, "toggle")}>
                     {item.enabled ? "禁用" : "启用"}
                   </Button>

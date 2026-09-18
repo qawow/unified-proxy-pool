@@ -23,42 +23,55 @@ func ParseSubscriptionContent(content string) ParseResult {
 	if looksLikeHTML(content) {
 		return ParseResult{Errors: []error{errors.New("got HTML instead of a subscription")}}
 	}
-	if parsed, errs := nodes.ParseRawNodes(content); len(parsed) > 0 {
-		return ParseResult{Nodes: parsed, Errors: errs}
+	// A line that is not itself a node URI may be a base64 blob holding more
+	// URIs: feeds mix plaintext and encoded lines, and a whole-blob
+	// subscription is just the one-line case. Expanding first keeps a single
+	// parse path — the old two-stage parse returned early on the first good
+	// plaintext node and silently dropped every base64 line's nodes.
+	expanded, scanErr := expandBase64Lines(content)
+	parsed, errs := nodes.ParseRawNodes(expanded)
+	if scanErr != nil {
+		errs = append(errs, fmt.Errorf("scan stopped: %w", scanErr))
 	}
-	if decoded := decodeMaybeBase64(content); decoded != "" {
-		if parsed, errs := nodes.ParseRawNodes(decoded); len(parsed) > 0 {
-			return ParseResult{Nodes: parsed, Errors: errs}
-		}
+	if len(parsed) == 0 && len(errs) == 0 {
+		errs = []error{errors.New("no nodes parsed")}
 	}
+	return ParseResult{Nodes: parsed, Errors: errs}
+}
 
-	var result ParseResult
+// expandBase64Lines splices each base64-encoded line into the URIs it holds.
+// Lines that do not decode into node-looking content are kept as-is so their
+// parse errors still point at the original text. The returned error is the
+// scanner's — a line longer than the 1MB buffer stops Scan silently, and
+// swallowing that made a giant line look like "no nodes parsed".
+func expandBase64Lines(content string) (string, error) {
+	var out strings.Builder
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	scanner.Buffer(make([]byte, 64*1024), 1<<20)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		raw := scanner.Text()
+		line := strings.TrimSpace(raw)
+		if line == "" {
 			continue
 		}
-		node, err := nodes.ParseNodeURI(line)
-		if err != nil {
-			result.Errors = append(result.Errors, err)
+		if decoded := decodeMaybeBase64(line); decoded != "" && looksLikeNodeList(decoded) {
+			out.WriteString(decoded)
+			out.WriteString("\n")
 			continue
 		}
-		result.Nodes = append(result.Nodes, node)
+		// Keep the untrimmed line: Clash YAML depends on indentation, and the
+		// trimmed form flattened `  - {…}` list items to column 0.
+		out.WriteString(raw)
+		out.WriteString("\n")
 	}
-	// scanner.Err() is the only signal that a line exceeded the 1MB buffer:
-	// Scan silently stops and the giant line is dropped, which would otherwise
-	// surface to the operator as "no nodes parsed" with no reason attached.
-	// The nodes package's parser already checks this; the subscription path
-	// shared the bug until here.
-	if err := scanner.Err(); err != nil {
-		result.Errors = append(result.Errors, fmt.Errorf("scan stopped: %w", err))
-	}
-	if len(result.Nodes) == 0 && len(result.Errors) == 0 {
-		result.Errors = append(result.Errors, errors.New("no nodes parsed"))
-	}
-	return result
+	return out.String(), scanner.Err()
+}
+
+// looksLikeNodeList is the cheap gate for splicing decoded content: every
+// supported node URI carries a scheme separator, and Clash YAML names the
+// proxies list.
+func looksLikeNodeList(content string) bool {
+	return strings.Contains(content, "://") || strings.Contains(content, "proxies:")
 }
 
 func looksLikeHTML(content string) bool {

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -519,7 +520,7 @@ func (a *App) handleSubscriptionNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleSubscriptionNodeLatency(w http.ResponseWriter, r *http.Request) {
-	nodeID, ok := requireIDParam(w, r, "nodeID")
+	nodeID, ok := a.requireSubscriptionNode(w, r)
 	if !ok {
 		return
 	}
@@ -531,7 +532,7 @@ func (a *App) handleSubscriptionNodeLatency(w http.ResponseWriter, r *http.Reque
 }
 
 func (a *App) handleSubscriptionNodeSpeed(w http.ResponseWriter, r *http.Request) {
-	nodeID, ok := requireIDParam(w, r, "nodeID")
+	nodeID, ok := a.requireSubscriptionNode(w, r)
 	if !ok {
 		return
 	}
@@ -540,6 +541,26 @@ func (a *App) handleSubscriptionNodeSpeed(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: map[string]bool{"queued": true}})
+}
+
+// requireSubscriptionNode resolves {id}/{nodeID} and verifies the node
+// actually belongs to the subscription in the path — the latency/speed
+// handlers used to probe any node id regardless of which subscription the
+// URL named.
+func (a *App) requireSubscriptionNode(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, ok := requireIDParam(w, r, "id")
+	if !ok {
+		return 0, false
+	}
+	nodeID, ok := requireIDParam(w, r, "nodeID")
+	if !ok {
+		return 0, false
+	}
+	if _, err := a.subscriptions.GetNode(r.Context(), id, nodeID); err != nil {
+		writeError(w, err)
+		return 0, false
+	}
+	return nodeID, true
 }
 
 func (a *App) handleSubscriptionNodeToggle(w http.ResponseWriter, r *http.Request) {
@@ -1133,7 +1154,13 @@ func writeList(w http.ResponseWriter, items interface{}) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
-	writeJSON(w, http.StatusBadRequest, apiResponse{Success: false, Message: err.Error()})
+	status := http.StatusBadRequest
+	// A missing row is a 404, not a 400 — every GET/{id} handler used to
+	// report "no rows" as a client error with a raw sqlite message.
+	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, freproxies.ErrNodeNotFound) {
+		status = http.StatusNotFound
+	}
+	writeJSON(w, status, apiResponse{Success: false, Message: err.Error()})
 }
 
 func parseIDParam(r *http.Request, key string) (int64, error) {

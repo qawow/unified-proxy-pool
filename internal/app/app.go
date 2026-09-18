@@ -241,8 +241,16 @@ func Run() {
 
 	subSvc.SetAfterSyncHook(func(ctx context.Context, subscriptionID int64, nodeIDs []int64) {
 		_ = subscriptionID
+		dropped := 0
 		for _, nodeID := range nodeIDs {
-			_ = probeSvc.EnqueueLatency("subscription", nodeID)
+			// The queue is bounded (512): a big subscription deterministically
+			// loses tail nodes — at least make the drop visible.
+			if err := probeSvc.EnqueueLatency("subscription", nodeID); err != nil {
+				dropped++
+			}
+		}
+		if dropped > 0 {
+			log.Printf("after-sync probe queue full: %d/%d subscription nodes not enqueued", dropped, len(nodeIDs))
 		}
 	})
 	subSvc.AddAfterSyncHook(func(ctx context.Context, subscriptionID int64, nodeIDs []int64) {

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,7 +48,7 @@ func ParseRawNodes(input string) ([]ParsedNode, []error) {
 		}
 		node, err := ParseNodeURI(line)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", line, err))
+			errs = append(errs, fmt.Errorf("%s: %w", truncateNodeLine(line), err))
 			continue
 		}
 		result = append(result, node)
@@ -439,6 +440,19 @@ func stringValue(v any) string {
 	default:
 		return fmt.Sprint(value)
 	}
+}
+
+// truncateNodeLine bounds the node URI echoed into a parse error. The full
+// line can be up to 1MB and carries credentials; it is persisted into
+// subscription last_error and rendered in the UI, so it is capped on a rune
+// boundary.
+func truncateNodeLine(line string) string {
+	const maxRunes = 120
+	if utf8.RuneCountInString(line) <= maxRunes {
+		return line
+	}
+	runes := []rune(line)
+	return string(runes[:maxRunes]) + "…"
 }
 
 func isValidPort(port int) bool {
