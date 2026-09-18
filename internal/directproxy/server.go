@@ -44,6 +44,12 @@ type Server struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
+	// runCtx backs listeners (re)bound after Start; chainBoundAddr is the
+	// address chainLn is actually bound to, which can differ from
+	// cfg.ChainAddr between SetChainOptions and the rebind that follows.
+	runCtx         context.Context
+	chainBoundAddr string
+
 	mu        sync.RWMutex
 	chainHops int
 
@@ -273,6 +279,10 @@ func (s *Server) SetChainOptions(opts ChainOptions) {
 	}
 	s.cfg.ChainEnabled = opts.Enabled
 	s.mu.Unlock()
+	// Rebind the chain listener to match the new options — the old code only
+	// mutated cfg, so the UI showed the new listen address while the listener
+	// stayed on the old one (or never started) until restart.
+	s.syncChainListener()
 	s.rebuildViaPool()
 }
 
@@ -511,9 +521,10 @@ func (s *Server) Start(ctx context.Context) error {
 		return nil
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	s.cancel = cancel
 
 	s.mu.Lock()
+	s.cancel = cancel
+	s.runCtx = runCtx
 	if s.cfg.ListenAddr == "" {
 		s.cfg.ListenAddr = "0.0.0.0:7892"
 	}
@@ -537,19 +548,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.warnIfOpen(cfg.ListenAddr, false)
 	}
 
-	if cfg.ChainEnabled {
-		cln, err := net.Listen("tcp", cfg.ChainAddr)
-		if err != nil {
-			log.Printf("directproxy chain listen skipped: %v", err)
-		} else {
-			s.chainLn = cln
-			s.chainRunning.Store(true)
-			s.wg.Add(1)
-			go s.serveLoop(runCtx, cln, true)
-			log.Printf("directproxy chain (%d-hop) listening on %s", s.ChainHops(), cfg.ChainAddr)
-			s.warnIfOpen(cfg.ChainAddr, true)
-		}
-	}
+	s.syncChainListener()
 
 	s.rebuildViaPool()
 	go func() {
@@ -565,6 +564,44 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 	return nil
+}
+
+// syncChainListener makes the live chain listener match cfg.ChainEnabled /
+// cfg.ChainAddr. SetChainOptions used to mutate cfg only: the UI then showed
+// the new listen address while traffic still arrived on the old port — or,
+// after an enable toggle, on no port at all until restart.
+func (s *Server) syncChainListener() {
+	s.mu.Lock()
+	wantAddr := s.cfg.ChainAddr
+	wantEnabled := s.cfg.ChainEnabled
+	if s.chainLn != nil && (!wantEnabled || s.chainBoundAddr != wantAddr) {
+		_ = s.chainLn.Close()
+		s.chainLn = nil
+		s.chainBoundAddr = ""
+		s.chainRunning.Store(false)
+	}
+	bound := ""
+	hops := s.chainHops
+	if wantEnabled && s.chainLn == nil && s.runCtx != nil {
+		cln, err := net.Listen("tcp", wantAddr)
+		if err != nil {
+			log.Printf("directproxy chain listen skipped: %v", err)
+		} else {
+			s.chainLn = cln
+			s.chainBoundAddr = wantAddr
+			s.chainRunning.Store(true)
+			s.wg.Add(1)
+			go s.serveLoop(s.runCtx, cln, true)
+			bound = wantAddr
+		}
+	}
+	s.mu.Unlock()
+	// Logging and warnIfOpen (which RLocks for creds) must happen after
+	// s.mu is released — calling them inside would deadlock.
+	if bound != "" {
+		log.Printf("directproxy chain (%d-hop) listening on %s", hops, bound)
+		s.warnIfOpen(bound, true)
+	}
 }
 
 func (s *Server) serveLoop(ctx context.Context, ln net.Listener, chain bool) {

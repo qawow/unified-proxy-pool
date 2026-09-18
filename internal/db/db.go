@@ -3,14 +3,23 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 type Store struct {
 	DB *sql.DB
+}
+
+// IsDriverError reports whether err came from the sqlite driver itself —
+// an internal failure, not a client mistake. The web layer maps it to 500
+// with a generic message instead of echoing driver internals as a 400.
+func IsDriverError(err error) bool {
+	var se *sqlite.Error
+	return errors.As(err, &se)
 }
 
 const (

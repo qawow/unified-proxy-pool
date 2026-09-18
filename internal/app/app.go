@@ -239,6 +239,23 @@ func Run() {
 	// traffic, or the pool fills with proxies that only work from this host.
 	freeSvc.SetProbeFront(direct.ProbeFront, direct.ChainProbeDial)
 
+	// fetch_proxy aliases must follow the listeners wherever they are bound —
+	// the chain listener can be re-bound by SetChainOptions, and the frozen
+	// SetLocalExits URL would keep dialling the dead old address.
+	subSvc.SetExitResolver(func() (directURL, chainURL string) {
+		directURL, chainURL = cfg.DirectProxyAddr, cfg.ProxyChainAddr
+		if direct != nil {
+			st := direct.Status()
+			if st.ListenAddr != "" {
+				directURL = st.ListenAddr
+			}
+			if st.ChainListenAddr != "" {
+				chainURL = st.ChainListenAddr
+			}
+		}
+		return directURL, chainURL
+	})
+
 	subSvc.SetAfterSyncHook(func(ctx context.Context, subscriptionID int64, nodeIDs []int64) {
 		_ = subscriptionID
 		dropped := 0

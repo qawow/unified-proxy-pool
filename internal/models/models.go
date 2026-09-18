@@ -47,8 +47,12 @@ type Subscription struct {
 	LastError       string     `json:"last_error"`
 	ETag            string     `json:"etag"`
 	LastModified    string     `json:"last_modified"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	// Syncing reports a sync currently in flight — the HTTP sync endpoint is
+	// async now, so this is how the UI keeps a persistent "同步中" state
+	// across reloads and SSE refreshes.
+	Syncing   bool      `json:"syncing"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type SubscriptionListItem struct {

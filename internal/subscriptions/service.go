@@ -36,6 +36,7 @@ type Service struct {
 	directClient   *http.Client
 	directProxyURL string
 	chainProxyURL  string
+	exitResolver   func() (direct, chain string)
 	mu             sync.Mutex
 	syncing        map[int64]struct{}
 	afterSyncHooks []func(context.Context, int64, []int64)
@@ -47,8 +48,39 @@ type Service struct {
 // SetLocalExits tells sync how to interpret fetch_proxy shortcuts
 // "direct"/"7892" and "chain"/"7893".
 func (s *Service) SetLocalExits(directListen, chainListen string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.directProxyURL = localHTTPProxyURL(directListen)
 	s.chainProxyURL = localHTTPProxyURL(chainListen)
+}
+
+// SetExitResolver resolves the local-exit aliases live, instead of the
+// frozen SetLocalExits values. The chain listener can be re-bound at runtime
+// (SetChainOptions), and the frozen URL kept dialling the dead old address.
+func (s *Service) SetExitResolver(fn func() (direct, chain string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.exitResolver = fn
+}
+
+// localExitURL returns the current proxy URL for a local exit; direct=true
+// for the single-hop listener, false for the chain listener.
+func (s *Service) localExitURL(direct bool) string {
+	s.mu.Lock()
+	fn := s.exitResolver
+	directURL, chainURL := s.directProxyURL, s.chainProxyURL
+	s.mu.Unlock()
+	if fn != nil {
+		d, c := fn()
+		if direct {
+			return localHTTPProxyURL(d)
+		}
+		return localHTTPProxyURL(c)
+	}
+	if direct {
+		return directURL
+	}
+	return chainURL
 }
 
 func localHTTPProxyURL(listen string) string {
@@ -197,6 +229,7 @@ func (s *Service) ListWithStats(ctx context.Context) ([]models.SubscriptionListI
 		if err != nil {
 			return nil, err
 		}
+		item.Syncing = s.isSyncing(item.ID)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -206,7 +239,11 @@ func (s *Service) Get(ctx context.Context, id int64) (models.Subscription, error
 	row := s.store.DB.QueryRowContext(ctx, `SELECT id, name, url, headers_json, fetch_proxy, enabled, sync_interval_sec, last_sync_at,
 		last_sync_status, last_error, etag, last_modified, created_at, updated_at
 		FROM subscriptions WHERE id = ?`, id)
-	return scanSubscription(row)
+	item, err := scanSubscription(row)
+	if err == nil {
+		item.Syncing = s.isSyncing(id)
+	}
+	return item, err
 }
 
 func (s *Service) Create(ctx context.Context, req UpsertRequest) (models.Subscription, error) {
@@ -326,12 +363,49 @@ func (s *Service) ToggleNode(ctx context.Context, subscriptionID, nodeID int64) 
 	return s.GetNode(ctx, subscriptionID, nodeID)
 }
 
+// ErrSyncRunning is returned when a sync for this subscription is already in
+// flight — the HTTP handler maps it to 409 instead of the generic 400 the raw
+// string used to produce.
+var ErrSyncRunning = errors.New("subscription sync already running")
+
 func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 	if !s.beginSync(id) {
-		return SyncOutcome{}, errors.New("subscription sync already running")
+		return SyncOutcome{}, ErrSyncRunning
 	}
 	defer s.endSync(id)
+	return s.syncLocked(ctx, id)
+}
 
+// KickSync starts a sync in the background and returns once the sync is
+// known to be startable (not-running, subscription exists). The HTTP
+// endpoint must not hold a request open for a fetch that can take minutes;
+// progress reaches the UI through the subscriptions.sync.* events and the
+// syncing flag on the subscription payload.
+func (s *Service) KickSync(parent context.Context, id int64) error {
+	if !s.beginSync(id) {
+		return ErrSyncRunning
+	}
+	if _, err := s.Get(parent, id); err != nil {
+		s.endSync(id)
+		return err
+	}
+	ctx, cancel := context.WithTimeout(s.rootCtx(parent), 5*time.Minute)
+	go func() {
+		defer cancel()
+		defer s.endSync(id)
+		_, _ = s.syncLocked(ctx, id)
+	}()
+	return nil
+}
+
+func (s *Service) isSyncing(id int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.syncing[id]
+	return ok
+}
+
+func (s *Service) syncLocked(ctx context.Context, id int64) (SyncOutcome, error) {
 	sub, err := s.Get(ctx, id)
 	if err != nil {
 		return SyncOutcome{}, err
@@ -550,7 +624,10 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 }
 
 func (s *Service) AllRuntimeNodes(ctx context.Context) ([]models.RuntimeNode, error) {
-	rows, err := s.store.DB.QueryContext(ctx, `SELECT id, display_name, protocol, server, port, raw_payload, normalized_json, enabled, last_status FROM subscription_nodes`)
+	// Disabled subscriptions keep their rows but drop out of the runtime
+	// inventory — same "offline" semantics as NodeBySource.
+	rows, err := s.store.DB.QueryContext(ctx, `SELECT n.id, n.display_name, n.protocol, n.server, n.port, n.raw_payload, n.normalized_json, n.enabled, n.last_status
+		FROM subscription_nodes n JOIN subscriptions s ON s.id = n.subscription_id WHERE s.enabled = 1`)
 	if err != nil {
 		return nil, err
 	}
@@ -573,6 +650,7 @@ func (s *Service) AllRuntimeNodes(ctx context.Context) ([]models.RuntimeNode, er
 func (s *Service) ListPoolCandidates(ctx context.Context) ([]models.PoolMemberView, error) {
 	rows, err := s.store.DB.QueryContext(ctx, `SELECT n.id, n.display_name, n.protocol, n.server, n.port, n.enabled, n.last_status, n.last_latency_ms, n.last_speed_mbps, s.name
 		FROM subscription_nodes n JOIN subscriptions s ON s.id = n.subscription_id
+		WHERE s.enabled = 1
 		ORDER BY s.name ASC, n.display_name ASC`)
 	if err != nil {
 		return nil, err
@@ -596,11 +674,18 @@ func (s *Service) ListPoolCandidates(ctx context.Context) ([]models.PoolMemberVi
 }
 
 func (s *Service) NodeBySource(ctx context.Context, id int64) (models.RuntimeNode, error) {
-	row := s.store.DB.QueryRowContext(ctx, `SELECT id, display_name, protocol, server, port, raw_payload, normalized_json, enabled, last_status
-		FROM subscription_nodes WHERE id = ?`, id)
+	// A node is publishable only while its parent subscription is enabled —
+	// disabling a subscription takes its nodes offline (publish.go skips
+	// !Enabled members) without dropping the pool membership, so re-enabling
+	// restores them.
+	row := s.store.DB.QueryRowContext(ctx, `SELECT n.id, n.display_name, n.protocol, n.server, n.port, n.raw_payload, n.normalized_json,
+		n.enabled, n.last_status, s.enabled
+		FROM subscription_nodes n JOIN subscriptions s ON s.id = n.subscription_id WHERE n.id = ?`, id)
 	var item models.RuntimeNode
 	item.SourceType = "subscription"
-	err := row.Scan(&item.SourceNodeID, &item.DisplayName, &item.Protocol, &item.Server, &item.Port, &item.RawPayload, &item.NormalizedJSON, &item.Enabled, &item.LastStatus)
+	var nodeEnabled, subEnabled int
+	err := row.Scan(&item.SourceNodeID, &item.DisplayName, &item.Protocol, &item.Server, &item.Port, &item.RawPayload, &item.NormalizedJSON, &nodeEnabled, &item.LastStatus, &subEnabled)
+	item.Enabled = nodeEnabled == 1 && subEnabled == 1
 	return item, err
 }
 
@@ -968,9 +1053,9 @@ func (s *Service) resolveFetchProxy(raw string) *url.URL {
 	}
 	switch strings.ToLower(raw) {
 	case "direct", "pool", "7892", "single":
-		raw = s.directProxyURL
+		raw = s.localExitURL(true)
 	case "chain", "7893":
-		raw = s.chainProxyURL
+		raw = s.localExitURL(false)
 	}
 	if raw == "" {
 		return nil

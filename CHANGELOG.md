@@ -1,3 +1,55 @@
+## Unreleased — 2026-09-19d · 订阅语义收官：禁用=下线 + 链式监听重绑 + 异步同步 + 500 分级
+
+### 修复（语义/行为变更）
+- **订阅 `enabled=0` 现在等于节点下线**：此前只停自动同步，存量节点照常
+  发布进池。`NodeBySource` 改为 JOIN 订阅表取「节点 enabled ∧ 订阅
+  enabled」——发布路径既有的 `!node.Enabled → skip` 让成员节点自动出局，
+  成员关系保留、重新启用即恢复；`AllRuntimeNodes`（探测清单/后台 sweep）
+  与 `ListPoolCandidates`（选池 UI）同步排除；订阅 toggle 现在触发
+  `publishRuntimeAsync` 立即生效。页面注明「禁用订阅会将其节点从出口池
+  下线」。
+- **链式监听运行期重绑**：`SetChainOptions` 原来只改 `cfg.ChainAddr`/
+  `ChainEnabled` 字段——UI 显示新地址，实际监听仍旧端口（enable 切换
+  干脆不生效直到重启）。新增 `syncChainListener`：地址变更/开关切换
+  即关旧开新（`serveLoop` 复用 runCtx），`Start` 也改走同一入口。
+- **`fetch_proxy` 别名动态解析**：`SetLocalExits` 把 direct/chain 别名
+  冻结在启动地址——修了重绑后别名就会打向死端口（两个 bug 此前互相掩
+  盖）。新增 `SetExitResolver`，app 层闭包读 `direct.Status()` 实际监听
+  地址，别名永远指向真实监听。
+- **同步改异步 202 + SSE**：`POST /subscriptions/{id}/sync` 原来把请求
+  阻塞到抓取+解析+入库完成（可达数分钟）。新增 `KickSync`：标记
+  `syncing` → 校验存在 → `rootCtx+5min` 后台跑——立即返回 202；
+  `ErrSyncRunning` 哨兵→409「该订阅正在同步中」。进度走已有的
+  `subscriptions.sync.started/synced/failed` SSE 事件；`Subscription`
+  新增 `syncing` 字段做跨刷新持久 pending。调度器仍走阻塞 `Sync`。
+- **`writeError` 内部错误升 500**：sqlite 驱动错误（modernc
+  `*sqlite.Error`）原样以 400 抛给前端——既是内部错误又泄露驱动细节。
+  新增 `db.IsDriverError` 分类：500 + 固定文案 `"internal error"` +
+  服务端 log 记真错误；404/400 行为不变。
+
+### 前端
+- 列表/详情的同步 pending 改用服务端 `syncing` 字段（跨刷新、跨标签页
+  一致）；点击即 toast「同步已开始」，完成结果由 SSE `subscriptions.
+  synced` 事件渲染为「新增/更新/删除」toast（not_modified 显示「内容未
+  变更」，errors 非空升级 warning）；`sync.failed` 事件出错误 toast。
+- 订阅卡片补 `invalid_nodes` 计数、`sync_interval_sec=0` 显示「手动」、
+  按 `last_sync_at+interval` 推算「下次同步」。
+- 详情页节点列表客户端分页（每页 50，筛选变更重置页码）。
+- fetch_proxy 非法值警告文案更新为「保存会被后端拒绝」。
+
+### 测试
+- 禁用订阅：NodeBySource Enabled=false / AllRuntimeNodes / ListPoolCandidates
+  三路排除，重启用恢复。
+- `KickSync`：立即返回、二次调用 ErrSyncRunning、后台完成落库。
+- fetch_proxy 别名随 resolver 新地址动态解析（模拟重绑）。
+- `SetChainOptions` 改地址后新端口可连旧端口拒绝；disabled→enabled 实际
+  绑定监听（真实 net.Listen 验证）。
+- `writeError`：裸/包装 sqlite.Error→500 通用文案；客户端错误保持 400；
+  ErrNoRows→404。
+- 前端 `tsc --noEmit && vite build` 通过。
+
+---
+
 ## Unreleased — 2026-09-19c · 订阅全量审计：URL 校验 + source_type 白名单 + 去重 + 前端同步 UX
 
 ### 修复

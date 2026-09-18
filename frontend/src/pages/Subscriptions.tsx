@@ -11,6 +11,15 @@ import { useToast } from "@/hooks/useToast";
 import { formatLatency, formatTime } from "@/lib/utils";
 import type { Subscription } from "@/types";
 
+/** nextSyncLabel estimates the next scheduled sync from last_sync_at + interval. */
+function nextSyncLabel(item: Subscription): string {
+  if (!item.enabled || item.sync_interval_sec <= 0) return "—";
+  if (!item.last_sync_at) return "即将";
+  const next = new Date(item.last_sync_at).getTime() + item.sync_interval_sec * 1000;
+  if (next <= Date.now()) return "即将";
+  return formatTime(new Date(next).toISOString());
+}
+
 const emptyForm = {
   id: 0,
   name: "",
@@ -34,6 +43,9 @@ export function SubscriptionsPage() {
     try {
       const data = await endpoints.subscriptions.list();
       setItems(data || []);
+      // The server marks a subscription syncing before the POST returns, so
+      // once a load lands the server-side flag is authoritative.
+      setSyncing(new Set((data || []).filter((i) => i.syncing).map((i) => i.id)));
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", "error");
     } finally {
@@ -45,7 +57,32 @@ export function SubscriptionsPage() {
     void load();
   }, [load]);
 
-  useSse(() => {
+  useSse((event) => {
+    // The async sync reports its outcome over SSE — surface the numbers the
+    // old blocking response used to show in the toast.
+    if (event.type === "subscriptions.synced") {
+      const out = (event.outcome || {}) as {
+        status?: string;
+        created_count?: number;
+        updated_count?: number;
+        deleted_count?: number;
+        failed_count?: number;
+        errors?: string[];
+      };
+      if (out.status === "not_modified") {
+        toast("同步完成：内容未变更", "info");
+      } else {
+        const summary = `同步完成：新增 ${out.created_count ?? 0}，更新 ${out.updated_count ?? 0}，删除 ${out.deleted_count ?? 0}`;
+        const errs = out.errors ?? [];
+        if ((out.failed_count ?? 0) > 0 || errs.length > 0) {
+          toast(`${summary}；${errs[0] || `${out.failed_count} 个节点解析失败`}`, "warning");
+        } else {
+          toast(summary, "success");
+        }
+      }
+    } else if (event.type === "subscriptions.sync.failed") {
+      toast(`同步失败：${(event.message as string) || "未知错误"}`, "error");
+    }
     void load();
   }, [load]);
 
@@ -92,32 +129,9 @@ export function SubscriptionsPage() {
         await endpoints.subscriptions.toggle(id);
       } else {
         setSyncing((s) => new Set(s).add(id));
-        try {
-          const out = (await endpoints.subscriptions.sync(id)) as {
-            created_count?: number;
-            updated_count?: number;
-            deleted_count?: number;
-            failed_count?: number;
-            errors?: string[];
-          } | null;
-          const created = out?.created_count ?? 0;
-          const updated = out?.updated_count ?? 0;
-          const deleted = out?.deleted_count ?? 0;
-          const failed = out?.failed_count ?? 0;
-          const errs = out?.errors ?? [];
-          const summary = `同步完成：新增 ${created}，更新 ${updated}，删除 ${deleted}`;
-          if (failed > 0 || errs.length > 0) {
-            toast(`${summary}；${errs[0] || `${failed} 个节点解析失败`}`, "warning");
-          } else {
-            toast(summary, "success");
-          }
-        } finally {
-          setSyncing((s) => {
-            const next = new Set(s);
-            next.delete(id);
-            return next;
-          });
-        }
+        // 202 async kick-off: the outcome itself arrives over SSE.
+        await endpoints.subscriptions.sync(id);
+        toast("同步已开始", "info");
       }
       await load();
     } catch (error) {
@@ -127,7 +141,7 @@ export function SubscriptionsPage() {
 
   return (
     <div>
-      <PageHeader title="订阅管理" description="导入并管理订阅源" />
+      <PageHeader title="订阅管理" description="导入并管理订阅源；禁用订阅会将其节点从出口池下线" />
       <div className="grid gap-4 xl:grid-cols-[360px_1fr]">
         <Card>
           <CardHeader>
@@ -152,7 +166,7 @@ export function SubscriptionsPage() {
                 !["none", "direct", "pool", "7892", "single", "chain", "7893"].includes(form.fetch_proxy.trim().toLowerCase()) &&
                 !/^[a-z][a-z0-9+.-]*:\/\//i.test(form.fetch_proxy.trim()) && (
                   <p className="-mt-2 text-xs text-amber-600 dark:text-amber-400">
-                    不是已知别名也不是 URL——后端会按无法解析处理并静默回退为直连，请检查拼写。
+                    不是已知别名也不是 URL——保存会被后端拒绝（以前是静默回退直连），请检查拼写。
                   </p>
                 )}
               <Field label="自定义请求头 JSON">
@@ -207,10 +221,15 @@ export function SubscriptionsPage() {
                   <StatusBadge status={item.enabled ? item.last_sync_status || "enabled" : "disabled"} />
                 </div>
                 <div className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
-                  <div>节点：{item.total_nodes ?? 0} / 可用 {item.available_nodes ?? 0}</div>
+                  <div>
+                    节点：{item.total_nodes ?? 0} / 可用 {item.available_nodes ?? 0} / 无效 {item.invalid_nodes ?? 0}
+                  </div>
                   <div>平均延迟：{formatLatency(item.average_latency_ms)}</div>
                   <div>最近同步：{formatTime(item.last_sync_at)}</div>
-                  <div>间隔：{item.sync_interval_sec}s</div>
+                  <div>
+                    间隔：{item.sync_interval_sec > 0 ? `${item.sync_interval_sec}s` : "手动"}
+                    {item.sync_interval_sec > 0 && item.enabled ? ` · 下次：${nextSyncLabel(item)}` : ""}
+                  </div>
                 </div>
                 {item.last_error ? <div className="mt-2 text-xs text-danger">{item.last_error}</div> : null}
                 <div className="mt-3 flex flex-wrap gap-2">

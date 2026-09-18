@@ -22,6 +22,7 @@ export function SubscriptionDetailPage() {
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const [pendingNodes, setPendingNodes] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(0);
   // Guards the async load against stale responses: switching between
   // subscription ids (or an SSE-triggered load racing a manual one) must not
   // let the slower earlier response overwrite the newer data.
@@ -50,9 +51,33 @@ export function SubscriptionDetailPage() {
     void load();
   }, [load]);
 
-  useSse(() => {
+  useSse((event) => {
+    // The async sync reports its outcome over SSE for this subscription.
+    if (event.type === "subscriptions.synced" && Number(event.subscription_id) === Number(id)) {
+      const out = (event.outcome || {}) as {
+        status?: string;
+        created_count?: number;
+        updated_count?: number;
+        deleted_count?: number;
+        failed_count?: number;
+        errors?: string[];
+      };
+      if (out.status === "not_modified") {
+        toast("同步完成：内容未变更", "info");
+      } else {
+        const summary = `同步完成：新增 ${out.created_count ?? 0}，更新 ${out.updated_count ?? 0}，删除 ${out.deleted_count ?? 0}`;
+        const errs = out.errors ?? [];
+        if ((out.failed_count ?? 0) > 0 || errs.length > 0) {
+          toast(`${summary}；${errs[0] || `${out.failed_count} 个节点解析失败`}`, "warning");
+        } else {
+          toast(summary, "success");
+        }
+      }
+    } else if (event.type === "subscriptions.sync.failed" && Number(event.subscription_id) === Number(id)) {
+      toast(`同步失败：${(event.message as string) || "未知错误"}`, "error");
+    }
     void load();
-  }, [load]);
+  }, [load, id]);
 
   // The badge shows "disabled" for disabled nodes regardless of last_status;
   // filtering must use the same effective status or disabled nodes show up
@@ -74,30 +99,29 @@ export function SubscriptionDetailPage() {
     });
   }, [nodes, protocol, search, status]);
 
+  // Client-side paging keeps large subscriptions (hundreds of cards) usable.
+  const PAGE_SIZE = 50;
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount - 1);
+  const paged = filtered.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+
+  // Filters narrowing the result must not leave the pager on an empty page.
+  useEffect(() => {
+    setPage(0);
+  }, [search, status, protocol]);
+
   const sync = async () => {
     setSyncing(true);
     try {
-      const out = (await endpoints.subscriptions.sync(id!)) as {
-        created_count?: number;
-        updated_count?: number;
-        deleted_count?: number;
-        failed_count?: number;
-        errors?: string[];
-      } | null;
-      const errs = out?.errors ?? [];
-      const failed = out?.failed_count ?? 0;
-      const summary = `同步完成：新增 ${out?.created_count ?? 0}，更新 ${out?.updated_count ?? 0}，删除 ${out?.deleted_count ?? 0}`;
-      if (failed > 0 || errs.length > 0) {
-        toast(`${summary}；${errs[0] || `${failed} 个节点解析失败`}`, "warning");
-      } else {
-        toast(summary, "success");
-      }
-      await load();
+      // 202 async kick-off: the outcome itself arrives over SSE.
+      await endpoints.subscriptions.sync(id!);
+      toast("同步已开始", "info");
     } catch (error) {
       const msg = error instanceof Error ? error.message : "同步失败";
-      toast(msg.includes("already running") ? "该订阅正在同步中，请稍候" : msg, "error");
+      toast(msg.includes("already running") || msg.includes("正在同步") ? "该订阅正在同步中，请稍候" : msg, "error");
     } finally {
       setSyncing(false);
+      void load();
     }
   };
 
@@ -130,8 +154,8 @@ export function SubscriptionDetailPage() {
             <Link to="/subscriptions" className="text-sm text-primary hover:underline">
               返回列表
             </Link>
-            <Button onClick={sync} disabled={syncing}>
-              {syncing ? "同步中…" : "立即同步"}
+            <Button onClick={sync} disabled={syncing || !!sub?.syncing}>
+              {syncing || sub?.syncing ? "同步中…" : "立即同步"}
             </Button>
           </>
         }
@@ -170,7 +194,7 @@ export function SubscriptionDetailPage() {
         <CardContent className="space-y-3">
           {loading ? <div className="text-sm text-muted-foreground">加载中...</div> : null}
           {!loading && filtered.length === 0 ? <div className="text-sm text-muted-foreground">暂无节点</div> : null}
-          {filtered.map((node) => (
+          {paged.map((node) => (
             <div key={node.id} className="rounded-md border border-border p-3">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
@@ -200,6 +224,19 @@ export function SubscriptionDetailPage() {
               </div>
             </div>
           ))}
+          {pageCount > 1 ? (
+            <div className="flex items-center justify-between pt-1 text-xs text-muted-foreground">
+              <Button size="sm" variant="secondary" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>
+                上一页
+              </Button>
+              <span>
+                第 {safePage + 1} / {pageCount} 页 · 共 {filtered.length} 个节点
+              </span>
+              <Button size="sm" variant="secondary" disabled={safePage >= pageCount - 1} onClick={() => setPage(safePage + 1)}>
+                下一页
+              </Button>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
     </div>

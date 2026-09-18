@@ -65,6 +65,7 @@ export type Subscription = {
   last_sync_at?: string | null;
   last_sync_status: string;
   last_error: string;
+  syncing?: boolean;
   total_nodes?: number;
   available_nodes?: number;
   invalid_nodes?: number;

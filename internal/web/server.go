@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,6 +27,7 @@ import (
 	"unified-proxy-pool/internal/chanpolicy"
 	"unified-proxy-pool/internal/config"
 	"unified-proxy-pool/internal/crawlers"
+	"unified-proxy-pool/internal/db"
 	"unified-proxy-pool/internal/directproxy"
 	"unified-proxy-pool/internal/events"
 	"unified-proxy-pool/internal/features"
@@ -490,6 +492,9 @@ func (a *App) handleSubscriptionToggle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// Disabled means "nodes offline": republish so the pools drop/restore the
+	// subscription's members immediately instead of at the next sync.
+	a.publishRuntimeAsync()
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: item})
 }
 
@@ -498,12 +503,19 @@ func (a *App) handleSubscriptionSync(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	item, err := a.subscriptions.Sync(r.Context(), id)
+	// Async: the fetch can take minutes (timeouts × retries). The endpoint
+	// returns 202 once the sync is known startable; progress reaches the UI
+	// via the subscriptions.sync.* SSE events and the syncing flag.
+	err := a.subscriptions.KickSync(r.Context(), id)
+	if errors.Is(err, subscriptions.ErrSyncRunning) {
+		writeJSON(w, http.StatusConflict, apiResponse{Success: false, Message: "该订阅正在同步中"})
+		return
+	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: item})
+	writeJSON(w, http.StatusAccepted, apiResponse{Success: true, Data: map[string]bool{"started": true}})
 }
 
 func (a *App) handleSubscriptionNodes(w http.ResponseWriter, r *http.Request) {
@@ -1155,12 +1167,21 @@ func writeList(w http.ResponseWriter, items interface{}) {
 
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
+	message := err.Error()
 	// A missing row is a 404, not a 400 — every GET/{id} handler used to
 	// report "no rows" as a client error with a raw sqlite message.
 	if errors.Is(err, sql.ErrNoRows) || errors.Is(err, freproxies.ErrNodeNotFound) {
 		status = http.StatusNotFound
 	}
-	writeJSON(w, status, apiResponse{Success: false, Message: err.Error()})
+	// Driver-level failures are internal errors: 500 with a generic message
+	// (the real error is logged) rather than leaking sqlite internals to the
+	// client as a 400.
+	if db.IsDriverError(err) {
+		status = http.StatusInternalServerError
+		message = "internal error"
+		log.Printf("web: internal error: %v", err)
+	}
+	writeJSON(w, status, apiResponse{Success: false, Message: message})
 }
 
 func parseIDParam(r *http.Request, key string) (int64, error) {
