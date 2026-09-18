@@ -513,9 +513,8 @@ func (s *Service) Sync(ctx context.Context, id int64) (SyncOutcome, error) {
 			if hook == nil {
 				continue
 			}
-			// Recovered: a panic in an after-sync hook (the latency-probe
-			// trigger is one) used to take down the whole panel, and
-			// context.Background() dropped cancellation and tracing.
+			// Hooks run with a timeout after the sync commits. Recover hook
+			// panics without cancelling work when the HTTP response completes.
 			go func(h func(context.Context, int64, []int64)) {
 				defer func() {
 					if r := recover(); r != nil {
@@ -1005,13 +1004,14 @@ func shouldSyncSubscription(item models.Subscription, now time.Time) bool {
 	return !item.LastSyncAt.Add(time.Duration(item.SyncIntervalSec) * time.Second).After(now)
 }
 
-// rootCtx derives a background context for fire-and-forget work when no request
-// context is available; it still has a deadline so the goroutine cannot linger.
+// rootCtx keeps request values for bounded work that continues after Sync
+// returns. The caller adds a deadline; an HTTP response ending must not cancel
+// an already committed sync's auto-publish hook.
 func (s *Service) rootCtx(parent context.Context) context.Context {
-	if parent != nil && parent.Done() != nil {
-		return parent
+	if parent == nil {
+		return context.Background()
 	}
-	return context.Background()
+	return context.WithoutCancel(parent)
 }
 
 // DisableBlocked permanently deletes subscription nodes the country filter rejects.

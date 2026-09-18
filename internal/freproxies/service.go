@@ -339,9 +339,8 @@ func (s *Service) Overview(ctx context.Context) (Overview, error) {
 	// The pool verdict rides along with the counts it is computed from, so the
 	// home page shows "25 validated" and "usable, but nothing fast" as one
 	// thought instead of two numbers the operator has to interpret.
-	if h := s.Health(ctx); h.Available > 0 || h.RawPending > 0 {
-		ov.PoolHealth = &h
-	}
+	h := s.Health(ctx)
+	ov.PoolHealth = &h
 	s.overviewMu.Lock()
 	s.overviewCache = ov
 	s.overviewAt = time.Now()
@@ -881,9 +880,10 @@ func (s *Service) NotifyValidateBatch(okCount, failCount int) {
 // A nil cause still reads as a plain failure, so nothing regresses when a URL
 // list is empty or every URL was skipped by a cancelled context.
 func validationFailed(cause error) error {
-	// MUTATION: drop the cause; downstream classification degrades to "fail"
-	_ = cause
-	return errValidationFailed
+	if cause == nil {
+		return errValidationFailed
+	}
+	return fmt.Errorf("%w: %w", errValidationFailed, cause)
 }
 
 var errValidationFailed = errors.New("proxy validation failed")

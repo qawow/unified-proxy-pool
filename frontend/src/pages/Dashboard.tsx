@@ -3,6 +3,7 @@ import { Activity, Gauge, Globe2, Radar, Server, ShieldBan, ShieldCheck } from "
 import { endpoints } from "@/api";
 import { PageHeader } from "@/components/PageHeader";
 import { StatCard } from "@/components/StatCard";
+import { PoolHealthCard } from "@/components/PoolHealthCard";
 import { useSse } from "@/components/SseProvider";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/useToast";
@@ -95,8 +96,10 @@ export function DashboardPage() {
     <div className="anim-fade-up">
       <PageHeader
         title="仪表盘"
-        description={`后端 ${data?.backend || "-"} · Redis ${data?.redis_ok ? "已连接" : "内存模式"} · DirectProxy ${direct?.running ? "运行中" : "未运行"}`}
+        description={`后端 ${data?.backend || "-"} · Redis ${data?.backend === "redis" ? (data.redis_ok ? "已连接" : "连接异常") : "未使用"} · DirectProxy ${direct?.running ? "运行中" : "未运行"}`}
       />
+
+      {vis("health") && data?.pool_health && <PoolHealthCard health={data.pool_health} />}
 
       {(vis("available") || vis("health")) && (
       <div className="mb-5 grid gap-4 md:grid-cols-2 anim-stagger">
@@ -111,9 +114,9 @@ export function DashboardPage() {
         ) : null}
         {vis("health") ? (
         <StatCard
-          title="节点健康率"
+          title="校验通过占比"
           value={healthRate}
-          hint={`健康 ${formatNum(data?.validated_proxies)} / 总计 ${formatNum(data?.total_proxies)}`}
+          hint={`已通过 ${formatNum(data?.validated_proxies)} / 含待验总数 ${formatNum(data?.total_proxies)}`}
           icon={ShieldCheck}
           tone="mint"
           badge={`${formatNum(data?.total_proxies)} IP`}

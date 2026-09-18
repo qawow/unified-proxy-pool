@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { endpoints } from "@/api";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -103,6 +103,8 @@ export function PoolsPage() {
   const [protocolFilter, setProtocolFilter] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const memberRequest = useRef(0);
+  const [memberState, setMemberState] = useState<"ready" | "loading" | "error">("ready");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showJsonEditor, setShowJsonEditor] = useState(false);
   const [jsonDraft, setJsonDraft] = useState("{}");
@@ -224,6 +226,8 @@ export function PoolsPage() {
   };
 
   const resetForm = () => {
+    memberRequest.current++;
+    setMemberState("ready");
     setForm(emptyForm);
     setSelected(new Map());
     setShowAdvanced(false);
@@ -233,6 +237,9 @@ export function PoolsPage() {
   };
 
   const editPool = async (pool: ProxyPool) => {
+    const request = ++memberRequest.current;
+    setMemberState("loading");
+    setSelected(new Map());
     const advRaw = pool.strategy_advanced_json || "{}";
     setForm({
       id: pool.id,
@@ -263,14 +270,19 @@ export function PoolsPage() {
       list.forEach((m) => {
         if (m.enabled !== false) map.set(keyOf(m.source_type, m.source_node_id), m.weight || 1);
       });
+      if (request !== memberRequest.current) return;
       setSelected(map);
+      setMemberState("ready");
     } catch (error) {
+      if (request !== memberRequest.current) return;
+      setMemberState("error");
       toast(error instanceof Error ? error.message : "加载成员失败", "error");
     }
   };
 
   const onSubmit = async (event: FormEvent) => {
     event.preventDefault();
+    if (saving || memberState !== "ready") return;
     setSaving(true);
     try {
       // ensure json draft synced if editor open
@@ -672,8 +684,10 @@ export function PoolsPage() {
                 )}
               </div>
 
-              <div className="space-y-2 rounded-2xl border border-white/60 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5">
-                <div className="text-sm font-medium">节点选择器</div>
+              {memberState === "loading" && <p role="status" className="text-sm text-muted-foreground">正在加载此池成员，完成后可保存...</p>}
+              {memberState === "error" && <p role="alert" className="text-sm text-danger">成员加载失败，已暂停保存。请重新点击该池的「编辑」重试。</p>}
+              <fieldset disabled={saving || memberState !== "ready"} className="space-y-2 rounded-2xl border border-white/60 bg-white/40 p-3 dark:border-white/10 dark:bg-white/5">
+                <legend className="text-sm font-medium">节点选择器</legend>
                 <div className="grid gap-2">
                   <Input placeholder="搜索候选节点" value={search} onChange={(e) => setSearch(e.target.value)} />
                   <div className="grid grid-cols-2 gap-2">
@@ -757,13 +771,13 @@ export function PoolsPage() {
                     );
                   })}
                 </div>
-              </div>
+              </fieldset>
 
               <div className="flex gap-2">
-                <Button type="submit" disabled={saving}>
+                <Button type="submit" disabled={saving || memberState !== "ready"}>
                   {saving ? "保存中..." : "保存"}
                 </Button>
-                <Button type="button" variant="secondary" onClick={resetForm}>
+                <Button type="button" variant="secondary" disabled={saving} onClick={resetForm}>
                   清空
                 </Button>
               </div>
@@ -801,7 +815,7 @@ export function PoolsPage() {
                   </div>
                   {pool.last_error ? <div className="mt-2 text-xs text-danger">{pool.last_error}</div> : null}
                   <div className="mt-3 flex flex-wrap gap-2">
-                    <Button size="sm" variant="secondary" onClick={() => void editPool(pool)}>
+                    <Button size="sm" variant="secondary" disabled={saving} onClick={() => void editPool(pool)}>
                       编辑
                     </Button>
                     <Button size="sm" variant="secondary" onClick={() => void poolAction(pool.id, "publish")}>

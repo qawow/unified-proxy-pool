@@ -41,6 +41,11 @@ func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item.Traffic = traffic.Get(r.Context())
+	if item.PoolHealth != nil {
+		h := *item.PoolHealth // never mutate the cached overview's snapshot
+		h.LastFailReasons = validator.LiveLastBatch().FailReasons
+		item.PoolHealth = &h
+	}
 	if a.channels != nil {
 		item.ChannelCount, item.ChannelBans = a.channels.Totals()
 	}
@@ -92,6 +97,7 @@ func (a *App) handlePoolHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := a.free.Health(r.Context())
+	h.LastFailReasons = validator.LiveLastBatch().FailReasons
 	writeJSON(w, http.StatusOK, apiResponse{Success: true, Data: h})
 }
 

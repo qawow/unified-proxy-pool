@@ -1,4 +1,65 @@
-## Unreleased — 2026-09-18 · 全量审核修复：质量分桶倒置 + 两处数据竞争
+## Unreleased — 2026-09-19 · 子代理审计修复：健康数据接线 + 成员误删 + 上下文生命周期
+
+三个只读子代理（UX/代理可靠性/订阅与测试）基于 HEAD 逐项核实后，本轮修复
+以下确认缺陷；未能核实为缺陷的（CF 测速混合出口、CF https 代理、链式握手
+预算、country.go 认证缺失等）记录在改进清单，不在本轮改动。
+
+### 修复
+- **出口池健康度前后端真正接线**：后端早有 `pool_health`（判定/延迟三档/
+  中位延迟/建议），但（a）`LastFailReasons` 从 store 读取而两个 store 实现
+  从不填充——健康接口永远拿不到失败原因；（b）前端 `Overview` 类型没有该
+  字段、仪表盘不渲染。现在健康接口与 overview 都注入 validator 最近批次的
+  真实失败原因（timeout/connect/tls 计数），仪表盘新增「免费代理出口池」
+  卡片：人话判定 + 建议 + 快/一般/慢分布 + 失败原因胶囊 + 指向代理列表/
+  校验页/设置的链接；空池与存储不可用区分展示，unknown 状态不显示统计。
+- **健康读取失败不再伪装成"空池"**：store 读失败（Redis 断连、请求取消）
+  原来按零值走 `empty` 判定并缓存 3 秒，运维会被引向"校验器在消化队列"。
+  现在返回 `unknown` 状态 + 检查存储的提示；取消的请求不污染共享缓存。
+- **发布不再误删存活成员**：成员解析把一切查询错误当作"节点不存在"直接
+  DELETE——免费节点 `RuntimeNodeByID` 只扫前 500 条，成员掉出窗口或 Redis
+  瞬时故障就被永久减员，甚至发布成空池回退裸出口。现在分页扫完整个已验证
+  集并返回 `ErrNodeNotFound` 哨兵；只有真正不存在才清理，其他错误中止发布
+  并保留成员。
+- **手动同步后的自动发布不再被响应取消打断**：after-sync 钩子继承 HTTP
+  请求 context，响应结束即取消，出现"同步成功、运行配置还是旧的"。改用
+  `context.WithoutCancel`（保留 trace 值，2 分钟超时仍然生效）。
+- **链式失败评分落库**：拨号 attempt 结束立即 cancel，随后用已取消的
+  attempt ctx 调 `MarkValidated`——go-redis 拒绝已取消 ctx，Redis 失败
+  计分静默丢失，坏节点保持分数被反复选中。改用请求 ctx（父请求取消时不
+  记分），回归测试用 miniredis 验证 FailCount 真实落库。
+- **校验失败保留真实原因**：`validationFailed` 在 HEAD 中被 MUTATION 丢弃
+  cause（`_ = cause; return errValidationFailed`），timeout/TLS/refused 全
+  退化为 fail。恢复 `%w: %w` 包装，新增回归测试断言 `errors.Is` 链路。
+- **设置页链式配置回弹**：useMemo 里运行态 `chain_options` 覆盖编辑中的
+  `feature.chain`——改 12000 显示回 8000，"立即应用"提交旧值。交换合并
+  顺序，编辑值优先。
+- **切换出口池不再串台/误存**：编辑池 A 时成员异步未到就保存，会把空列表
+  写进池 A；快速切到池 B，A 的迟到响应覆盖 B 的选择。加请求代数 + 成员
+  加载状态：未加载完成禁用保存、迟到响应丢弃、失败显式提示并暂停保存。
+- **仪表盘 Redis 状态如实显示**：Redis 断连时原来显示"内存模式"（误导，
+  实际不可写），backend=redis 但 redis_ok=false 时显示"连接异常"。
+- **"节点健康率"改为"校验通过占比"**：原指标分子是已验证数、分母含待验
+  库存——往 raw 池加数据反而让"健康率"下降。改用不误导的名称并在提示里
+  写明口径。
+- **策略竞争测试真正对抗**：原测试写方用 `s`、读方每轮 new 一个 Service，
+  根本没竞争共享字段。重写为同一 `*Service` 上并发 Set/Pick（-race）。
+
+### 测试
+- miniredis 全链路：链式 502 失败 → FailCount 落库且退出可用集。
+- 真实入口错误链：TestProxyURLs 断言 `errors.Is(err, context.DeadlineExceeded)`
+  且 `errors.Is(err, errValidationFailed)`。
+- 健康 API 三端点（/api/pool/health、/api/overview、/api/validator/queues）
+  经真实 validator 批次注入 timeout 失败，断言 `last_fail_reasons.timeout=1`。
+- 内存/Redis 两 store 的健康档位聚合（含延迟 0 的待测档、偶数中位数取值）。
+- 存储错误→unknown、空池→empty 且只读一次（缓存生效）、取消刷新不覆盖缓存。
+- after-sync 钩子在请求 cancel 后仍完成（带 deadline、保留 request 值）。
+- 前端 PoolHealthCard 三状态（degraded 带原因胶囊/empty/unknown）SSR 渲染
+  断言（esbuild bundle + react-dom/server）。
+- 全 25 个测试包 `-race` 全清；前端 `tsc --noEmit && vite build` 通过。
+
+---
+
+
 
 全量审核（并发/一致性/测试缺口/安全四个维度，逐条核实代码）后修复的
 真实缺陷。审核报告中的大量「高危」项经核实已在历史提交修复（空凭证

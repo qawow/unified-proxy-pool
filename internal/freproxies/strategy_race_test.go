@@ -6,45 +6,36 @@ import (
 	"time"
 )
 
-// TestSetPickDefaultsConcurrentRead: SetPickDefaults is hot-applied from the
-// settings handler while Pick reads the default strategy on every proxy
-// selection. Unlocked, that is a live data race under concurrent client load.
-// This pins both sides behind the RWMutex; a widening back to plain field
-// access fails under -race.
+// Readers and the settings writer must use the same Service to exercise the
+// shared defaultStrategy field under the race detector.
 func TestSetPickDefaultsConcurrentRead(t *testing.T) {
-	store := NewMemoryStore()
-	s := NewService(store, nil, nil, false)
-
+	s := newPickService(t, proxyAt("198.51.100.19", 8080, 90, 100))
+	s.SetPickDefaults("weighted", time.Second)
+	start := make(chan struct{})
 	var wg sync.WaitGroup
-	done := make(chan struct{})
-
-	// Writer: the settings handler saving a new strategy.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		<-start
 		for i := 0; i < 400; i++ {
 			s.SetPickDefaults("weighted", time.Second)
 			s.SetPickDefaults("random", time.Second)
 		}
-		close(done)
 	}()
-
-	// Readers: the selection path reading the default, concurrently.
 	for g := 0; g < 6; g++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for {
-				select {
-				case <-done:
+			<-start
+			for i := 0; i < 200; i++ {
+				result, err := s.Pick(t.Context(), PickOptions{N: 1, NoCooldown: true})
+				if err != nil || len(result.Items) != 1 {
+					t.Errorf("concurrent Pick: items=%d err=%v", len(result.Items), err)
 					return
-				default:
 				}
-				store := NewMemoryStore()
-				svc := NewService(store, nil, nil, false)
-				_, _ = svc.Pick(t.Context(), PickOptions{N: 1})
 			}
 		}()
 	}
+	close(start)
 	wg.Wait()
 }

@@ -3,6 +3,7 @@ package freproxies
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"slices"
@@ -61,18 +62,32 @@ func (s *Service) ListPoolCandidates(ctx context.Context, limit int) ([]models.P
 	return out, nil
 }
 
+// ErrNodeNotFound reports that the id is genuinely absent from the store.
+// Transient backend failures return the underlying error instead, so callers
+// (pool publishing) can avoid reaping live members.
+var ErrNodeNotFound = errors.New("free proxy node not found")
+
 func (s *Service) RuntimeNodeByID(ctx context.Context, id int64) (models.RuntimeNode, error) {
-	// scan scored then raw
-	result, err := s.store.List(ctx, ListFilter{Page: 1, Size: 500})
-	if err != nil {
-		return models.RuntimeNode{}, err
-	}
-	for _, p := range result.Items {
-		if NodeID(p.Addr) == id {
-			return toRuntimeNode(p), nil
+	// Pool members are always validated candidates, so the scored set covers
+	// them; with MaxValidatedProxies=2000 the first page usually suffices, but
+	// keep paging until the advertised total is exhausted so a member that
+	// fell behind the first window is found instead of reaped as an orphan.
+	const pageSize = int64(MaxListSize)
+	for page := int64(1); page <= MaxListPage; page++ {
+		result, err := s.store.List(ctx, ListFilter{Page: int(page), Size: int(pageSize)})
+		if err != nil {
+			return models.RuntimeNode{}, err
+		}
+		for _, p := range result.Items {
+			if NodeID(p.Addr) == id {
+				return toRuntimeNode(p), nil
+			}
+		}
+		if int64(len(result.Items)) < pageSize || int64(len(result.Items)) >= result.Total {
+			break
 		}
 	}
-	return models.RuntimeNode{}, fmt.Errorf("free proxy id %d not found", id)
+	return models.RuntimeNode{}, fmt.Errorf("%w: id %d", ErrNodeNotFound, id)
 }
 
 func (s *Service) AllRuntimeNodes(ctx context.Context, limit int) ([]models.RuntimeNode, error) {

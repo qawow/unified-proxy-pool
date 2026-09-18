@@ -306,6 +306,21 @@ export type TrafficSnapshot = {
   updated_at?: string;
 };
 
+export type PoolHealth = {
+  available: number;
+  status: "healthy" | "degraded" | "slow" | "critical" | "empty" | "unknown";
+  verdict: string;
+  advice?: string;
+  fast: number;
+  usable: number;
+  slow: number;
+  unknown_latency?: number;
+  median_latency_ms: number;
+  fastest_latency_ms: number;
+  raw_pending: number;
+  last_fail_reasons?: Record<string, number>;
+};
+
 export type Overview = {
   total_proxies: number;
   validated_proxies: number;
@@ -323,6 +338,7 @@ export type Overview = {
   traffic?: TrafficSnapshot;
   channel_bans?: number;
   channel_count?: number;
+  pool_health?: PoolHealth;
 };
 
 export type DirectProxyStatus = {

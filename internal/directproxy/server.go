@@ -1002,7 +1002,7 @@ func (s *Server) dialChainWithFailover(ctx context.Context, target string) (net.
 		// was picked again on the next attempt. The via/VPS hop is user config,
 		// not a pool member, so it is never scored here.
 		if blame, ok := culpritHop(err); ok && blame.Source != "exit_via" && blame.Addr != "" {
-			_ = s.free.Store().MarkValidated(dialCtx, blame.Addr, 0, false)
+			_ = s.free.Store().MarkValidated(ctx, blame.Addr, 0, false)
 			if s.free.Hot() != nil {
 				s.free.Hot().Invalidate(blame.Addr)
 			}

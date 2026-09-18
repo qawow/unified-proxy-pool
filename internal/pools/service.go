@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -400,6 +401,17 @@ func (s *Service) runtimeMembersForPool(ctx context.Context, pool models.ProxyPo
 
 	var result []models.RuntimeNode
 	orphans := 0
+	reapOrphan := func(ref memberRef) {
+		orphans++
+		// A member whose source node is gone. Deletions cascade now, but a
+		// row written before that fix — or a node dropped by a sync on an
+		// older binary — still lands here, and silently shrinking the pool
+		// is how an empty pool ends up falling back to a bare egress.
+		if _, err := s.store.DB.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE pool_id = ? AND source_type = ? AND source_node_id = ?`,
+			pool.ID, ref.SourceType, ref.SourceNodeID); err != nil {
+			log.Printf("pools: failed to reap orphaned member %s/%d: %v", ref.SourceType, ref.SourceNodeID, err)
+		}
+	}
 	for _, ref := range refs {
 		if !ref.Enabled {
 			continue
@@ -409,32 +421,45 @@ func (s *Service) runtimeMembersForPool(ctx context.Context, pool models.ProxyPo
 		var found bool
 		switch ref.SourceType {
 		case "manual":
-			if n, err := s.manualNodes.NodeBySource(ctx, ref.SourceNodeID); err == nil {
+			n, err := s.manualNodes.NodeBySource(ctx, ref.SourceNodeID)
+			switch {
+			case err == nil:
 				node, found = n, true
+			case errors.Is(err, sql.ErrNoRows):
+				reapOrphan(ref)
+				continue
+			default:
+				// A transient backend failure must not shrink the pool.
+				return nil, fmt.Errorf("resolve manual node %d: %w", ref.SourceNodeID, err)
 			}
 		case freproxies.SourceTypeFree:
 			if s.free == nil {
 				orphans++
 				continue
 			}
-			if n, err := s.free.RuntimeNodeByID(ctx, ref.SourceNodeID); err == nil {
+			n, err := s.free.RuntimeNodeByID(ctx, ref.SourceNodeID)
+			switch {
+			case err == nil:
 				node, found = n, true
+			case errors.Is(err, freproxies.ErrNodeNotFound):
+				reapOrphan(ref)
+				continue
+			default:
+				return nil, fmt.Errorf("resolve free proxy %d: %w", ref.SourceNodeID, err)
 			}
 		default:
-			if n, err := s.subscriptions.NodeBySource(ctx, ref.SourceNodeID); err == nil {
+			n, err := s.subscriptions.NodeBySource(ctx, ref.SourceNodeID)
+			switch {
+			case err == nil:
 				node, found = n, true
+			case errors.Is(err, sql.ErrNoRows):
+				reapOrphan(ref)
+				continue
+			default:
+				return nil, fmt.Errorf("resolve subscription node %d: %w", ref.SourceNodeID, err)
 			}
 		}
 		if !found {
-			// A member whose source node is gone. Deletions cascade now, but a
-			// row written before that fix — or a node dropped by a sync on an
-			// older binary — still lands here, and silently shrinking the pool
-			// is how an empty pool ends up falling back to a bare egress.
-			orphans++
-			if _, err := s.store.DB.ExecContext(ctx, `DELETE FROM proxy_pool_members WHERE pool_id = ? AND source_type = ? AND source_node_id = ?`,
-				pool.ID, ref.SourceType, ref.SourceNodeID); err != nil {
-				log.Printf("pools: failed to reap orphaned member %s/%d: %v", ref.SourceType, ref.SourceNodeID, err)
-			}
 			continue
 		}
 		for range copies {

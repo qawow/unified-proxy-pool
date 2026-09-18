@@ -87,11 +87,11 @@ export function SettingsPage() {
     const fromFeat = (settings?.feature as { chain?: ChainOptions } | undefined)?.chain;
     const fromStatus = direct?.chain_options;
     return defaultChain({
-      ...fromFeat,
       ...fromStatus,
-      hops: settings?.proxy_chain_hops ?? fromStatus?.hops ?? fromFeat?.hops ?? 2,
-      enabled: fromStatus?.enabled ?? fromFeat?.enabled ?? direct?.chain_enabled ?? true,
-      listen_addr: fromStatus?.listen_addr || fromFeat?.listen_addr || direct?.chain_listen_addr || "0.0.0.0:7893",
+      ...fromFeat,
+      hops: settings?.proxy_chain_hops ?? fromFeat?.hops ?? fromStatus?.hops ?? 2,
+      enabled: fromFeat?.enabled ?? fromStatus?.enabled ?? direct?.chain_enabled ?? true,
+      listen_addr: fromFeat?.listen_addr ?? fromStatus?.listen_addr ?? direct?.chain_listen_addr ?? "0.0.0.0:7893",
     });
   }, [settings, direct]);
 
